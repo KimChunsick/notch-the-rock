@@ -45,8 +45,15 @@ scripts/build-plugin.sh Plugins/Clock --out ~/out     # ~/out/Clock.notchplugin
 Clock.notchplugin/Contents/
 ├── Info.plist        # PluginManifest에서 만들어요
 ├── MacOS/Clock       # 플러그인 실행 파일(dylib)
-└── Resources/
+└── Resources/        # SwiftPM 리소스 번들(<패키지>_<타깃>.bundle)
 ```
+
+`Package.swift`에서 타깃의 `resources:`에 적은 파일은 SwiftPM이 dylib 옆에 `<패키지>_<타깃>.bundle`로
+묶어 두고, 스크립트가 이 번들을 모두 `Contents/Resources`로 복사해요. 플러그인 코드에서는 이 번들을
+`Bundle.module` 대신 `context.resourceBundle(named:)`로 열어요. `Bundle.module`은 앱 옆과 빌드 폴더에서만
+번들을 찾아서, 빌드 폴더가 남아 있는 컴퓨터에서만 동작하고 다른 컴퓨터에서는 앱을 멈춰요. `Clock` 패키지의
+`Clock` 타깃이라면 `context.resourceBundle(named: "Clock_Clock")`이고, 그런 이름의 번들이 없으면 `nil`이
+돌아와요.
 
 `Info.plist`에는 아래 키가 들어가요. 값은 코드에 적은 `PluginManifest`에서 읽어 오니 손으로 고칠 필요가 없어요.
 
@@ -86,6 +93,7 @@ PROBE="$(swift build -c release --package-path SDK/NotchKit/Probe --show-bin-pat
 | `진입 함수를 찾지 못했어요` | 아래 진입 함수가 있는지 확인해요. |
 | `진입 함수가 돌려준 값이 이 앱의 NotchKit 타입이 아니에요.` | 번들이나 실행 파일에 NotchKit이 따로 들어갔어요. `build-plugin.sh`로 다시 빌드해요. |
 | `Info.plist의 식별자(...)와 PluginManifest의 id(...)가 달라요.` | `Info.plist`를 손으로 고쳤다면 다시 빌드해요. |
+| `실행 파일이 번들 밖을 가리켜요.` | 실행 파일 경로에 번들 밖을 가리키는 심볼릭 링크가 있어요. 링크를 지우고 `build-plugin.sh`로 다시 빌드해요. |
 
 ## 4. 설치하기
 
@@ -163,6 +171,7 @@ public final class ClockPlugin: NotchPlugin {
 | 사용자에게 묻기 | `await requestAttention(AttentionRequest(...)) -> AttentionResponse` |
 | 펼치기와 접기 | `expand()` (이 플러그인의 탭을 연 채로 펼쳐요), `collapse()` |
 | 저장소 | `storage.directory`, `storage.defaults`, `storage.keychainData(for:)`, `setKeychainData(_:for:)`, `deleteKeychainData(for:)` |
+| 번들과 리소스 | `bundleURL` (설치된 `.notchplugin` 번들), `resourceBundle(named:)` (없으면 `nil`) |
 | 권한 | `permissions.isAccessibilityTrusted`, `permissions.requestAccessibility()` |
 | 기록 | `log.debug(_:)`, `log.info(_:)`, `log.error(_:)` |
 
