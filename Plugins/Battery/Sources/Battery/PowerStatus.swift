@@ -33,7 +33,8 @@ struct PowerStatus: Equatable, Sendable {
               let current = description[kIOPSCurrentCapacityKey] as? Int,
               let max = description[kIOPSMaxCapacityKey] as? Int, max > 0
         else { return nil }
-        percentage = Int((Double(current) * 100 / Double(max)).rounded())
+        // Integer division like pmset (`_charge*100/_FCCap`): 3030/4000 is 75%, not 76%.
+        percentage = current * 100 / max
         isExternalPowerConnected = description[kIOPSPowerSourceStateKey] as? String == kIOPSACPowerValue
         isCharging = description[kIOPSIsChargingKey] as? Bool ?? false
         isFinishingCharge = description[kIOPSIsFinishingChargeKey] as? Bool ?? false

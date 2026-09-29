@@ -84,6 +84,17 @@ private func battery(
     #expect(status.percentage == 75)
 }
 
+// pmset prints `current * 100 / max` in integer arithmetic, so a fractional percentage is cut off
+// rather than rounded: 3030/4000 is 75% and 3999/4000 is 99%, never 100%.
+@Test(arguments: [
+    (3030, 4000, 75),
+    (3999, 4000, 99),
+])
+func R10__fractional_percentage_truncates_like_pmset(current: Int, max: Int, percentage: Int) throws {
+    let status = try #require(PowerStatus(description: battery(current: current, max: max, state: "Battery Power", charging: false)))
+    #expect(status.percentage == percentage)
+}
+
 @Test func R10__descriptions_other_than_a_present_internal_battery_are_ignored() {
     var ups = battery(current: 50, state: "AC Power", charging: false)
     ups["Type"] = "UPS"

@@ -42,15 +42,39 @@ private func pmsetBatt() throws -> PmsetReading? {
     )
 }
 
+/// An IOKit reading and a `pmset -g batt` reading taken while neither source changed. The two are
+/// read twice, interleaved (IOKit, pmset, IOKit, pmset), so a level or state change landing between
+/// any two reads makes one source differ from its own second read instead of passing as a mismatch.
+/// Only the compared fields count: the remaining time moves too often to wait for.
+private func stableReadings(attempts: Int = 5) throws -> (status: PowerStatus, pmset: PmsetReading)? {
+    for attempt in 1...attempts {
+        let status = PowerSourceMonitor.read()
+        let pmset = try pmsetBatt()
+        let statusAgain = PowerSourceMonitor.read()
+        let pmsetAgain = try pmsetBatt()
+        if let status, let pmset, let statusAgain, let pmsetAgain,
+           (status.percentage, status.state, status.isExternalPowerConnected)
+               == (statusAgain.percentage, statusAgain.state, statusAgain.isExternalPowerConnected),
+           (pmset.percentage, pmset.state, pmset.isExternalPowerConnected)
+               == (pmsetAgain.percentage, pmsetAgain.state, pmsetAgain.isExternalPowerConnected) {
+            return (status, pmset)
+        }
+        if attempt < attempts { Thread.sleep(forTimeInterval: 1) }
+    }
+    return nil
+}
+
 @Test(.enabled(if: PowerSourceMonitor.read() != nil, "this Mac has no internal battery"))
 func R10__live_power_source_matches_pmset() throws {
-    let status = try #require(PowerSourceMonitor.read())
-    let pmset = try #require(try pmsetBatt(), "pmset -g batt printed no internal battery line")
+    let (status, pmset) = try #require(
+        try stableReadings(),
+        "IOKit and pmset -g batt gave no stable internal battery reading in 5 attempts"
+    )
 
     print("pmset: \(pmset.line) | external power: \(pmset.isExternalPowerConnected)")
     print("model: \(status.percentageText); \(status.state); \(status.stateTitle); \(status.remainingText ?? "-") | external power: \(status.isExternalPowerConnected)")
 
-    #expect(abs(status.percentage - pmset.percentage) <= 1)
+    #expect(status.percentage == pmset.percentage)
     #expect(status.state == pmset.state)
     #expect(status.isExternalPowerConnected == pmset.isExternalPowerConnected)
 }
