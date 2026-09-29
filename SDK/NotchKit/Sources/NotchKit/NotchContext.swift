@@ -27,13 +27,16 @@ public protocol NotchHost: AnyObject {
 @MainActor
 public final class NotchContext {
     public let pluginID: String
+    /// The plugin's installed `.notchplugin` bundle.
+    public let bundleURL: URL
     public let storage: PluginStorage
     public let permissions: PermissionCenter
     public let log: PluginLogger
     private let host: any NotchHost
 
-    public init(pluginID: String, host: any NotchHost, storage: PluginStorage) {
+    public init(pluginID: String, bundleURL: URL, host: any NotchHost, storage: PluginStorage) {
         self.pluginID = pluginID
+        self.bundleURL = bundleURL
         self.host = host
         self.storage = storage
         self.permissions = PermissionCenter(pluginID: pluginID, host: host)
@@ -71,6 +74,15 @@ public final class NotchContext {
 
     public func collapse() {
         host.collapse(from: pluginID)
+    }
+
+    /// A SwiftPM resource bundle that `build-plugin.sh` copied into this plugin's
+    /// `Contents/Resources`, or nil when there is none by that name. SwiftPM names it
+    /// `<package>_<target>`: `Clock_Clock` for target `Clock` of package `Clock`. Use this instead
+    /// of `Bundle.module`, which looks next to the app and in the build folder, not in the installed
+    /// plugin, and stops the app when neither has the bundle.
+    public func resourceBundle(named name: String) -> Bundle? {
+        Bundle(url: bundleURL.appendingPathComponent("Contents/Resources/\(name).bundle"))
     }
 }
 

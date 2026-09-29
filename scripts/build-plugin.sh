@@ -9,7 +9,9 @@
 # Bundle layout:
 #   <Name>.notchplugin/Contents/Info.plist      derived from the plugin's PluginManifest
 #   <Name>.notchplugin/Contents/MacOS/<Name>    the plugin dylib
-#   <Name>.notchplugin/Contents/Resources/
+#   <Name>.notchplugin/Contents/Resources/      SwiftPM resource bundles (<package>_<target>.bundle)
+# Bundle.module looks next to the app and in the build folder, never in the installed plugin, so
+# plugins open their resource bundles with NotchContext.resourceBundle(named:).
 # The dylib links NotchKit only as @rpath/libNotchKit.dylib and finds it in the host app's
 # Contents/Frameworks (@loader_path/../../../../Frameworks from Contents/PlugIns/<Name>.notchplugin/
 # Contents/MacOS); the bundle never carries its own NotchKit. It is signed with the local identity
@@ -64,7 +66,8 @@ has_rpath() {
 
 say "빌드해요: $name (release)"
 swift build -c release --package-path "$package" --product "$name" >&2 || fail "플러그인 패키지를 빌드하지 못했어요: $package"
-dylib="$(swift build -c release --package-path "$package" --show-bin-path)/lib$name.dylib"
+bin_path=$(swift build -c release --package-path "$package" --show-bin-path)
+dylib="$bin_path/lib$name.dylib"
 [ -f "$dylib" ] || fail "동적 라이브러리를 찾지 못했어요: $dylib. Package.swift에 .library(name: \"$name\", type: .dynamic, ...)가 있어야 해요."
 
 # Single-copy rule: exactly one NotchKit reference, and it must be the shared @rpath dylib.
@@ -79,6 +82,12 @@ bundle="$stage/$name.notchplugin"
 binary="$bundle/Contents/MacOS/$name"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 cp "$dylib" "$binary"
+# SwiftPM writes each target's resources, including those of the plugin's dependencies, as a
+# <package>_<target>.bundle next to the dylib.
+for resources in "$bin_path"/*.bundle; do
+    [ -d "$resources" ] || continue
+    cp -R "$resources" "$bundle/Contents/Resources/"
+done
 # @loader_path would pick up a NotchKit copy placed next to the plugin; the host's copy is the only one.
 if has_rpath "$binary" '@loader_path'; then
     install_name_tool -delete_rpath '@loader_path' "$binary" 2>/dev/null

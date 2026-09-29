@@ -17,6 +17,8 @@ public struct PluginBundleInfo: Hashable, Sendable {
     public let identifier: String
     public let sdkVersion: SDKVersion
     public let entrySymbol: String
+    /// `Contents/MacOS/<CFBundleExecutable>` as declared. `PluginLoader.load` opens its real path
+    /// only when that stays inside the bundle.
     public let executableURL: URL
 
     public init(contentsOf bundleURL: URL) throws {
@@ -35,7 +37,8 @@ public struct PluginBundleInfo: Hashable, Sendable {
         let identifier = try value("CFBundleIdentifier")
         guard PluginManifest.isValidIdentifier(identifier) else { throw PluginLoadError.invalidIdentifier(identifier) }
         let executable = try value("CFBundleExecutable")
-        // The executable must stay inside the bundle, which is what the user consents to.
+        // The executable must stay inside the bundle, which is what the user consents to. The name is
+        // checked here; symlinks are resolved and checked by `containedExecutableURL()` before loading.
         guard !executable.contains("/"), executable != ".", executable != ".." else {
             throw PluginLoadError.invalidExecutableName(executable)
         }
@@ -47,6 +50,25 @@ public struct PluginBundleInfo: Hashable, Sendable {
         self.sdkVersion = sdkVersion
         self.entrySymbol = (plist[PluginBundleKey.entrySymbol] as? String) ?? NotchPluginEntry.defaultSymbol
         self.executableURL = bundleURL.appendingPathComponent("Contents/MacOS").appendingPathComponent(executable)
+    }
+
+    /// The executable's real path with every symlink resolved, refused when it leaves the bundle:
+    /// a link in the bundle must not bring in code from elsewhere.
+    func containedExecutableURL() throws -> URL {
+        let executable = try Self.realPath(executableURL)
+        guard executable.hasPrefix(try Self.realPath(bundleURL) + "/") else {
+            throw PluginLoadError.executableOutsideBundle(executableURL.path)
+        }
+        return URL(fileURLWithPath: executable)
+    }
+
+    private static func realPath(_ url: URL) throws -> String {
+        guard let resolved = realpath(url.path, nil) else {
+            let reason = String(cString: strerror(errno))
+            throw PluginLoadError.openFailed("\(url.path): \(reason)")
+        }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 }
 
@@ -60,15 +82,17 @@ public struct LoadedPlugin {
 @MainActor
 public enum PluginLoader {
     /// Loads a bundle the way the app does: rejects an incompatible `NotchKitSDKVersion` before any
-    /// plugin code runs, then opens the executable, resolves the entry symbol and checks the
-    /// manifest against the bundle. Plugin code runs from `dlopen` on, so user consent and hash
-    /// checks must happen before this call. Loaded binaries are never unloaded.
+    /// plugin code runs, then resolves the executable's real path, refuses it when it leaves the
+    /// bundle, opens that path, resolves the entry symbol and checks the manifest against the
+    /// bundle. Plugin code runs from `dlopen` on, so user consent and hash checks must happen before
+    /// this call. Loaded binaries are never unloaded.
     public static func load(_ info: PluginBundleInfo) throws -> LoadedPlugin {
         let host = NotchKitSDK.version
         guard host.supports(info.sdkVersion) else {
             throw PluginLoadError.incompatibleSDK(required: info.sdkVersion, host: host)
         }
-        let plugin = try resolve(binary: info.executableURL, symbol: info.entrySymbol)
+        // Resolved right before opening, so a link swapped in after the bundle was read is refused too.
+        let plugin = try resolve(binary: try info.containedExecutableURL(), symbol: info.entrySymbol)
         guard plugin.manifest.id == info.identifier else {
             throw PluginLoadError.identifierMismatch(bundle: info.identifier, manifest: plugin.manifest.id)
         }
@@ -104,6 +128,7 @@ public enum PluginLoadError: Error, Hashable, CustomStringConvertible {
     case missingKey(String)
     case invalidIdentifier(String)
     case invalidExecutableName(String)
+    case executableOutsideBundle(String)
     case malformedSDKVersion(String)
     case incompatibleSDK(required: SDKVersion, host: SDKVersion)
     case openFailed(String)
@@ -123,6 +148,8 @@ public enum PluginLoadError: Error, Hashable, CustomStringConvertible {
             return "플러그인 식별자가 역도메인 형식(예: com.example.clock)이 아니에요: \(id)"
         case .invalidExecutableName(let name):
             return "CFBundleExecutable 값은 번들 안 Contents/MacOS에 있는 파일 이름이어야 해요: \(name)"
+        case .executableOutsideBundle(let path):
+            return "실행 파일이 번들 밖을 가리켜요. 번들 밖에 있는 코드는 불러오지 않아요: \(path)"
         case .malformedSDKVersion(let text):
             return "\(PluginBundleKey.sdkVersion) 값은 '주.부' 형식(예: 1.0)이어야 해요: \(text)"
         case .incompatibleSDK(let required, let host) where required.major != host.major:

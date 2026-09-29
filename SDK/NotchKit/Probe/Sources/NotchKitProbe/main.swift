@@ -40,7 +40,7 @@ func probeBundle(at path: String) throws -> [String] {
         defaultsSuiteName: "notchkit-probe.\(id)",
         keychainService: "notchkit-probe.\(id)"
     )
-    let plugin = loaded.pluginType.init(context: NotchContext(pluginID: id, host: ProbeHost(), storage: storage))
+    let plugin = loaded.pluginType.init(context: NotchContext(pluginID: id, bundleURL: info.bundleURL, host: ProbeHost(), storage: storage))
     return [
         "bundle: \(info.bundleURL.path)",
         "id: \(loaded.manifest.id)",

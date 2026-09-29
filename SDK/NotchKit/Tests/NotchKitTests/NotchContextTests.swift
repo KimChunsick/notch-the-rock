@@ -68,7 +68,7 @@ func makeContext(_ host: RecordingHost, id: String = "com.example.sample") throw
         defaultsSuiteName: "NotchKitTests.\(id)",
         keychainService: "NotchKitTests.\(id)"
     )
-    return NotchContext(pluginID: id, host: host, storage: storage)
+    return NotchContext(pluginID: id, bundleURL: directory.deletingLastPathComponent().appendingPathComponent("Sample.notchplugin"), host: host, storage: storage)
 }
 
 @MainActor

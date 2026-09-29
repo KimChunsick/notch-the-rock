@@ -1,7 +1,8 @@
 #!/bin/bash
 # R03: a plugin scaffolded by new-plugin.sh builds with build-plugin.sh into a .notchplugin that
-# links the shared NotchKit exactly once, notchkit-probe loads it and rejects a wrong SDK major, and
-# check-plugin-deps.sh rejects plugins that depend on anything but NotchKit.
+# links the shared NotchKit exactly once, carries its SwiftPM resources where the installed plugin
+# finds them, notchkit-probe loads it and rejects a wrong SDK major, and check-plugin-deps.sh rejects
+# plugins that depend on anything but NotchKit, ignoring imports inside comments and strings.
 # Requires bash 3.2 or later.
 set -uo pipefail
 
@@ -88,6 +89,43 @@ R03__probe_rejects_wrong_major_sdk() {
     contains "$output" '주 버전' || fail "reason does not say the major version differs"
 }
 
+R03__installed_plugin_finds_its_resources() {
+    current=${FUNCNAME[0]}
+    local built output status installed="$WORK/Installed/Plugins/Sample.notchplugin"
+    local source="$WORK/Sample/Sources/Sample/SamplePlugin.swift"
+    [ -d "$WORK/Sample" ] || { fail "no Sample package to add a resource to"; return; }
+    # A SwiftPM resource that the plugin reads the way the docs tell plugin authors to: through its
+    # context, from the installed bundle. The tab title shows what it read.
+    mkdir -p "$WORK/Sample/Sources/Sample/Resources"
+    printf 'greeting-from-resources\n' >"$WORK/Sample/Sources/Sample/Resources/greeting.txt"
+    perl -pi -e 's/(\.product\(name: "NotchKit", package: "NotchKit"\)\])\)/$1, resources: [.copy("Resources\/greeting.txt")])/' "$WORK/Sample/Package.swift"
+    perl -pi -e 's/PluginTab\(title: "Sample"/PluginTab(title: greeting/' "$source"
+    cat >>"$source" <<'EOF'
+
+extension SamplePlugin {
+    var greeting: String {
+        guard let url = context.resourceBundle(named: "Sample_Sample")?.url(forResource: "greeting", withExtension: "txt"),
+              let text = try? String(contentsOf: url, encoding: .utf8)
+        else { return "resource missing" }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+EOF
+    built=$("$ROOT/scripts/build-plugin.sh" "$WORK/Sample" --out "$WORK/resources-out") || { fail "build-plugin.sh failed on a plugin with resources"; return; }
+    (cd "$built" && find . -path './Contents/Resources*' -print)
+    [ -f "$built/Contents/Resources/Sample_Sample.bundle/greeting.txt" ] || fail "the resource bundle is not in Contents/Resources"
+    codesign --verify --deep --strict "$built" || fail "bundle with resources does not verify"
+    # Installed on its own: the package and its build folder, where Bundle.module would look, are gone.
+    mkdir -p "$(dirname "$installed")"
+    cp -R "$built" "$installed"
+    rm -rf "$WORK/Sample" "$WORK/resources-out"
+    output=$(probe "$installed" 2>&1)
+    status=$?
+    printf '%s\n(exit %s)\n' "$output" "$status"
+    [ "$status" -eq 0 ] || { fail "notchkit-probe exited $status"; return; }
+    contains "$output" 'expandedTab: greeting-from-resources' || fail "the installed plugin did not read its resource"
+}
+
 # write_fixture <plugins-dir> <Name> <extra package dependency or ""> <extra target dependency or ""> <import or "">
 write_fixture() {
     local dir="$1/$2"
@@ -135,12 +173,52 @@ R03__check_plugin_deps_rejects_app_and_plugin_dependencies() {
     ! contains "$output" 'Good:' || fail "the clean plugin was reported"
 }
 
+R03__check_plugin_deps_ignores_imports_in_comments_and_strings() {
+    current=${FUNCNAME[0]}
+    local output status
+    write_fixture "$WORK/quoted" Quoted "" "" ""
+    cat >>"$WORK/quoted/Quoted/Sources/Quoted/Quoted.swift" <<'EOF'
+/*
+import NotchTheRock
+/* a nested comment
+import NotchTheRock
+*/
+import NotchTheRock
+*/
+let example = """
+import NotchTheRock
+"""
+let raw = #"""
+"\(not an interpolation)"
+import NotchTheRock
+"""#
+EOF
+    "$ROOT/scripts/check-plugin-deps.sh" "$WORK/quoted" || fail "imports inside comments or strings were treated as dependencies"
+    # Real imports right after a string with an interpolation and after a line comment still count.
+    write_fixture "$WORK/quoted-bad" Other "" "" ""
+    write_fixture "$WORK/quoted-bad" Sneaky "" "" ""
+    cat >>"$WORK/quoted-bad/Sneaky/Sources/Sneaky/Sneaky.swift" <<'EOF'
+let text = "\("a" + "\"") /* not a comment"
+import NotchTheRock
+// a /* in a line comment opens nothing
+import Other
+EOF
+    output=$("$ROOT/scripts/check-plugin-deps.sh" "$WORK/quoted-bad" 2>&1)
+    status=$?
+    printf '%s\n(exit %s)\n' "$output" "$status"
+    [ "$status" -ne 0 ] || fail "real imports after a string and a line comment were missed"
+    contains "$output" ': NotchTheRock' || fail "the import after the string literal is not named"
+    contains "$output" ': Other' || fail "the import after the line comment is not named"
+}
+
 R03__new_plugin_scaffolds_and_builds
 R03__plugin_links_single_shared_notchkit
 R03__probe_loads_plugin_with_one_notchkit
 R03__probe_rejects_wrong_major_sdk
+R03__installed_plugin_finds_its_resources
 R03__check_plugin_deps_accepts_clean_plugins
 R03__check_plugin_deps_rejects_app_and_plugin_dependencies
+R03__check_plugin_deps_ignores_imports_in_comments_and_strings
 
 if [ "$failures" -ne 0 ]; then
     printf '%d check(s) failed\n' "$failures"

@@ -7,7 +7,8 @@
 # Checks, for every <plugins-dir>/*/Package.swift (read with `swift package dump-package`):
 #   - package dependencies: only the NotchKit package of this repository (SDK/NotchKit)
 #   - target dependencies: only the NotchKit product and the plugin's own targets
-#   - Swift sources: no `import NotchTheRock` and no import of another plugin's module
+#   - Swift sources: no `import NotchTheRock` and no import of another plugin's module; text inside
+#     comments and string literals is not code and is ignored
 # Requires bash 3.2 or later and python3 (part of the Command Line Tools).
 set -euo pipefail
 shopt -s nullglob
@@ -71,6 +72,84 @@ for target in manifest["targets"]:
         if not allowed:
             problems.append(f"타깃 {target['name']}은 NotchKit과 자기 타깃만 의존할 수 있어요: {label}")
 
+string_start = re.compile(r'(#*)("""|")')
+
+def code_only(source):
+    """The source with comments and string literals blanked out. Newlines stay, so line-anchored
+    patterns still see real code at the start of a line. Follows Swift's lexical rules: block
+    comments nest, `#` delimits raw strings, and `\\(` (`\\#(` in raw strings) interpolates code."""
+    out = []
+    end_of_source = len(source)
+
+    def blank(start, end):
+        out.append(re.sub(r"[^\n]", " ", source[start:end]))
+
+    def block_comment_end(i):
+        depth = 0
+        while i < end_of_source:
+            if source.startswith("/*", i):
+                depth, i = depth + 1, i + 2
+            elif source.startswith("*/", i):
+                depth, i = depth - 1, i + 2
+                if depth == 0:
+                    return i
+            else:
+                i += 1
+        return end_of_source
+
+    # Scans code from i. Inside an interpolation it returns at the ")" that closes it.
+    def code(i, interpolation):
+        depth = 0
+        while i < end_of_source:
+            string = string_start.match(source, i)
+            if source.startswith("//", i):
+                end = source.find("\n", i)
+                end = end_of_source if end < 0 else end
+                blank(i, end)
+                i = end
+            elif source.startswith("/*", i):
+                end = block_comment_end(i)
+                blank(i, end)
+                i = end
+            elif string:
+                i = string_literal(i, len(string.group(1)), string.group(2) == '"""')
+            elif interpolation and source[i] == ")" and depth == 0:
+                return i
+            else:
+                if interpolation and source[i] in "()":
+                    depth += 1 if source[i] == "(" else -1
+                out.append(source[i])
+                i += 1
+        return i
+
+    def string_literal(i, hashes, multiline):
+        closing = ('"""' if multiline else '"') + "#" * hashes
+        escape = "\\" + "#" * hashes
+        start = i
+        i += hashes + (3 if multiline else 1)
+        while i < end_of_source:
+            if source.startswith(closing, i):
+                blank(start, i + len(closing))
+                return i + len(closing)
+            if source.startswith(escape, i):
+                after = i + len(escape)
+                if source.startswith("(", after):
+                    blank(start, after + 1)
+                    # The ")" that ends the interpolation is blanked with the rest of the string.
+                    i = start = code(after + 1, True)
+                    i += 1
+                else:
+                    i = after + 1
+            elif not multiline and source[i] == "\n":
+                break  # unterminated; the compiler reports it
+            else:
+                i += 1
+        blank(start, min(i, end_of_source))
+        return min(i, end_of_source)
+
+    code(0, False)
+    return "".join(out)
+
 import_pattern = re.compile(r"^\s*(?:@[\w()]+\s+)*import\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\s+)?(\w+)", re.M)
 for directory, _, files in os.walk(package):
     if "/.build" in directory or "/build" in directory[len(package):]:
@@ -78,7 +157,7 @@ for directory, _, files in os.walk(package):
     for file in files:
         if file.endswith(".swift") and file != "Package.swift":
             path = os.path.join(directory, file)
-            for module in import_pattern.findall(open(path, encoding="utf-8").read()):
+            for module in import_pattern.findall(code_only(open(path, encoding="utf-8").read())):
                 if module in forbidden_modules:
                     problems.append(f"{os.path.relpath(path, package)}에서 NotchKit이 아닌 모듈을 가져와요: {module}")
 
