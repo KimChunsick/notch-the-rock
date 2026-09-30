@@ -15,7 +15,9 @@ final class PluginFixture {
 
     init() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("NotchTheRockTests-\(UUID().uuidString)")
-        suiteName = "NotchTheRockTests.\(UUID().uuidString)"
+        // A suite named by an absolute path is stored in that file instead of ~/Library/Preferences,
+        // so the test leaves nothing behind once `root` is removed.
+        suiteName = root.appendingPathComponent("defaults").path
         locations = PluginLocations(
             // Separate parents: the default file system ignores case, so PlugIns and Plugins would
             // be one folder.
