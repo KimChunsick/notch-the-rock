@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import Testing
 @testable import NotchTheRock
 
@@ -62,30 +62,124 @@ private final class FakePermissions {
         }
     }
 
-    @Test func R13__granting_accessibility_moves_on_to_launch_at_login_by_itself() async {
+    /// Granting a permission while the 권한 step shows is noticed at once and brings the window back;
+    /// once both are on the step moves on by itself. The 로그인 card is not skipped: an Accessibility
+    /// grant alone keeps the step up.
+    @Test func R13__a_grant_on_the_permission_step_is_noticed_and_both_on_moves_on_by_itself() async {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let fake = FakePermissions()
         let model = OnboardingModel(
             permissions: fake.permissions,
             record: OnboardingRecord(defaults: defaults),
-            pollInterval: .milliseconds(10)
+            pollInterval: .milliseconds(10),
+            grantPause: .milliseconds(10)
         )
+        var steppedAside = 0
+        var granted = 0
+        model.onOpenSystemSettings = { steppedAside += 1 }
+        model.onPermissionGranted = { granted += 1 }
         model.start()
-        model.next()
-        #expect(model.step == .accessibility)
+        model.advance()
+        #expect(model.step == .permissions)
         model.requestAccessibility()
         #expect(fake.calls == ["prompt", "accessibility settings"])
+        #expect(steppedAside == 1)
         try? await Task.sleep(for: .milliseconds(50))
-        #expect(model.step == .accessibility, "moved on before Accessibility was granted")
+        #expect(model.step == .permissions, "moved on before Accessibility was granted")
+        #expect(granted == 0)
 
         fake.trusted = true
         let deadline = ContinuousClock.now + .seconds(2)
-        while model.step == .accessibility, ContinuousClock.now < deadline {
+        while model.accessibilityState != .on, ContinuousClock.now < deadline {
             try? await Task.sleep(for: .milliseconds(10))
         }
-        #expect(model.step == .launchAtLogin)
-        #expect(model.isAccessibilityTrusted)
+        #expect(model.accessibilityState == .on)
+        #expect(granted == 1)
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(model.step == .permissions, "the 로그인 시 자동 실행 card is still off")
+
+        model.enableLaunchAtLogin()
+        #expect(model.loginItemState == .on)
+        #expect(granted == 2)
+        while model.step == .permissions, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(model.step == .usage)
+        model.finish()
+    }
+
+    /// Both cards checked wait `grantPause` before the step moves on. A permission turned off in that
+    /// pause keeps the 권한 step up with its card off; turning it on again moves on after a new pause.
+    @Test func R13__turning_a_permission_off_during_the_pause_keeps_the_permissions_step() async {
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let fake = FakePermissions()
+        let model = OnboardingModel(
+            permissions: fake.permissions,
+            record: OnboardingRecord(defaults: defaults),
+            pollInterval: .milliseconds(10),
+            grantPause: .milliseconds(100)
+        )
+        model.start()
+        model.advance()
+        fake.trusted = true
+        let deadline = ContinuousClock.now + .seconds(3)
+        while model.accessibilityState != .on, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(model.accessibilityState == .on)
+
+        model.enableLaunchAtLogin()
+        fake.trusted = false
+        while model.accessibilityState != .off, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        try? await Task.sleep(for: .milliseconds(300))
+        #expect(model.step == .permissions, "Accessibility was turned off during the pause")
+        #expect(model.accessibilityState == .off)
+        #expect(model.loginItemState == .on)
+
+        fake.trusted = true
+        while model.step == .permissions, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(model.step == .usage)
+        model.finish()
+    }
+
+    /// Right before moving on the step reads both permissions again, so one turned off after the
+    /// last poll keeps it up too; a grant after that starts the pause again.
+    @Test func R13__moving_on_reads_both_permissions_again_first() async {
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let fake = FakePermissions()
+        fake.trusted = true
+        let model = OnboardingModel(
+            permissions: fake.permissions,
+            record: OnboardingRecord(defaults: defaults),
+            pollInterval: .milliseconds(300),
+            grantPause: .milliseconds(10)
+        )
+        model.start()
+        model.advance()
+        #expect(model.accessibilityState == .on)
+        model.enableLaunchAtLogin()
+        #expect(model.loginItemState == .on)
+        // Turned off before the first poll: only the read at the end of the pause can see it.
+        fake.trusted = false
+        let deadline = ContinuousClock.now + .seconds(3)
+        while model.accessibilityState != .off, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(model.accessibilityState == .off)
+        #expect(model.step == .permissions)
+
+        fake.trusted = true
+        while model.step == .permissions, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(model.step == .usage)
         model.finish()
     }
 
@@ -96,21 +190,20 @@ private final class FakePermissions {
 
         withRecord { record in
             let fake = FakePermissions()
-            fake.trusted = true
             let model = OnboardingModel(permissions: fake.permissions, record: record, pollInterval: .seconds(60))
-            model.next()
-            #expect(model.step == .launchAtLogin, "an already granted Accessibility step is passed over")
+            model.advance()
+            #expect(model.step == .permissions)
 
             fake.registerError = NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "테스트 오류"])
             model.enableLaunchAtLogin()
             #expect(model.loginItemFailure == "로그인 항목을 등록하지 못했어요: 테스트 오류")
-            #expect(model.loginItemStatus == .notRegistered)
+            #expect(model.loginItemState == .failed("로그인 항목을 등록하지 못했어요: 테스트 오류"))
 
             fake.registerError = nil
             model.enableLaunchAtLogin()
             #expect(model.loginItemFailure == nil)
-            #expect(model.loginItemStatus == .enabled)
-            #expect(model.loginItemStatus.label == "켜져 있어요")
+            #expect(model.loginItemState == .on)
+            #expect(model.loginItemState.label == "켜짐")
         }
     }
 
@@ -169,6 +262,164 @@ private final class FakePermissions {
             #expect(finished == 1)
             #expect(record.isCompleted)
             #expect(!record.showsAtLaunch(arguments: []))
+        }
+    }
+
+    /// Quitting or logging out while the onboarding is open closes its window too; only the user
+    /// finishing it or closing the window may mark it completed.
+    @Test func R13__quitting_the_app_mid_onboarding_does_not_mark_it_completed() {
+        withRecord { record in
+            let model = OnboardingModel(permissions: FakePermissions().permissions, record: record)
+            let controller = OnboardingWindowController(model: model)
+            let window = controller.makeWindow()
+            NotificationCenter.default.post(name: NSApplication.willTerminateNotification, object: nil)
+            window.close()
+            #expect(!model.isFinished)
+            #expect(!record.isCompleted)
+            #expect(record.showsAtLaunch(arguments: []))
+
+            let closedByUser = OnboardingModel(permissions: FakePermissions().permissions, record: record)
+            let otherController = OnboardingWindowController(model: closedByUser)
+            otherController.makeWindow().close()
+            #expect(closedByUser.isFinished)
+            #expect(record.isCompleted)
+        }
+    }
+
+    /// No title bar or traffic lights, a rounded dark translucent background whatever the system
+    /// appearance, and it still becomes key so Enter and Esc reach it. It is sized before it is
+    /// centred, so it opens in the middle of the screen.
+    @Test func R14__window_is_a_borderless_dark_translucent_panel_that_takes_the_keyboard() throws {
+        try withRecord { record in
+            let window = OnboardingWindowController(model: OnboardingModel(permissions: FakePermissions().permissions, record: record))
+                .makeWindow()
+            #expect(!window.styleMask.contains(.titled))
+            #expect(window.canBecomeKey)
+            #expect(window.level == .floating)
+            #expect(!window.hidesOnDeactivate)
+            #expect(window.isMovableByWindowBackground)
+            #expect(!window.isOpaque)
+            #expect(window.backgroundColor == .clear)
+            #expect(window.hasShadow)
+            #expect(window.appearance?.name == .darkAqua)
+
+            let background = try #require(window.contentView as? NSVisualEffectView)
+            #expect(background.blendingMode == .behindWindow)
+            #expect(background.state == .active)
+            #expect(background.maskImage != nil, "rounded corners")
+
+            #expect(window.frame.size == OnboardingWindowController.size)
+            if let screen = NSScreen.main {
+                #expect(abs(window.frame.midX - screen.visibleFrame.midX) < 1, "centred, not its corner at the centre")
+            }
+        }
+    }
+
+    /// Enter (계속, then 시작하기) and Esc (나중에) both call `advance()`: pressing either alone goes
+    /// through the four steps in order and completes, and neither turns a permission on.
+    @Test func R14__enter_or_esc_alone_reaches_the_end_without_turning_anything_on() {
+        withRecord { record in
+            let fake = FakePermissions()
+            let model = OnboardingModel(permissions: fake.permissions, record: record, pollInterval: .seconds(60))
+            var finished = 0
+            model.onFinish = { finished += 1 }
+            var visited = [model.step]
+            while !model.isFinished, visited.count < 10 {
+                model.advance()
+                if !model.isFinished { visited.append(model.step) }
+            }
+            #expect(visited == [.welcome, .permissions, .usage, .done])
+            #expect(model.isFinished)
+            #expect(finished == 1)
+            #expect(record.isCompleted)
+            #expect(fake.calls.isEmpty)
+            #expect(model.accessibilityState == .off)
+            #expect(model.loginItemState == .off)
+            #expect(fake.status == .notRegistered)
+        }
+    }
+
+    /// Each card shows off, on (checked), 허용 필요 or the error. Permissions that are on when the step
+    /// comes up show checked and the step waits for Enter; only a grant made meanwhile moves on.
+    @Test func R14__permission_cards_show_off_on_needs_approval_and_error() async {
+        typealias State = OnboardingModel.PermissionState
+        #expect(State.accessibility(trusted: false) == .off)
+        #expect(State.accessibility(trusted: true) == .on)
+        #expect(State.loginItem(.enabled, failure: nil) == .on)
+        #expect(State.loginItem(.requiresApproval, failure: nil) == .needsApproval)
+        #expect(State.loginItem(.notRegistered, failure: nil) == .off)
+        #expect(State.loginItem(.notFound, failure: nil) == .off)
+        #expect(State.loginItem(.notFound, failure: "로그인 항목을 등록하지 못했어요: 오류") == .failed("로그인 항목을 등록하지 못했어요: 오류"))
+        #expect(State.loginItem(.enabled, failure: "이전 오류") == .on)
+        #expect([State.off, .on, .needsApproval, .failed("오류")].map(\.label) == ["꺼짐", "켜짐", "허용 필요", "오류"])
+
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let fake = FakePermissions()
+        fake.trusted = true
+        fake.status = .requiresApproval
+        let model = OnboardingModel(
+            permissions: fake.permissions,
+            record: OnboardingRecord(defaults: defaults),
+            pollInterval: .milliseconds(10),
+            grantPause: .milliseconds(10)
+        )
+        var granted = 0
+        model.onPermissionGranted = { granted += 1 }
+        model.start()
+        model.advance()
+        #expect(model.accessibilityState == .on)
+        #expect(model.loginItemState == .needsApproval)
+        model.openLoginItemsSettings()
+        #expect(fake.calls == ["login items settings"])
+
+        fake.status = .enabled
+        let deadline = ContinuousClock.now + .seconds(2)
+        while model.step == .permissions, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(granted == 1, "allowed in System Settings")
+        #expect(model.step == .usage)
+        model.finish()
+
+        let alreadyOn = OnboardingModel(
+            permissions: fake.permissions,
+            record: OnboardingRecord(defaults: defaults),
+            pollInterval: .milliseconds(10),
+            grantPause: .milliseconds(10)
+        )
+        alreadyOn.onPermissionGranted = { granted += 1 }
+        alreadyOn.start()
+        alreadyOn.advance()
+        try? await Task.sleep(for: .milliseconds(80))
+        #expect(alreadyOn.step == .permissions, "already on: the checked cards wait for Enter")
+        #expect(alreadyOn.accessibilityState == .on)
+        #expect(alreadyOn.loginItemState == .on)
+        #expect(granted == 1)
+        alreadyOn.finish()
+    }
+
+    /// The floating window would cover the System Settings switch the user has to flip: it drops to
+    /// the normal level when 권한 열기 or 설정 열기 sends the user there. A grant (or a reopen) brings it
+    /// back through `bringForward()`, which floats it again; so does the user clicking the window.
+    @Test func R14__sending_the_user_to_system_settings_steps_the_window_aside() {
+        withRecord { record in
+            let fake = FakePermissions()
+            fake.status = .requiresApproval
+            let model = OnboardingModel(permissions: fake.permissions, record: record, pollInterval: .seconds(60))
+            let controller = OnboardingWindowController(model: model)
+            let window = controller.makeWindow()
+            #expect(window.level == .floating)
+            model.advance()
+            model.requestAccessibility()
+            #expect(window.level == .normal)
+            #expect(model.onPermissionGranted != nil, "a grant brings the window back")
+            controller.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: window))
+            #expect(window.level == .floating)
+
+            model.openLoginItemsSettings()
+            #expect(window.level == .normal)
+            #expect(fake.calls == ["prompt", "accessibility settings", "login items settings"])
         }
     }
 }
