@@ -114,6 +114,50 @@ private final class FakePermissions {
         }
     }
 
+    /// Opening the running app again always shows Settings; this launch's onboarding comes forward
+    /// with it only while its window is open and unfinished.
+    @Test func R13__reopening_always_shows_settings_and_brings_back_an_unfinished_onboarding() {
+        withRecord { record in
+            let model = OnboardingModel(permissions: FakePermissions().permissions, record: record)
+            #expect(ReopenWindows.of(onboarding: model, onboardingWindowIsOpen: true) == [.settings, .onboarding])
+            #expect(ReopenWindows.of(onboarding: model, onboardingWindowIsOpen: false) == [.settings], "during the greeting")
+            model.finish()
+            #expect(ReopenWindows.of(onboarding: model, onboardingWindowIsOpen: false) == [.settings], "onboarding finished")
+
+            // A launch after completion, or with --skip-onboarding, has no onboarding.
+            #expect(!record.showsAtLaunch(arguments: []), "completed")
+            #expect(ReopenWindows.of(onboarding: nil, onboardingWindowIsOpen: false) == [.settings])
+            record.defaults.removeObject(forKey: OnboardingRecord.completedKey)
+            #expect(!record.showsAtLaunch(arguments: ["--skip-onboarding"]))
+            #expect(ReopenWindows.of(onboarding: nil, onboardingWindowIsOpen: false) == [.settings])
+        }
+    }
+
+    /// Another app's window must not bury the onboarding: there is no Dock icon, app switcher entry
+    /// or menu bar icon to bring it back. Settings stays an ordinary window the gear reopens.
+    @Test func R13__app_windows_stay_up_when_another_app_is_used() {
+        withRecord { record in
+            let onboarding = OnboardingWindowController(model: OnboardingModel(permissions: FakePermissions().permissions, record: record))
+                .makeWindow()
+            #expect(onboarding.level == .floating)
+            #expect(!onboarding.hidesOnDeactivate)
+
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(suiteName)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let locations = PluginLocations(
+                builtIn: nil,
+                user: directory.appendingPathComponent("Plugins"),
+                cache: directory.appendingPathComponent("PluginCache"),
+                data: directory.appendingPathComponent("PluginData"),
+                storagePrefix: suiteName
+            )
+            let catalog = PluginCatalog(host: NotchHostModel(), locations: locations, defaults: record.defaults)
+            let settings = SettingsWindowController(catalog: catalog).makeWindow()
+            #expect(settings.level == .normal)
+            #expect(!settings.hidesOnDeactivate)
+        }
+    }
+
     @Test func R13__finishing_or_closing_marks_it_completed_once() {
         withRecord { record in
             let model = OnboardingModel(permissions: FakePermissions().permissions, record: record)

@@ -22,8 +22,9 @@ import OSLog
 //   --reset-onboarding   clears the completed mark first, so this launch shows it again
 // Both together leave a clean first-launch state without showing the window.
 //
-// Opening the app again while it runs (Finder, Spotlight, `open -a NotchTheRock`) brings Settings
-// to the front: an accessory app has no Dock or menu bar icon to click instead.
+// Opening the app again while it runs (Finder, Spotlight, `open -a NotchTheRock`) brings Settings to
+// the front, and this launch's onboarding too while its window is open and unfinished: an accessory
+// app has no Dock or menu bar icon to click instead.
 
 /// The app's own lines in the unified log, where NSLog text is private:
 /// `log show --predicate 'subsystem == "com.notchtherock.NotchTheRock"'`. Declared before the code
@@ -48,7 +49,7 @@ MainActor.assumeIsolated {
     let catalog = PluginCatalog(host: host, locations: .standard)
     let settings = SettingsWindowController(catalog: catalog)
     let window = NotchWindowController(host: host, openSettings: { settings.show() })
-    let delegate = AppDelegate(openSettings: { settings.show() })
+    let delegate = AppDelegate(settings: settings)
     let application = NSApplication.shared
     application.delegate = delegate
     application.setActivationPolicy(.accessory)
@@ -80,6 +81,7 @@ MainActor.assumeIsolated {
     } else {
         appLogger.notice("onboarding not shown (\(onboardingRecord.isCompleted ? "completed" : "--skip-onboarding", privacy: .public))")
     }
+    delegate.onboarding = onboarding
     NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
         MainActor.assumeIsolated { catalog.deactivateAll() }
     }
@@ -89,16 +91,41 @@ MainActor.assumeIsolated {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let openSettings: @MainActor () -> Void
+    private let settings: SettingsWindowController
+    /// This launch's onboarding, when it shows one.
+    var onboarding: OnboardingWindowController?
 
-    init(openSettings: @escaping @MainActor () -> Void) {
-        self.openSettings = openSettings
+    init(settings: SettingsWindowController) {
+        self.settings = settings
     }
 
-    /// Opening the running app again sends a reopen event, also to an accessory app.
+    /// Opening the running app again sends a reopen event, also to an accessory app. It is the way
+    /// back to a window the user lost behind other apps.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        appLogger.notice("reopened, bringing Settings to the front")
-        openSettings()
+        // The onboarding window's delegate is its controller from the moment it opens until it closes.
+        let onboardingWindowIsOpen = onboarding.map { controller in NSApp.windows.contains { $0.delegate === controller } } ?? false
+        let windows = ReopenWindows.of(onboarding: onboarding?.model, onboardingWindowIsOpen: onboardingWindowIsOpen)
+        settings.show()
+        if windows.contains(.onboarding) {
+            // After Settings, so the floating onboarding ends up on top.
+            onboarding?.bringForward()
+            appLogger.notice("reopened, bringing Settings and the unfinished onboarding to the front")
+        } else {
+            appLogger.notice("reopened, bringing Settings to the front")
+        }
         return false
+    }
+}
+
+/// The windows opening the running app again brings to the front, in order.
+enum ReopenWindows: Equatable {
+    case settings
+    case onboarding
+
+    /// Always Settings, then this launch's onboarding while its window is open and unfinished. A
+    /// launch with `--skip-onboarding`, or one after the onboarding was completed, has none; during
+    /// the greeting its window is not open yet and opens by itself when the greeting ends.
+    @MainActor static func of(onboarding: OnboardingModel?, onboardingWindowIsOpen: Bool) -> [ReopenWindows] {
+        onboarding?.isFinished == false && onboardingWindowIsOpen ? [.settings, .onboarding] : [.settings]
     }
 }
