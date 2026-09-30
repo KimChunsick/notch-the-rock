@@ -13,10 +13,17 @@ struct ClipboardStore: Sendable {
 
     let directory: URL
     private let key: SymmetricKey
+    private let writeFile: @Sendable (Data, URL) throws -> Void
 
-    init(directory: URL, key: SymmetricKey) {
+    /// `writeFile` puts sealed bytes at a URL; tests pass one that fails like a full disk.
+    init(
+        directory: URL,
+        key: SymmetricKey,
+        writeFile: @escaping @Sendable (Data, URL) throws -> Void = { try $0.write(to: $1, options: .atomic) }
+    ) {
         self.directory = directory
         self.key = key
+        self.writeFile = writeFile
     }
 
     /// The stored list, empty when none was written yet. Throws when the file cannot be read or
@@ -71,7 +78,7 @@ struct ClipboardStore: Sendable {
     private func write(_ plaintext: Data, to url: URL) throws {
         // `combined` is nil only for nonces of a non-standard size; seal(_:using:) uses 12 bytes.
         let sealed = try AES.GCM.seal(plaintext, using: key).combined!
-        try sealed.write(to: url, options: .atomic)
+        try writeFile(sealed, url)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 

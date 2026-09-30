@@ -18,6 +18,7 @@ final class HistoryWriter: Sendable {
     private let reportError: @Sendable (String) -> Void
     private let queue = DispatchQueue(label: "com.notchtherock.clipboard.history-writer")
     private let pending = OSAllocatedUnfairLock(initialState: Pending())
+    private let written = OSAllocatedUnfairLock(initialState: Set<UUID>())
 
     /// `reportError` is called on the writer's queue.
     init(store: ClipboardStore, reportError: @escaping @Sendable (String) -> Void) {
@@ -44,6 +45,11 @@ final class HistoryWriter: Sendable {
         queue.sync {}
     }
 
+    /// The ids of the entries in the last list written successfully, empty before the first.
+    var writtenIDs: Set<UUID> {
+        written.withLock { $0 }
+    }
+
     private func writePending() {
         let work = pending.withLock { pending in
             defer { pending = Pending() }
@@ -56,6 +62,7 @@ final class HistoryWriter: Sendable {
             reportError("could not save the clipboard history, keeping the images of removed entries: \(error)")
             return
         }
+        written.withLock { $0 = Set(items.map(\.id)) }
         for id in work.imagesToDelete {
             do {
                 try store.deleteImage(for: id)

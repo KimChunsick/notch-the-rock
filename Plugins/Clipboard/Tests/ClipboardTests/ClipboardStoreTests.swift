@@ -153,6 +153,68 @@ import Testing
     #expect(makeHistory(directory: directory, key: key).items == history.items)
 }
 
+/// A reset whose image write fails (a full disk) keeps that entry in the list, pinned and copyable,
+/// with its original in memory, and reports it. The list on disk leaves it out until its file is
+/// written. A retry once the disk takes files again saves the image and a list that refers to it,
+/// and only then lets the original go.
+@MainActor
+@Test func R09__a_reset_keeps_images_it_could_not_save_until_a_retry_saves_them() throws {
+    let directory = try makeDirectory()
+    let old = makeHistory(directory: directory, key: makeKey())
+    old.record(.text("unreadable later"))
+    old.flush()
+
+    let key = makeKey()
+    let fault = ImageWriteFault()
+    let errors = ErrorLog()
+    let history = ClipboardHistory(logError: errors.append)
+    history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
+    #expect(history.isStoreUnreadable)
+    let png = samplePNG(seed: 8)
+    history.record(try #require(ClipCapture(png: png)))
+    history.record(.text("kept after the reset"))
+    let image = try #require(history.items.first { $0.kind == .image })
+    history.setPinned(true, for: image.id)
+    let captured = history.items
+    errors.messages = []
+
+    fault.isFull = true
+    history.resetUnreadableStore()
+    #expect(!history.isStoreUnreadable)
+    #expect(history.items == captured)
+    #expect(history.unsavedImageIDs == [image.id])
+    #expect(errors.messages.count == 1)
+    #expect(history.imageData(for: image) == png)
+    let pasteboard = makePasteboard()
+    defer { pasteboard.releaseGlobally() }
+    #expect(history.copy(image, to: pasteboard))
+    #expect(pasteboard.data(forType: .png) == png)
+
+    history.flush()
+    let imageFile = directory.appendingPathComponent(image.id.uuidString).appendingPathExtension(ClipboardStore.imageExtension)
+    #expect(!FileManager.default.fileExists(atPath: imageFile.path))
+    let saved = makeHistory(directory: directory, key: key)
+    #expect(!saved.isStoreUnreadable)
+    #expect(saved.items.map(\.content) == [.text("kept after the reset")])
+
+    // A retry while the disk is still full keeps the entry as it is.
+    history.saveUnsavedImages()
+    #expect(history.unsavedImageIDs == [image.id])
+    #expect(history.imageData(for: image) == png)
+
+    fault.isFull = false
+    history.saveUnsavedImages()
+    #expect(history.unsavedImageIDs.isEmpty)
+    history.flush()
+    let reloaded = makeHistory(directory: directory, key: key)
+    #expect(reloaded.items == history.items)
+    #expect(reloaded.imageData(for: image) == png)
+
+    // The original has left memory: without its file the image can no longer be read.
+    try FileManager.default.removeItem(at: imageFile)
+    #expect(history.imageData(for: image) == nil)
+}
+
 /// An image file goes only after a list without its entry is on disk: when that write fails the
 /// file stays, so the list still on disk keeps a readable image.
 @MainActor
@@ -207,6 +269,7 @@ private func bytes(of key: SymmetricKey) -> Data {
 
     let history = makeHistory(directory: storage.directory, key: created)
     history.record(.text("encrypted with the keychain key"))
+    history.flush()
     let reused = try HistoryKey.loadOrCreate(in: storage)
     #expect(bytes(of: reused) == bytes(of: created))
     #expect(makeHistory(directory: storage.directory, key: reused).items.map(\.content) == [.text("encrypted with the keychain key")])

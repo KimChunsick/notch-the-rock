@@ -1,6 +1,7 @@
 import AppKit
 import CryptoKit
 import Foundation
+import os
 @testable import Clipboard
 
 /// A private pasteboard for one test. Release it with `releaseGlobally()`; the user's general
@@ -55,6 +56,24 @@ func contents(of directory: URL) throws -> [String: Data] {
         result[String(file.resolvingSymlinksInPath().path.dropFirst(base.count))] = try Data(contentsOf: file)
     }
     return result
+}
+
+/// A disk that refuses image files while `isFull` is on, as a full disk would; the list is written
+/// as usual. Pass `write(_:to:)` as the store's `writeFile`.
+final class ImageWriteFault: Sendable {
+    private let full = OSAllocatedUnfairLock(initialState: false)
+
+    var isFull: Bool {
+        get { full.withLock { $0 } }
+        set { full.withLock { $0 = newValue } }
+    }
+
+    func write(_ data: Data, to url: URL) throws {
+        if isFull && url.pathExtension == ClipboardStore.imageExtension {
+            throw CocoaError(.fileWriteOutOfSpace)
+        }
+        try data.write(to: url, options: .atomic)
+    }
 }
 
 /// Collects what the history reports as errors.

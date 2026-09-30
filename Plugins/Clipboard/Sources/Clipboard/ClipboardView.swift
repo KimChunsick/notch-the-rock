@@ -18,6 +18,18 @@ struct ClipboardView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 8)
             }
+            if !history.unsavedImageIDs.isEmpty {
+                HStack(spacing: 6) {
+                    Label("이미지 \(history.unsavedImageIDs.count)개를 저장하지 못했어요. 앱을 끄면 사라져요.", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                    Spacer(minLength: 4)
+                    Button("다시 시도") { history.saveUnsavedImages() }
+                        .controlSize(.small)
+                }
+                .font(.system(size: 11))
+                .padding(.horizontal, 8)
+            }
             let visible = history.matching(query)
             if history.items.isEmpty {
                 placeholder("복사한 텍스트, 이미지, 링크가 여기에 쌓여요.")
@@ -194,7 +206,8 @@ func relativeTime(from date: Date, to now: Date) -> String {
 }
 
 /// The plugin's section in Settings: how many entries are kept and a button that deletes every
-/// unpinned one. When the stored history cannot be read, a second row offers to reset it.
+/// unpinned one. When the stored history cannot be read, a second row offers to reset it; when
+/// images could not be saved, another offers to try again.
 struct ClipboardSettingsView: View {
     let history: ClipboardHistory
     @State private var isConfirmingClear = false
@@ -222,14 +235,22 @@ struct ClipboardSettingsView: View {
                 Button("초기화", role: .destructive) {
                     isConfirmingReset = true
                 }
-                .confirmationDialog("읽지 못한 기록을 지울까요?", isPresented: $isConfirmingReset) {
+                .confirmationDialog("디스크에 있는 읽지 못한 기록을 지울까요?", isPresented: $isConfirmingReset) {
                     Button("지우고 새로 저장", role: .destructive) { history.resetUnreadableStore() }
                 } message: {
-                    Text("지운 기록은 되살릴 수 없어요. 지금 목록에 있는 기록은 새로 저장해요.")
+                    Text("지우는 건 디스크에 저장돼 있던, 읽지 못한 기록뿐이에요. 지우면 되살릴 수 없어요. 지금 목록에 보이는 기록은 하나도 지우지 않고 새로 저장할게요.")
                 }
             } label: {
                 Text("저장된 기록을 읽지 못했어요")
                 Text("지금은 기록을 저장하지 않아서 앱을 끄면 사라져요. 초기화하면 다시 저장해요.")
+            }
+        }
+        if !history.unsavedImageIDs.isEmpty {
+            LabeledContent {
+                Button("다시 시도") { history.saveUnsavedImages() }
+            } label: {
+                Text("이미지 \(history.unsavedImageIDs.count)개를 저장하지 못했어요")
+                Text("목록에 남아 있어서 다시 복사할 수 있지만, 앱을 끄면 사라져요.")
             }
         }
     }
