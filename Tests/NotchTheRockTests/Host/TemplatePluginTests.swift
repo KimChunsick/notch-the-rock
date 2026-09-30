@@ -8,21 +8,31 @@ struct FixtureFailure: Error, CustomStringConvertible {
 }
 
 /// The template plugin, scaffolded by `scripts/new-plugin.sh` and packaged by
-/// `scripts/build-plugin.sh` once per test process. The package stays in the repository's `.build/`
-/// so later runs rebuild incrementally.
+/// `scripts/build-plugin.sh` once per test process. The scaffold is made again every run, so the test
+/// covers the current template and script; only the package's SwiftPM build folder in the
+/// repository's `.build/` is kept, so the build stays incremental.
 enum SampleFixture {
     static let bundle: Result<URL, FixtureFailure> = build()
 
     private static func build() -> Result<URL, FixtureFailure> {
+        let manager = FileManager.default
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let fixtures = root.appendingPathComponent(".build/test-fixtures")
         let package = fixtures.appendingPathComponent("Sample")
+        // Outside the repository, so new-plugin.sh writes an absolute SDK path that still holds after
+        // the scaffold moves into `package`.
+        let scaffold = manager.temporaryDirectory.appendingPathComponent("NotchTheRockTests-\(UUID().uuidString)")
+        defer { try? manager.removeItem(at: scaffold) }
         do {
-            if !FileManager.default.fileExists(atPath: package.appendingPathComponent("Package.swift").path) {
-                try? FileManager.default.removeItem(at: package)
-                try FileManager.default.createDirectory(at: fixtures, withIntermediateDirectories: true)
-                _ = try run(root.appendingPathComponent("scripts/new-plugin.sh"), ["Sample", "--dir", fixtures.path])
+            let made = try run(root.appendingPathComponent("scripts/new-plugin.sh"), ["Sample", "--dir", scaffold.path])
+            let generated = URL(fileURLWithPath: made.trimmingCharacters(in: .whitespacesAndNewlines))
+            try manager.createDirectory(at: package, withIntermediateDirectories: true)
+            for name in try manager.contentsOfDirectory(atPath: package.path) where name != ".build" {
+                try manager.removeItem(at: package.appendingPathComponent(name))
+            }
+            for name in try manager.contentsOfDirectory(atPath: generated.path) {
+                try manager.moveItem(at: generated.appendingPathComponent(name), to: package.appendingPathComponent(name))
             }
             let out = fixtures.appendingPathComponent("out")
             let built = try run(root.appendingPathComponent("scripts/build-plugin.sh"), [package.path, "--out", out.path])
@@ -80,6 +90,9 @@ enum SampleFixture {
         try catalog.consent(to: installed.path)
         catalog.reload()
         #expect(catalog.records.map(\.state) == [.on])
+        // The app's copy is what loaded; the record still names the bundle in the user folder.
+        #expect(FileManager.default.fileExists(atPath: fixture.locations.cache.appendingPathComponent("com.example.sample/Sample.notchplugin/Contents/MacOS/Sample").path))
+        #expect(catalog.records.first?.bundleURL.path == installed.path)
         #expect(host.tabs.map(\.pluginID) == ["com.example.sample"])
         #expect(host.tabs.first?.tab.title == "Sample")
         #expect(host.liveActivity?.pluginID == "com.example.sample")

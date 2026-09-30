@@ -9,9 +9,10 @@ import NotchKit
 // Debugging: NOTCH_DEBUG_STATE=expanded or NOTCH_DEBUG_STATE=collapsed in the environment pins the
 // notch in that state (the pointer and plugins cannot change it), so it can be captured without a
 // mouse. Any other value, or none, leaves the notch to the pointer.
-// NOTCH_DEBUG_CONSENT=<bundle path> does at launch what the 허락 and 다시 불러오기 buttons in
-// Settings do for that user plugin, without clicking. The path is the listed one:
-// ~/Library/Application Support/NotchTheRock/Plugins/<Name>.notchplugin with ~ expanded.
+// NOTCH_DEBUG_CONSENT=<bundle path>, in debug builds only, does at launch what the 허락 and
+// 다시 불러오기 buttons in Settings do for that user plugin, without clicking. The path is the listed
+// one: ~/Library/Application Support/NotchTheRock/Plugins/<Name>.notchplugin with ~ expanded. Release
+// builds (scripts/build-app.sh) ignore it: consent is given in Settings only.
 MainActor.assumeIsolated {
     if CommandLine.arguments.dropFirst().contains("--print-permissions") {
         print(SystemPermissions.report)
@@ -34,6 +35,7 @@ MainActor.assumeIsolated {
     window.show()
 
     catalog.loadAll()
+    #if DEBUG
     if let path = environment["NOTCH_DEBUG_CONSENT"] {
         do {
             try catalog.consent(to: path)
@@ -42,6 +44,7 @@ MainActor.assumeIsolated {
         }
         catalog.reload()
     }
+    #endif
     for record in catalog.records {
         NSLog("NotchTheRock: plugin %@ (%@): %@", record.identifier ?? record.name, record.source.label, record.stateText)
     }

@@ -10,6 +10,8 @@ struct PluginLocations {
     let builtIn: URL?
     /// `~/Library/Application Support/NotchTheRock/Plugins`: the user's plugins, run only with consent.
     let user: URL
+    /// The app's copies of consented user bundles, the ones that load: see `PluginSnapshots`.
+    let cache: URL
     /// Each plugin's data directory is `<data>/<id>/`.
     let data: URL
     /// Each plugin's defaults suite and keychain service is `<storagePrefix>.<id>`.
@@ -21,6 +23,7 @@ struct PluginLocations {
         return PluginLocations(
             builtIn: Bundle.main.builtInPlugInsURL,
             user: support.appendingPathComponent("Plugins"),
+            cache: support.appendingPathComponent("PluginCache"),
             data: support.appendingPathComponent("PluginData"),
             storagePrefix: "com.notchtherock.NotchTheRock.plugin"
         )
@@ -42,6 +45,7 @@ struct PluginRecord: Identifiable {
         case failed(String)
     }
 
+    /// Where the bundle was found. A user bundle loads from the app's copy of it, never from here.
     let bundleURL: URL
     let source: Source
     /// `CFBundleIdentifier`, nil when the Info.plist could not be read.
@@ -63,8 +67,9 @@ typealias PluginOpener = @MainActor (PluginBundleInfo) throws -> (manifest: Plug
 
 /// Finds, checks, loads and runs plugins, and owns whether each one is on. Built-in and user bundles
 /// go through the same `evaluate` path: the SDK version is checked from Info.plist, user bundles
-/// also need a consent pinned to their fingerprint, then `PluginLoader` opens the code. Disabled
-/// bundles are not opened at all.
+/// also need a consent pinned to their fingerprint and load from the app's copy with that
+/// fingerprint, then `PluginLoader` opens the code. Built-in bundles are part of the signed app and
+/// load in place. Disabled bundles are not opened at all.
 @MainActor
 @Observable
 final class PluginCatalog {
@@ -85,6 +90,7 @@ final class PluginCatalog {
     @ObservationIgnored let locations: PluginLocations
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let consents: PluginConsentStore
+    @ObservationIgnored private let snapshots: PluginSnapshots
     @ObservationIgnored private let open: PluginOpener
     /// Loaded plugins by record id, and the order they were loaded in (the tab bar order).
     @ObservationIgnored private var running: [String: Running] = [:]
@@ -106,6 +112,7 @@ final class PluginCatalog {
         self.locations = locations
         self.defaults = defaults
         consents = PluginConsentStore(defaults: defaults)
+        snapshots = PluginSnapshots(cache: locations.cache)
         self.open = open
     }
 
@@ -140,27 +147,26 @@ final class PluginCatalog {
         logger.notice("reloaded \(self.locations.user.path, privacy: .public)")
     }
 
-    /// Allows the user bundle `id` as it was listed and loads it when it is enabled. Refused when
+    /// Allows the user bundle `id` as it was listed and loads it when it is enabled. The bundle is
+    /// copied into the app first, and the copy is what the consent pins and what loads. Refused when
     /// the bundle changed after it was listed; the record is then checked again.
     func consent(to id: PluginRecord.ID) throws {
         guard let index = records.firstIndex(where: { $0.id == id }),
               let identifier = records[index].identifier,
+              let fingerprint = records[index].fingerprint,
               records[index].source == .user,
               case .needsConsent = records[index].state
         else { return }
         let record = records[index]
-        let current: String
         do {
-            current = try PluginFingerprint.of(record.bundleURL)
-        } catch {
-            throw ConsentFailure("번들 파일을 읽지 못했어요: \(Self.reason(error))")
-        }
-        guard current == record.fingerprint else {
+            _ = try snapshots.prepare(record.bundleURL, identifier: identifier, fingerprint: fingerprint)
+        } catch is SnapshotMismatch {
             records[index] = evaluate(record.bundleURL, source: .user)
             throw ConsentFailure("목록을 읽은 뒤로 번들 내용이 바뀌었어요. 바뀐 번들을 확인하고 다시 허락해 주세요.")
+        } catch {
+            throw ConsentFailure(Self.reason(error))
         }
-        try Quarantine.clear(record.bundleURL)
-        consents.pin(identifier, fingerprint: current)
+        consents.pin(identifier, fingerprint: fingerprint)
         logger.notice("consented to \(identifier, privacy: .public) at \(record.id, privacy: .public)")
         records[index] = evaluate(record.bundleURL, source: .user)
     }
@@ -238,8 +244,13 @@ final class PluginCatalog {
             return record(.failed(Self.reason(error)))
         }
         identifier = info.identifier
-        // The host keys tabs, activities and storage by identifier; the first bundle listed keeps it.
-        if let other = records.first(where: { $0.identifier == info.identifier && $0.id != bundleURL.path }) {
+        // The host keys tabs, activities, storage and consent by identifier; the first bundle listed
+        // that is not refused keeps it. Built-in bundles are listed first, so they keep theirs.
+        if let other = records.first(where: { record in
+            guard record.identifier == info.identifier, record.id != bundleURL.path else { return false }
+            if case .failed = record.state { return false }
+            return true
+        }) {
             return record(.failed("같은 식별자(\(info.identifier))를 쓰는 플러그인이 이미 있어요: \(other.id)"))
         }
         // Checked from Info.plist before consent: allowing a bundle this app cannot run helps nobody.
@@ -250,7 +261,7 @@ final class PluginCatalog {
             do {
                 fingerprint = try PluginFingerprint.of(bundleURL)
             } catch {
-                return record(.failed("번들 파일을 읽지 못했어요: \(Self.reason(error))"))
+                return record(.failed(Self.reason(error)))
             }
             switch consents.decision(for: info.identifier, fingerprint: fingerprint ?? "") {
             case .unknown: return record(.needsConsent(Self.unknownReason))
@@ -262,6 +273,17 @@ final class PluginCatalog {
             return record(.off)
         }
 
+        // Only user bundles have a fingerprint; they load from the app's copy that has it.
+        var loadable = info
+        if let fingerprint {
+            do {
+                loadable = try snapshots.prepare(bundleURL, identifier: info.identifier, fingerprint: fingerprint)
+            } catch is SnapshotMismatch {
+                return record(.needsConsent(Self.changedReason))
+            } catch {
+                return record(.failed(Self.reason(error)))
+            }
+        }
         let storage: PluginStorage
         do {
             storage = try PluginStorage(
@@ -274,7 +296,7 @@ final class PluginCatalog {
         }
         let opened: (manifest: PluginManifest, type: any NotchPlugin.Type)
         do {
-            opened = try open(info)
+            opened = try open(loadable)
         } catch {
             if let fingerprint, Self.codeWasOpened(before: error) {
                 openedFingerprints[bundleURL.path] = fingerprint
@@ -282,11 +304,11 @@ final class PluginCatalog {
             return record(.failed(Self.reason(error)))
         }
         if let fingerprint { openedFingerprints[bundleURL.path] = fingerprint }
-        let context = NotchContext(pluginID: info.identifier, bundleURL: bundleURL, host: host, storage: storage)
+        let context = NotchContext(pluginID: info.identifier, bundleURL: loadable.bundleURL, host: host, storage: storage)
         let plugin = opened.type.init(context: context)
         running[bundleURL.path] = Running(pluginID: info.identifier, plugin: plugin, tab: plugin.expandedTab, isEnabled: false)
         loadOrder.append(bundleURL.path)
-        logger.notice("loaded \(info.identifier, privacy: .public) \(opened.manifest.version, privacy: .public) from \(bundleURL.path, privacy: .public)")
+        logger.notice("loaded \(info.identifier, privacy: .public) \(opened.manifest.version, privacy: .public) from \(loadable.bundleURL.path, privacy: .public)")
         activate(bundleURL.path)
         return record(.on)
     }

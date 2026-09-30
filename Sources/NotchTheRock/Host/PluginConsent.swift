@@ -2,37 +2,62 @@ import CryptoKit
 import Darwin
 import Foundation
 
-/// SHA-256 over every directory, file and symbolic link inside a bundle, in path order. Links are
-/// hashed as their target text and never followed, so the fingerprint covers exactly what the
-/// bundle holds and nothing it points to.
+/// SHA-256 over every directory and file inside a bundle, in path order. A bundle holding a
+/// symbolic link, or being one, has no fingerprint: see `BundleContents`.
 enum PluginFingerprint {
     static func of(_ bundleURL: URL) throws -> String {
-        let root = bundleURL.resolvingSymlinksInPath().path
-        let manager = FileManager.default
         var hasher = SHA256()
         func add(_ text: String) {
             hasher.update(data: Data((text + "\0").utf8))
         }
-        for path in try manager.subpathsOfDirectory(atPath: root).sorted() {
-            let full = root + "/" + path
-            var status = stat()
-            guard lstat(full, &status) == 0 else {
-                throw ConsentFailure("\(full): \(String(cString: strerror(errno)))")
-            }
-            switch status.st_mode & S_IFMT {
-            case S_IFDIR:
-                add("d"); add(path)
-            case S_IFLNK:
-                add("l"); add(path); add(try manager.destinationOfSymbolicLink(atPath: full))
-            case S_IFREG:
-                let data = try Data(contentsOf: URL(fileURLWithPath: full))
-                add("f"); add(path); add(String(data.count))
+        for entry in try BundleContents.entries(of: bundleURL) {
+            switch entry.kind {
+            case .directory:
+                add("d"); add(entry.path)
+            case .file:
+                let full = bundleURL.path + "/" + entry.path
+                guard let data = try? Data(contentsOf: URL(fileURLWithPath: full)) else {
+                    throw ConsentFailure("번들 파일을 읽지 못했어요: \(full)")
+                }
+                add("f"); add(entry.path); add(String(data.count))
                 hasher.update(data: data)
-            default:
-                throw ConsentFailure("번들 안에 일반 파일이 아닌 항목이 있어요: \(full)")
             }
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// What a user bundle may hold: directories and regular files only. A symbolic link, as the bundle
+/// or inside it, could bring in files from outside the bundle that the fingerprint does not cover,
+/// and the `.notchplugin` layout needs none.
+enum BundleContents {
+    enum Kind {
+        case directory
+        case file
+    }
+
+    /// Every entry below `root` as a relative path, parents before their children.
+    static func entries(of root: URL) throws -> [(path: String, kind: Kind)] {
+        guard try kind(root.path, shownAs: root.lastPathComponent) == .directory else {
+            throw ConsentFailure("번들이 폴더가 아니에요: \(root.path)")
+        }
+        guard let paths = try? FileManager.default.subpathsOfDirectory(atPath: root.path) else {
+            throw ConsentFailure("번들 폴더를 읽지 못했어요: \(root.path)")
+        }
+        return try paths.sorted().map { ($0, try kind(root.path + "/" + $0, shownAs: $0)) }
+    }
+
+    private static func kind(_ path: String, shownAs name: String) throws -> Kind {
+        var status = stat()
+        guard lstat(path, &status) == 0 else {
+            throw ConsentFailure("번들 파일을 읽지 못했어요: \(path): \(String(cString: strerror(errno)))")
+        }
+        switch status.st_mode & S_IFMT {
+        case S_IFDIR: return .directory
+        case S_IFREG: return .file
+        case S_IFLNK: throw ConsentFailure("심볼릭 링크는 번들 밖을 가리킬 수 있어서 불러오지 않아요. 링크를 실제 파일로 바꿔 주세요: \(name)")
+        default: throw ConsentFailure("번들 안에 일반 파일이 아닌 항목이 있어요: \(name)")
+        }
     }
 }
 
@@ -72,11 +97,11 @@ struct PluginConsentStore {
 enum Quarantine {
     static let attribute = "com.apple.quarantine"
 
-    /// Removes the quarantine attribute from the bundle and everything in it, without following
-    /// links, so the system does not stop the consented code from loading.
+    /// Removes the quarantine attribute from the app's copy of a consented bundle and everything in
+    /// it, without following links, so the system does not stop the consented code from loading.
     static func clear(_ bundleURL: URL) throws {
-        let root = bundleURL.resolvingSymlinksInPath().path
-        let paths = [root] + (try FileManager.default.subpathsOfDirectory(atPath: root)).map { root + "/" + $0 }
+        let root = bundleURL.path
+        let paths = [root] + (try BundleContents.entries(of: bundleURL)).map { root + "/" + $0.path }
         for path in paths where removexattr(path, attribute, XATTR_NOFOLLOW) != 0 && errno != ENOATTR {
             throw ConsentFailure("격리 속성을 지우지 못했어요: \(path): \(String(cString: strerror(errno)))")
         }
