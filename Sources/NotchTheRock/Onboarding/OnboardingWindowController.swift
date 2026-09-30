@@ -3,10 +3,12 @@ import OSLog
 import SwiftUI
 
 /// The first-launch onboarding window. It opens after the notch's greeting so it never covers it,
-/// and closing it counts as finishing.
+/// and closing it counts as finishing. It floats above other apps' windows until then: once the
+/// user clicks another app, an ordinary window of this accessory app ends up behind that app's
+/// windows, with no Dock icon or app switcher entry to bring it back.
 @MainActor
 final class OnboardingWindowController: NSObject, NSWindowDelegate {
-    private let model: OnboardingModel
+    let model: OnboardingModel
     private var window: NSWindow?
     private let logger = Logger(subsystem: "com.notchtherock.NotchTheRock", category: "onboarding")
 
@@ -30,17 +32,32 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
     }
 
     private func present() {
+        let window = makeWindow()
+        self.window = window
+        model.start()
+        window.showInFront()
+    }
+
+    /// Brings the open window back to the front, for a reopen of the running app. During the
+    /// greeting there is no window yet; it opens by itself when the greeting ends.
+    func bringForward() {
+        guard let window else {
+            logger.notice("reopened during the greeting; the onboarding window opens when it ends")
+            return
+        }
+        window.showInFront()
+    }
+
+    func makeWindow() -> NSWindow {
         let window = NSWindow(contentViewController: NSHostingController(rootView: OnboardingView(model: model)))
         window.title = "NotchTheRock 시작하기"
         window.styleMask = [.titled, .closable]
         window.isReleasedWhenClosed = false
+        window.level = .floating
+        window.hidesOnDeactivate = false
         window.delegate = self
         window.center()
-        self.window = window
-        model.start()
-        // An accessory app is not active by itself; without this the window opens behind others.
-        NSApp.activate()
-        window.makeKeyAndOrderFront(nil)
+        return window
     }
 
     func windowWillClose(_ notification: Notification) {

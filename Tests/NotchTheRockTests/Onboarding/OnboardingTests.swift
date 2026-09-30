@@ -114,6 +114,41 @@ private final class FakePermissions {
         }
     }
 
+    @Test func R13__reopening_brings_back_an_unfinished_onboarding_else_settings() {
+        withRecord { record in
+            #expect(ReopenTarget(onboarding: nil) == .settings, "no onboarding this launch")
+            let model = OnboardingModel(permissions: FakePermissions().permissions, record: record)
+            #expect(ReopenTarget(onboarding: model) == .onboarding)
+            model.finish()
+            #expect(ReopenTarget(onboarding: model) == .settings)
+        }
+    }
+
+    /// Another app's window must not bury the onboarding: there is no Dock icon, app switcher entry
+    /// or menu bar icon to bring it back. Settings stays an ordinary window the gear reopens.
+    @Test func R13__app_windows_stay_up_when_another_app_is_used() {
+        withRecord { record in
+            let onboarding = OnboardingWindowController(model: OnboardingModel(permissions: FakePermissions().permissions, record: record))
+                .makeWindow()
+            #expect(onboarding.level == .floating)
+            #expect(!onboarding.hidesOnDeactivate)
+
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(suiteName)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let locations = PluginLocations(
+                builtIn: nil,
+                user: directory.appendingPathComponent("Plugins"),
+                cache: directory.appendingPathComponent("PluginCache"),
+                data: directory.appendingPathComponent("PluginData"),
+                storagePrefix: suiteName
+            )
+            let catalog = PluginCatalog(host: NotchHostModel(), locations: locations, defaults: record.defaults)
+            let settings = SettingsWindowController(catalog: catalog).makeWindow()
+            #expect(settings.level == .normal)
+            #expect(!settings.hidesOnDeactivate)
+        }
+    }
+
     @Test func R13__finishing_or_closing_marks_it_completed_once() {
         withRecord { record in
             let model = OnboardingModel(permissions: FakePermissions().permissions, record: record)

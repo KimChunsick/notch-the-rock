@@ -22,8 +22,9 @@ import OSLog
 //   --reset-onboarding   clears the completed mark first, so this launch shows it again
 // Both together leave a clean first-launch state without showing the window.
 //
-// Opening the app again while it runs (Finder, Spotlight, `open -a NotchTheRock`) brings Settings
-// to the front: an accessory app has no Dock or menu bar icon to click instead.
+// Opening the app again while it runs (Finder, Spotlight, `open -a NotchTheRock`) brings the
+// onboarding back to the front while this launch still shows it, and Settings otherwise: an
+// accessory app has no Dock or menu bar icon to click instead.
 
 /// The app's own lines in the unified log, where NSLog text is private:
 /// `log show --predicate 'subsystem == "com.notchtherock.NotchTheRock"'`. Declared before the code
@@ -48,7 +49,7 @@ MainActor.assumeIsolated {
     let catalog = PluginCatalog(host: host, locations: .standard)
     let settings = SettingsWindowController(catalog: catalog)
     let window = NotchWindowController(host: host, openSettings: { settings.show() })
-    let delegate = AppDelegate(openSettings: { settings.show() })
+    let delegate = AppDelegate(settings: settings)
     let application = NSApplication.shared
     application.delegate = delegate
     application.setActivationPolicy(.accessory)
@@ -80,6 +81,7 @@ MainActor.assumeIsolated {
     } else {
         appLogger.notice("onboarding not shown (\(onboardingRecord.isCompleted ? "completed" : "--skip-onboarding", privacy: .public))")
     }
+    delegate.onboarding = onboarding
     NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
         MainActor.assumeIsolated { catalog.deactivateAll() }
     }
@@ -89,16 +91,37 @@ MainActor.assumeIsolated {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let openSettings: @MainActor () -> Void
+    private let settings: SettingsWindowController
+    /// This launch's onboarding, when it shows one.
+    var onboarding: OnboardingWindowController?
 
-    init(openSettings: @escaping @MainActor () -> Void) {
-        self.openSettings = openSettings
+    init(settings: SettingsWindowController) {
+        self.settings = settings
     }
 
-    /// Opening the running app again sends a reopen event, also to an accessory app.
+    /// Opening the running app again sends a reopen event, also to an accessory app. It is the way
+    /// back to a window the user lost behind other apps.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        appLogger.notice("reopened, bringing Settings to the front")
-        openSettings()
+        switch ReopenTarget(onboarding: onboarding?.model) {
+        case .onboarding:
+            appLogger.notice("reopened, bringing the onboarding to the front")
+            onboarding?.bringForward()
+        case .settings:
+            appLogger.notice("reopened, bringing Settings to the front")
+            settings.show()
+        }
         return false
+    }
+}
+
+/// What opening the running app again brings to the front.
+enum ReopenTarget: Equatable {
+    case onboarding
+    case settings
+
+    /// The onboarding while this launch still shows it, else Settings. A launch with
+    /// `--skip-onboarding`, or one after the onboarding was completed, has none.
+    @MainActor init(onboarding: OnboardingModel?) {
+        self = onboarding?.isFinished == false ? .onboarding : .settings
     }
 }
