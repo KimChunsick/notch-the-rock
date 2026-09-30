@@ -12,9 +12,9 @@ struct PluginLocations {
     let user: URL
     /// The app's copies of consented user bundles, the ones that load: see `PluginSnapshots`.
     let cache: URL
-    /// Each plugin's data directory is `<data>/<id>/`.
+    /// Each plugin's data directory is `<data>/<key>/`, with the plugin's `PluginKey`.
     let data: URL
-    /// Each plugin's defaults suite and keychain service is `<storagePrefix>.<id>`.
+    /// Each plugin's defaults suite and keychain service is `<storagePrefix>.<key>`.
     let storagePrefix: String
 
     static var standard: PluginLocations {
@@ -27,6 +27,20 @@ struct PluginLocations {
             data: support.appendingPathComponent("PluginData"),
             storagePrefix: "com.notchtherock.NotchTheRock.plugin"
         )
+    }
+}
+
+/// A plugin's identity wherever the host keys by it: who owns the identifier, the consent, the
+/// disabled list, the app's copy, and the data directory, defaults suite and keychain service.
+/// Identifiers that differ only in case are one plugin, because the default file system ignores
+/// case and directories named after them would be one directory. Identifiers are ASCII
+/// (`PluginManifest.isValidIdentifier`), so lowercasing is exact. The running plugin, its tab and
+/// what it shows keep the identifier as written.
+struct PluginKey: Hashable {
+    let rawValue: String
+
+    init(_ identifier: String) {
+        rawValue = identifier.lowercased()
     }
 }
 
@@ -60,6 +74,7 @@ struct PluginRecord: Identifiable {
     var needsRestart = false
 
     var id: String { bundleURL.path }
+    var key: PluginKey? { identifier.map(PluginKey.init) }
 }
 
 /// Opens a checked bundle's code and returns its manifest and principal class.
@@ -118,12 +133,15 @@ final class PluginCatalog {
 
     // MARK: Actions
 
-    /// Lists built-in then user bundles and starts every allowed, enabled one. Called once at launch.
+    /// Lists built-in then user bundles and starts every allowed, enabled one. Called once at launch,
+    /// before any copy is loaded, so the copies of bundles no longer in the user folder go here.
     func loadAll() {
+        let user = Self.bundles(in: locations.user)
+        snapshots.prune(keeping: Set(user.compactMap { try? PluginKey(PluginBundleInfo(contentsOf: $0).identifier) }))
         for url in Self.bundles(in: locations.builtIn) {
             records.append(evaluate(url, source: .builtIn))
         }
-        for url in Self.bundles(in: locations.user) {
+        for url in user {
             records.append(evaluate(url, source: .user))
         }
     }
@@ -152,34 +170,36 @@ final class PluginCatalog {
     /// the bundle changed after it was listed; the record is then checked again.
     func consent(to id: PluginRecord.ID) throws {
         guard let index = records.firstIndex(where: { $0.id == id }),
-              let identifier = records[index].identifier,
+              let key = records[index].key,
               let fingerprint = records[index].fingerprint,
               records[index].source == .user,
               case .needsConsent = records[index].state
         else { return }
         let record = records[index]
         do {
-            _ = try snapshots.prepare(record.bundleURL, identifier: identifier, fingerprint: fingerprint)
+            _ = try snapshots.prepare(record.bundleURL, key: key, fingerprint: fingerprint)
         } catch is SnapshotMismatch {
             records[index] = evaluate(record.bundleURL, source: .user)
             throw ConsentFailure("목록을 읽은 뒤로 번들 내용이 바뀌었어요. 바뀐 번들을 확인하고 다시 허락해 주세요.")
         } catch {
             throw ConsentFailure(Self.reason(error))
         }
-        consents.pin(identifier, fingerprint: fingerprint)
-        logger.notice("consented to \(identifier, privacy: .public) at \(record.id, privacy: .public)")
+        consents.pin(key, fingerprint: fingerprint)
+        logger.notice("consented to \(key.rawValue, privacy: .public) at \(record.id, privacy: .public)")
         records[index] = evaluate(record.bundleURL, source: .user)
     }
 
     /// Turns a listed plugin on or off and remembers it across launches. Turning off calls
     /// `deactivate()` and removes its tab and everything it shows; turning on activates it again,
-    /// loading it first when it was never loaded.
+    /// loading it first when it was never loaded. A refused bundle does not own its identifier, so
+    /// it cannot turn off the plugin that does.
     func setEnabled(_ enabled: Bool, for id: PluginRecord.ID) {
         guard let index = records.firstIndex(where: { $0.id == id }),
-              let identifier = records[index].identifier
+              let key = records[index].key
         else { return }
+        if case .failed = records[index].state { return }
         var disabled = Set(defaults.stringArray(forKey: Self.disabledKey) ?? [])
-        if enabled { disabled.remove(identifier) } else { disabled.insert(identifier) }
+        if enabled { disabled.remove(key.rawValue) } else { disabled.insert(key.rawValue) }
         defaults.set(disabled.sorted(), forKey: Self.disabledKey)
 
         switch (enabled, records[index].state) {
@@ -244,10 +264,12 @@ final class PluginCatalog {
             return record(.failed(Self.reason(error)))
         }
         identifier = info.identifier
+        let key = PluginKey(info.identifier)
         // The host keys tabs, activities, storage and consent by identifier; the first bundle listed
-        // that is not refused keeps it. Built-in bundles are listed first, so they keep theirs.
+        // that is not refused keeps it, with every spelling of it in other case (`PluginKey`).
+        // Built-in bundles are listed first, so they keep theirs.
         if let other = records.first(where: { record in
-            guard record.identifier == info.identifier, record.id != bundleURL.path else { return false }
+            guard record.key == key, record.id != bundleURL.path else { return false }
             if case .failed = record.state { return false }
             return true
         }) {
@@ -263,13 +285,13 @@ final class PluginCatalog {
             } catch {
                 return record(.failed(Self.reason(error)))
             }
-            switch consents.decision(for: info.identifier, fingerprint: fingerprint ?? "") {
+            switch consents.decision(for: key, fingerprint: fingerprint ?? "") {
             case .unknown: return record(.needsConsent(Self.unknownReason))
             case .changed: return record(.needsConsent(Self.changedReason))
             case .consented: break
             }
         }
-        if defaults.stringArray(forKey: Self.disabledKey)?.contains(info.identifier) == true {
+        if defaults.stringArray(forKey: Self.disabledKey)?.contains(key.rawValue) == true {
             return record(.off)
         }
 
@@ -277,7 +299,7 @@ final class PluginCatalog {
         var loadable = info
         if let fingerprint {
             do {
-                loadable = try snapshots.prepare(bundleURL, identifier: info.identifier, fingerprint: fingerprint)
+                loadable = try snapshots.prepare(bundleURL, key: key, fingerprint: fingerprint)
             } catch is SnapshotMismatch {
                 return record(.needsConsent(Self.changedReason))
             } catch {
@@ -287,9 +309,9 @@ final class PluginCatalog {
         let storage: PluginStorage
         do {
             storage = try PluginStorage(
-                directory: locations.data.appendingPathComponent(info.identifier),
-                defaultsSuiteName: "\(locations.storagePrefix).\(info.identifier)",
-                keychainService: "\(locations.storagePrefix).\(info.identifier)"
+                directory: locations.data.appendingPathComponent(key.rawValue),
+                defaultsSuiteName: "\(locations.storagePrefix).\(key.rawValue)",
+                keychainService: "\(locations.storagePrefix).\(key.rawValue)"
             )
         } catch {
             return record(.failed("플러그인 데이터 폴더를 만들지 못했어요: \(Self.reason(error))"))

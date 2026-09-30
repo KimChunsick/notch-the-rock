@@ -492,4 +492,69 @@ func hasQuarantine(_ url: URL) -> Bool {
         ])
         #expect(log.opened == [systemID])
     }
+
+    @Test func R03__an_identifier_differing_only_in_case_is_refused_and_leaves_the_first_plugin_alone() throws {
+        let fixture = try PluginFixture()
+        defer { fixture.cleanUp() }
+        let user = fixture.locations.user
+        let one = try fixture.makeBundle(in: user, name: "One", identifier: "com.example.sample")
+        let two = try fixture.makeBundle(in: user, name: "Two", identifier: "com.example.Sample")
+        let copy = fixture.locations.cache.appendingPathComponent("com.example.sample/One.notchplugin/Contents/MacOS/One")
+        let duplicate = PluginRecord.State.failed("같은 식별자(com.example.Sample)를 쓰는 플러그인이 이미 있어요: \(one.path)")
+        let log = OpenLog()
+        let host = NotchHostModel()
+        let catalog = fixture.catalog(host: host, open: log.opener)
+
+        catalog.loadAll()
+        try catalog.consent(to: one.path)
+        let data = try #require(CountingPlugin.instances["com.example.sample"]?.context.storage.directory)
+        let marker = data.appendingPathComponent("marker")
+        try Data("one".utf8).write(to: marker)
+        try? catalog.consent(to: two.path)
+        catalog.reload()
+
+        #expect(catalog.records.map(\.state) == [.on, duplicate])
+        #expect(log.opened == ["com.example.sample"])
+        #expect(host.tabs.map(\.pluginID) == ["com.example.sample"])
+        #expect(FileManager.default.fileExists(atPath: copy.path))
+        #expect(FileManager.default.fileExists(atPath: marker.path))
+
+        // Next launch: the identifier is still the first bundle's.
+        let relaunchLog = OpenLog()
+        let relaunched = fixture.catalog(open: relaunchLog.opener)
+        relaunched.loadAll()
+        #expect(relaunched.records.map(\.state) == [.on, duplicate])
+        #expect(relaunchLog.opened == ["com.example.sample"])
+        #expect(FileManager.default.fileExists(atPath: copy.path))
+        #expect(FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    @Test func R03__launch_removes_the_copies_of_user_bundles_that_are_gone() throws {
+        let fixture = try PluginFixture()
+        defer { fixture.cleanUp() }
+        let user = fixture.locations.user
+        let cache = fixture.locations.cache
+        let removedID = fixture.newIdentifier()
+        let keptID = fixture.newIdentifier()
+        let removed = try fixture.makeBundle(in: user, name: "Removed", identifier: removedID)
+        let kept = try fixture.makeBundle(in: user, name: "Kept", identifier: keptID)
+        let catalog = fixture.catalog(open: OpenLog().opener)
+        catalog.loadAll()
+        try catalog.consent(to: removed.path)
+        try catalog.consent(to: kept.path)
+        #expect(FileManager.default.fileExists(atPath: cache.appendingPathComponent(removedID).path))
+        // A copy left half-made when the app stopped during a consent.
+        let leftover = cache.appendingPathComponent(".staging-leftover/Kept.notchplugin")
+        try FileManager.default.createDirectory(at: leftover, withIntermediateDirectories: true)
+
+        try FileManager.default.removeItem(at: removed)
+        let relaunchLog = OpenLog()
+        let relaunched = fixture.catalog(open: relaunchLog.opener)
+        relaunched.loadAll()
+
+        #expect(try FileManager.default.contentsOfDirectory(atPath: cache.path) == [keptID])
+        #expect(FileManager.default.fileExists(atPath: cache.appendingPathComponent("\(keptID)/Kept.notchplugin/Contents/MacOS/Kept").path))
+        #expect(relaunched.records.map(\.state) == [.on])
+        #expect(relaunchLog.opened == [keptID])
+    }
 }

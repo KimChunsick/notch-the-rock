@@ -62,7 +62,7 @@ enum BundleContents {
 }
 
 /// Which user bundles the user allowed to run, each pinned to the fingerprint of the bundle they
-/// allowed. Kept in the app's defaults as `[plugin identifier: fingerprint]`.
+/// allowed. Kept in the app's defaults as `[PluginKey: fingerprint]`.
 struct PluginConsentStore {
     enum Decision: Equatable {
         /// Never allowed: ask.
@@ -75,17 +75,17 @@ struct PluginConsentStore {
     static let key = "PluginConsents"
     let defaults: UserDefaults
 
-    func decision(for identifier: String, fingerprint: String) -> Decision {
-        switch pinned[identifier] {
+    func decision(for key: PluginKey, fingerprint: String) -> Decision {
+        switch pinned[key.rawValue] {
         case nil: .unknown
         case fingerprint: .consented
         default: .changed
         }
     }
 
-    func pin(_ identifier: String, fingerprint: String) {
+    func pin(_ key: PluginKey, fingerprint: String) {
         var pinned = pinned
-        pinned[identifier] = fingerprint
+        pinned[key.rawValue] = fingerprint
         defaults.set(pinned, forKey: Self.key)
     }
 

@@ -1,7 +1,7 @@
 import Foundation
 import NotchKit
 
-/// The app's own copies of consented user bundles, `<cache>/<identifier>/<Name>.notchplugin`. The
+/// The app's own copies of consented user bundles, `<cache>/<key>/<Name>.notchplugin`. The
 /// user folder is only where a bundle comes from: the fingerprint check, the library check,
 /// quarantine removal and loading all use the copy, so the code that runs is the code the user
 /// allowed, whatever happens in the user folder afterwards.
@@ -11,9 +11,9 @@ struct PluginSnapshots {
     /// The copy of `source` whose fingerprint is `fingerprint`, checked and ready to load. An
     /// existing copy is fingerprinted again and reused; otherwise `source` is copied and the copy
     /// must have that fingerprint, or this throws `SnapshotMismatch`.
-    func prepare(_ source: URL, identifier: String, fingerprint: String) throws -> PluginBundleInfo {
+    func prepare(_ source: URL, key: PluginKey, fingerprint: String) throws -> PluginBundleInfo {
         let manager = FileManager.default
-        let folder = cache.appendingPathComponent(identifier)
+        let folder = cache.appendingPathComponent(key.rawValue)
         let copy = folder.appendingPathComponent(source.lastPathComponent)
         if (try? PluginFingerprint.of(copy)) == fingerprint {
             return try Self.checked(copy)
@@ -43,6 +43,18 @@ struct PluginSnapshots {
         }
         try manager.moveItem(at: staging, to: folder)
         return try PluginBundleInfo(contentsOf: copy)
+    }
+
+    /// Removes every copy whose key is not in `keys`, and whatever an interrupted `prepare` left.
+    /// Only before any copy is loaded: a loaded plugin keeps reading its files from its copy. What
+    /// cannot be removed now is tried again at the next launch.
+    func prune(keeping keys: Set<PluginKey>) {
+        let manager = FileManager.default
+        guard let names = try? manager.contentsOfDirectory(atPath: cache.path) else { return }
+        let kept = Set(keys.map(\.rawValue))
+        for name in names where !kept.contains(name) {
+            try? manager.removeItem(at: cache.appendingPathComponent(name))
+        }
     }
 
     private static func checked(_ bundle: URL) throws -> PluginBundleInfo {
