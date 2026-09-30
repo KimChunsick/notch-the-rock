@@ -5,7 +5,8 @@
 # app at the final path or at the backup path it reports, and only a successful install removes it.
 # A launched copy that the pid detection never saw is stopped before rollback moves it away. Rollback
 # signals only processes whose executable is the new bundle's: never one that merely names that path
-# in its arguments, never another copy of the app. When the new app cannot be stopped, both the new
+# in its arguments, never one that maps that file as data, never another copy of the app. When the
+# new app cannot be stopped, both the new
 # bundle and the previous app stay where they are, the message names both, and the exit is non-zero.
 #
 # Nothing here touches /Applications or a running NotchTheRock. Every destination is a scratch
@@ -13,10 +14,11 @@
 # script next to a fake build/NotchTheRock.app with `lsappinfo`, `open`, `codesign` and `mv` shimmed
 # on PATH. The `lsappinfo` shim reports no running copy until the `open` shim has run, so the script
 # never quits a real process. The processes the checks start are the fake app of a sandbox bundle,
-# a fake app of a scratch copy outside the sandbox and a shell that only names the sandbox bundle.
-# The fake app is a small C program built with `cc`, because the script tells processes apart by
-# the executable file they run, and a shell script's executable is the shell.
-# Requires bash 3.2 or later, cc and lsof (Command Line Tools and macOS).
+# a fake app of a scratch copy outside the sandbox, a shell that only names the sandbox bundle and a
+# python3 process that maps the sandbox bundle's executable as data. The fake app is a small C
+# program built with `cc`, because the script tells processes apart by the executable file they
+# run, and a shell script's executable is the shell.
+# Requires bash 3.2 or later, cc, lsof and python3 (Command Line Tools and macOS).
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd -P)
@@ -52,7 +54,8 @@ run_install() {
 # the app, Launch Services lists a pid that is already gone, and `open` still fails;
 # listed-then-failed: `open` starts nothing, Launch Services lists INSTALL_TEST_LISTED_PID, and
 # `open` fails; respawning: `open` starts the app under a loop that starts it again whenever it
-# exits, and fails).
+# exits, and fails; mapped-then-failed: `open` starts no app but a python3 process that maps the
+# app's executable read-only as data, and fails).
 SHIMS="$WORK/shims"
 mkdir "$SHIMS"
 cat >"$SHIMS/lsappinfo" <<'EOF'
@@ -87,6 +90,12 @@ case " $INSTALL_TEST_FAIL " in
         wait_for_app
         echo "open: injected failure while the app keeps coming back" >&2
         exit 1 ;;
+    *" mapped-then-failed "*)
+        python3 "$(dirname "$0")/mapper.py" "$1/Contents/MacOS/NotchTheRock" "$INSTALL_TEST_STATE" </dev/null >/dev/null 2>&1 &
+        waited=0
+        until [ -s "$INSTALL_TEST_STATE/mapper.pid" ] || [ "$waited" -ge 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+        echo "open: injected failure while another process maps the app" >&2
+        exit 1 ;;
 esac
 touch "$INSTALL_TEST_STATE/launched"
 EOF
@@ -105,6 +114,24 @@ case "$(basename "$source"): $INSTALL_TEST_FAIL " in
     .NotchTheRock-install.*:*" swap "*|.NotchTheRock-old.*:*" restore "*) echo "mv: injected failure" >&2; exit 1 ;;
 esac
 exec /bin/mv "$@"
+EOF
+# Maps the file it is given read-only as data, closes it so that only the mapping remains, and runs
+# until it is killed. TERM is recorded and otherwise ignored, so a check can tell it was signalled.
+cat >"$SHIMS/mapper.py" <<'EOF'
+import mmap, os, signal, sys, time
+
+path, state = sys.argv[1:]
+
+def record_term(signum, frame):
+    open(os.path.join(state, "mapper.term"), "w").close()
+
+signal.signal(signal.SIGTERM, record_term)
+with open(path, "rb") as file:
+    mapping = mmap.mmap(file.fileno(), 0, prot=mmap.PROT_READ)
+with open(os.path.join(state, "mapper.pid"), "w") as file:
+    file.write(f"{os.getpid()}\n")
+while True:
+    time.sleep(0.1)
 EOF
 chmod +x "$SHIMS"/*
 
@@ -285,6 +312,22 @@ R13__install_app_never_stops_a_process_that_only_names_the_bundle() {
     kill -KILL "$bystander" 2>/dev/null
 }
 
+# A process that maps the new bundle's executable as data is not the app, although lsof lists it
+# with that file as program text (review round 023).
+R13__install_app_never_stops_a_process_that_maps_the_executable_as_data() {
+    current=${FUNCNAME[0]}
+    local mapper
+    run_sandboxed mapped-then-failed
+    mapper=$(cat "$SANDBOX/state/mapper.pid" 2>/dev/null)
+    [ -n "$mapper" ] || { fail "the process that maps the new executable never started"; return; }
+    helpers="$helpers $mapper"
+    contains "$output" "앱을 실행하지 못했어요" || fail "the failed launch is not named"
+    [ ! -e "$SANDBOX/state/mapper.term" ] || fail "the process that maps $FINAL/Contents/MacOS/NotchTheRock as data received TERM"
+    kill -0 "$mapper" 2>/dev/null || fail "the process that maps $FINAL/Contents/MacOS/NotchTheRock as data was stopped"
+    expect_restored
+    kill -KILL "$mapper" 2>/dev/null
+}
+
 # Another copy of the app, even the one Launch Services lists under the bundle id, is not the new app.
 R13__install_app_never_stops_another_copy_of_the_app() {
     current=${FUNCNAME[0]}
@@ -345,6 +388,7 @@ R13__install_app_restores_the_previous_app_when_launch_fails
 R13__install_app_stops_an_unlisted_launch_before_restoring
 R13__install_app_stops_a_started_app_next_to_a_stale_listed_pid
 R13__install_app_never_stops_a_process_that_only_names_the_bundle
+R13__install_app_never_stops_a_process_that_maps_the_executable_as_data
 R13__install_app_never_stops_another_copy_of_the_app
 R13__install_app_keeps_both_apps_when_the_new_app_cannot_be_stopped
 R13__install_app_replaces_the_app_and_removes_the_backup_after_success

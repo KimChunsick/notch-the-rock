@@ -19,7 +19,7 @@
 #
 # NOTCH_INSTALL_DIR overrides /Applications. It exists for scripts/tests only; TCC and the login
 # item expect /Applications.
-# Requires bash 3.2 or later.
+# Requires bash 3.2 or later and python3 (part of the Command Line Tools).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -126,16 +126,34 @@ alive() {
 }
 
 # The pids of the processes that run the new app's executable at $FINAL, whether Launch Services
-# lists them yet or not. lsof finds a process by the file it maps as its program text (txt), which a
-# process cannot fake the way it can its arguments or its argv[0] (what `ps -o comm` shows), and a
-# copy of NotchTheRock elsewhere is another file. So the pid Launch Services lists under the bundle
-# id counts only when this lookup finds it as well. Fails when lsof cannot answer; it exits 1 when
-# no process matches.
+# lists them yet or not. The candidates are the processes lsof lists with that file as program text
+# (txt) and the pid Launch Services lists under the bundle id, but neither proves what a process
+# runs: lsof lists a process that merely maps the file as data the same way, and the bundle id also
+# names a copy of NotchTheRock elsewhere. So a candidate counts only when the path the kernel keeps
+# for its executable (proc_pidpath), resolved with realpath, is that file; unlike the arguments or
+# argv[0] (what `ps -o comm` shows), a process cannot set it. Fails when lsof cannot answer or when
+# the executable of a candidate that still runs cannot be read.
 new_app_pids() {
-    local executable="$FINAL/Contents/MacOS/NotchTheRock" status=0
+    local executable="$FINAL/Contents/MacOS/NotchTheRock" candidates status=0
     [ -e "$executable" ] || return 0
-    lsof -t -a -d txt -- "$executable" 2>/dev/null || status=$?
-    [ "$status" -le 1 ]
+    candidates=$(lsof -t -a -d txt -- "$executable" 2>/dev/null) || status=$?
+    [ "$status" -le 1 ] || return 1
+    candidates="$candidates $(running_pid)"
+    python3 - "$executable" $candidates <<'PY'
+import ctypes, errno, os, sys
+
+libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+executable = os.path.realpath(sys.argv[1])
+path = ctypes.create_string_buffer(4096)
+status = 0
+for pid in sorted(set(sys.argv[2:]), key=int):
+    if libproc.proc_pidpath(int(pid), path, len(path)) > 0:
+        if os.path.realpath(os.fsdecode(path.value)) == executable:
+            print(pid)
+    elif ctypes.get_errno() != errno.ESRCH:
+        status = 1
+sys.exit(status)
+PY
 }
 
 # Stops the new app before rollback moves it away, so no process is left running from a bundle that
