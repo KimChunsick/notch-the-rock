@@ -114,13 +114,22 @@ private final class FakePermissions {
         }
     }
 
-    @Test func R13__reopening_brings_back_an_unfinished_onboarding_else_settings() {
+    /// Opening the running app again always shows Settings; this launch's onboarding comes forward
+    /// with it only while its window is open and unfinished.
+    @Test func R13__reopening_always_shows_settings_and_brings_back_an_unfinished_onboarding() {
         withRecord { record in
-            #expect(ReopenTarget(onboarding: nil) == .settings, "no onboarding this launch")
             let model = OnboardingModel(permissions: FakePermissions().permissions, record: record)
-            #expect(ReopenTarget(onboarding: model) == .onboarding)
+            #expect(ReopenWindows.of(onboarding: model, onboardingWindowIsOpen: true) == [.settings, .onboarding])
+            #expect(ReopenWindows.of(onboarding: model, onboardingWindowIsOpen: false) == [.settings], "during the greeting")
             model.finish()
-            #expect(ReopenTarget(onboarding: model) == .settings)
+            #expect(ReopenWindows.of(onboarding: model, onboardingWindowIsOpen: false) == [.settings], "onboarding finished")
+
+            // A launch after completion, or with --skip-onboarding, has no onboarding.
+            #expect(!record.showsAtLaunch(arguments: []), "completed")
+            #expect(ReopenWindows.of(onboarding: nil, onboardingWindowIsOpen: false) == [.settings])
+            record.defaults.removeObject(forKey: OnboardingRecord.completedKey)
+            #expect(!record.showsAtLaunch(arguments: ["--skip-onboarding"]))
+            #expect(ReopenWindows.of(onboarding: nil, onboardingWindowIsOpen: false) == [.settings])
         }
     }
 

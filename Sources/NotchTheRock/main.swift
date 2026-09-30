@@ -22,9 +22,9 @@ import OSLog
 //   --reset-onboarding   clears the completed mark first, so this launch shows it again
 // Both together leave a clean first-launch state without showing the window.
 //
-// Opening the app again while it runs (Finder, Spotlight, `open -a NotchTheRock`) brings the
-// onboarding back to the front while this launch still shows it, and Settings otherwise: an
-// accessory app has no Dock or menu bar icon to click instead.
+// Opening the app again while it runs (Finder, Spotlight, `open -a NotchTheRock`) brings Settings to
+// the front, and this launch's onboarding too while its window is open and unfinished: an accessory
+// app has no Dock or menu bar icon to click instead.
 
 /// The app's own lines in the unified log, where NSLog text is private:
 /// `log show --predicate 'subsystem == "com.notchtherock.NotchTheRock"'`. Declared before the code
@@ -102,26 +102,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Opening the running app again sends a reopen event, also to an accessory app. It is the way
     /// back to a window the user lost behind other apps.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        switch ReopenTarget(onboarding: onboarding?.model) {
-        case .onboarding:
-            appLogger.notice("reopened, bringing the onboarding to the front")
+        // The onboarding window's delegate is its controller from the moment it opens until it closes.
+        let onboardingWindowIsOpen = onboarding.map { controller in NSApp.windows.contains { $0.delegate === controller } } ?? false
+        let windows = ReopenWindows.of(onboarding: onboarding?.model, onboardingWindowIsOpen: onboardingWindowIsOpen)
+        settings.show()
+        if windows.contains(.onboarding) {
+            // After Settings, so the floating onboarding ends up on top.
             onboarding?.bringForward()
-        case .settings:
+            appLogger.notice("reopened, bringing Settings and the unfinished onboarding to the front")
+        } else {
             appLogger.notice("reopened, bringing Settings to the front")
-            settings.show()
         }
         return false
     }
 }
 
-/// What opening the running app again brings to the front.
-enum ReopenTarget: Equatable {
-    case onboarding
+/// The windows opening the running app again brings to the front, in order.
+enum ReopenWindows: Equatable {
     case settings
+    case onboarding
 
-    /// The onboarding while this launch still shows it, else Settings. A launch with
-    /// `--skip-onboarding`, or one after the onboarding was completed, has none.
-    @MainActor init(onboarding: OnboardingModel?) {
-        self = onboarding?.isFinished == false ? .onboarding : .settings
+    /// Always Settings, then this launch's onboarding while its window is open and unfinished. A
+    /// launch with `--skip-onboarding`, or one after the onboarding was completed, has none; during
+    /// the greeting its window is not open yet and opens by itself when the greeting ends.
+    @MainActor static func of(onboarding: OnboardingModel?, onboardingWindowIsOpen: Bool) -> [ReopenWindows] {
+        onboarding?.isFinished == false && onboardingWindowIsOpen ? [.settings, .onboarding] : [.settings]
     }
 }
