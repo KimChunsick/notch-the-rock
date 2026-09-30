@@ -1,7 +1,8 @@
 import NotchKit
 import SwiftUI
 
-/// Shows a short status beside the collapsed notch and one tab in the expanded notch.
+/// Shows a short status beside the collapsed notch, a small tile in the home and a screen in the
+/// expanded notch that the tile opens.
 @MainActor
 public final class __NAME__Plugin: NotchPlugin {
     public static let manifest = PluginManifest(
@@ -35,8 +36,17 @@ public final class __NAME__Plugin: NotchPlugin {
             __NAME__View()
         }
     }
+
+    /// Supported sizes, default first: add `.wide` (4x2) or `.large` (4x4) to offer more.
+    public var tile: PluginTile? {
+        PluginTile(supportedSizes: [.small]) { _ in
+            __NAME__TileView()
+        }
+    }
 }
 
+/// The expanded screen. The host sizes the notch to this view, so it keeps a size of its own:
+/// no `.frame(maxWidth: .infinity)` or `maxHeight: .infinity`.
 struct __NAME__View: View {
     var body: some View {
         VStack(spacing: 8) {
@@ -45,6 +55,19 @@ struct __NAME__View: View {
             Text("__NAME__ 플러그인이에요.")
         }
         .padding()
+    }
+}
+
+/// The tile, sized by its content like the expanded screen.
+struct __NAME__TileView: View {
+    var body: some View {
+        VStack(spacing: 4) {
+            Image(systemName: "sparkles")
+                .font(.title2)
+            Text("__NAME__")
+                .font(.caption)
+        }
+        .padding(8)
     }
 }
 

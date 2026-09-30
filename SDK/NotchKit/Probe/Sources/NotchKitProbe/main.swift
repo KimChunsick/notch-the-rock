@@ -6,7 +6,8 @@ import NotchKit
 //   notchkit-probe <Name.notchplugin>
 //       Reads Info.plist, rejects an incompatible NotchKitSDKVersion before running any plugin
 //       code, dlopens the executable, resolves the entry symbol, creates the plugin against a stub
-//       host and prints its manifest. Exits 1 with the reason on any failure.
+//       host and prints its manifest, tab and tile (sizes, default first). Exits 1 with the reason
+//       on any failure.
 //   notchkit-probe --manifest <binary> [<entry-symbol>]
 //       Prints the manifest of a plugin binary that is not in a bundle yet as key=value lines.
 //       build-plugin.sh derives the bundle's Info.plist from this output.
@@ -41,6 +42,9 @@ func probeBundle(at path: String) throws -> [String] {
         keychainService: "notchkit-probe.\(id)"
     )
     let plugin = loaded.pluginType.init(context: NotchContext(pluginID: id, bundleURL: info.bundleURL, host: ProbeHost(), storage: storage))
+    let tileSizes = plugin.tile.map { tile in
+        tile.supportedSizes.map { "\($0) (\($0.columns)x\($0.rows))" }.joined(separator: ", ")
+    }
     return [
         "bundle: \(info.bundleURL.path)",
         "id: \(loaded.manifest.id)",
@@ -51,6 +55,7 @@ func probeBundle(at path: String) throws -> [String] {
         "entry: \(info.entrySymbol)",
         "expandedTab: \(plugin.expandedTab?.title ?? "-")",
         "settingsView: \(plugin.settingsView == nil ? "-" : "yes")",
+        "tile: \(tileSizes ?? "none")",
         "OK: 앱과 같은 방식으로 불러와서 \(type(of: plugin)) 인스턴스를 만들었어요.",
     ]
 }
