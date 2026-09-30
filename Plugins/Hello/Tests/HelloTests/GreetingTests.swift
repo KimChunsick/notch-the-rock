@@ -146,19 +146,30 @@ func render(_ view: some View, proposed: ProposedViewSize = .unspecified) -> CGI
         }
     }
 
-    @Test func R19__hello_and_annyeonghaseyo_are_reachable() {
-        let everyPhrase = Week.everyPhrase
-        #expect(everyPhrase.contains(HelloPhrases.hello))
-        #expect(everyPhrase.contains("안녕하세요!"))
-
-        var generator = SplitMix64(state: 19)
-        var picked = Set<String>()
-        let afternoon = Week.date(day: Week.wednesday, hour: 14)
-        for _ in 0..<64 {
-            picked.insert(HelloPhrases.phrase(for: afternoon, calendar: Week.calendar, using: &generator))
+    /// Every hour of every day, Monday mornings and Friday evenings included.
+    @Test(arguments: 0..<7)
+    func R19__every_slot_pool_has_hello_and_annyeonghaseyo(day: Int) {
+        for hour in 0..<24 {
+            let pool = HelloPhrases.phrases(for: Week.date(day: day, hour: hour), calendar: Week.calendar)
+            #expect(pool.contains(HelloPhrases.hello), "day \(day) hour \(hour)")
+            #expect(pool.contains("안녕하세요!"), "day \(day) hour \(hour)")
         }
-        #expect(picked.contains(HelloPhrases.hello))
-        #expect(picked.contains("안녕하세요!"))
+    }
+
+    @Test func R19__hello_and_annyeonghaseyo_are_reachable() {
+        var generator = SplitMix64(state: 19)
+        // One hour in each slot: dawn, morning, afternoon, evening, night.
+        for day in 0..<7 {
+            for hour in [3, 9, 15, 19, 23] {
+                let date = Week.date(day: day, hour: hour)
+                var picked = Set<String>()
+                for _ in 0..<64 {
+                    picked.insert(HelloPhrases.phrase(for: date, calendar: Week.calendar, using: &generator))
+                }
+                #expect(picked.contains(HelloPhrases.hello), "day \(day) hour \(hour)")
+                #expect(picked.contains("안녕하세요!"), "day \(day) hour \(hour)")
+            }
+        }
     }
 
     @Test func R19__seeded_pick_is_deterministic() {

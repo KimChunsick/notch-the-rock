@@ -29,32 +29,37 @@ enum HelloPhrases {
         }
     }
 
-    /// Every phrase that suits `date`. Saturday and Sunday are the weekend; Monday mornings and
-    /// Friday evenings get a phrase of their own.
+    /// The greetings every slot offers alongside its own phrases, whatever the hour.
+    static let everyday = [hello, "안녕하세요!"]
+
+    /// Every phrase that suits `date`: the slot's own phrases plus `everyday`. Saturday and Sunday
+    /// are the weekend; Monday mornings and Friday evenings get a phrase of their own.
     static func phrases(for date: Date, calendar: Calendar) -> [String] {
         // Foundation numbers weekdays from Sunday (1) to Saturday (7).
         let weekday = calendar.component(.weekday, from: date)
         let weekend = weekday == 1 || weekday == 7
+        let own: [String]
         switch slot(for: date, calendar: calendar) {
         case .dawn:
-            return weekend
+            own = weekend
                 ? ["고요한 주말 새벽이에요.", "고요한 새벽이에요."]
                 : ["고요한 새벽이에요.", "새벽까지 수고 많아요."]
         case .morning:
-            if weekend { return ["좋은 아침이에요.", "여유로운 주말 아침이에요.", hello] }
-            return ["좋은 아침이에요.", "안녕하세요!", hello] + (weekday == 2 ? ["힘찬 한 주 보내세요."] : [])
+            own = weekend
+                ? ["좋은 아침이에요.", "여유로운 주말 아침이에요."]
+                : ["좋은 아침이에요."] + (weekday == 2 ? ["힘찬 한 주 보내세요."] : [])
         case .afternoon:
-            return weekend
-                ? ["편안한 주말 오후 되세요.", "안녕하세요!", hello]
-                : ["오후도 힘내세요.", "안녕하세요!", hello]
+            own = weekend ? ["편안한 주말 오후 되세요."] : ["오후도 힘내세요."]
         case .evening:
-            if weekend { return ["즐거운 주말 저녁 보내세요.", "편안한 저녁 보내세요.", hello] }
-            return ["오늘 하루 수고했어요.", "편안한 저녁 보내세요.", hello] + (weekday == 6 ? ["한 주 동안 수고했어요."] : [])
+            own = weekend
+                ? ["즐거운 주말 저녁 보내세요.", "편안한 저녁 보내세요."]
+                : ["오늘 하루 수고했어요.", "편안한 저녁 보내세요."] + (weekday == 6 ? ["한 주 동안 수고했어요."] : [])
         case .night:
-            return weekend
+            own = weekend
                 ? ["좋은 밤이에요.", "느긋한 주말 밤이에요."]
                 : ["좋은 밤이에요.", "오늘 밤도 푹 쉬세요."]
         }
+        return own + everyday
     }
 
     /// One phrase for `date`, picked at random from `phrases(for:calendar:)`.
