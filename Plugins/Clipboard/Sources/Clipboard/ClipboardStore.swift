@@ -7,7 +7,7 @@ import NotchKit
 ///
 /// Images are kept apart so that recording a text does not rewrite every image, and an image is
 /// written once when it is first copied.
-struct ClipboardStore {
+struct ClipboardStore: Sendable {
     static let listFileName = "history.sealed"
     static let imageExtension = "image"
 
@@ -43,6 +43,15 @@ struct ClipboardStore {
         let url = imageURL(id)
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         try FileManager.default.removeItem(at: url)
+    }
+
+    /// Deletes the list and every image file, for a history that can no longer be read.
+    func deleteAll() throws {
+        let list = directory.appendingPathComponent(Self.listFileName)
+        if FileManager.default.fileExists(atPath: list.path) {
+            try FileManager.default.removeItem(at: list)
+        }
+        try deleteImages(notIn: [])
     }
 
     /// Removes image files that no entry of `ids` refers to (left behind when the app stopped

@@ -24,6 +24,7 @@ import Testing
         ("PNG signature", Data([0x89, 0x50, 0x4E, 0x47])),
         ("image bytes", png.subdata(in: png.count / 2 ..< png.count / 2 + 32)),
     ]
+    history.flush()
     let stored = try files(in: directory)
     #expect(stored.count == 2)  // the list and the image
     for file in stored {
@@ -46,6 +47,7 @@ import Testing
     history.record(try #require(ClipCapture(png: png)))
     history.record(.link("https://example.com"))
     history.setPinned(true, for: history.items[1].id)
+    history.flush()
 
     let errors = ErrorLog()
     let reloaded = makeHistory(directory: directory, key: key, errors: errors)
@@ -55,33 +57,131 @@ import Testing
     #expect(reloaded.imageData(for: image) == png)
 }
 
+/// A list that cannot be read (another key, a damaged file) is never written over: the history
+/// keeps new entries in memory only, including image originals, and leaves every stored file as it
+/// was until the user resets it.
 @MainActor
-@Test func R09__a_wrong_key_or_a_damaged_file_starts_empty_and_logs_an_error() throws {
+@Test func R09__an_unreadable_store_is_never_overwritten() throws {
     let directory = try makeDirectory()
-    let history = makeHistory(directory: directory, key: makeKey())
-    history.record(.text("written with the first key"))
+    let first = makeHistory(directory: directory, key: makeKey())
+    first.record(.text("written with the first key"))
+    first.record(try #require(ClipCapture(png: samplePNG(seed: 1))))
+    first.flush()
+    let stored = try contents(of: directory)
+    #expect(stored.count == 2)
 
     let errors = ErrorLog()
     let wrongKey = makeHistory(directory: directory, key: makeKey(), errors: errors)
     #expect(wrongKey.items.isEmpty)
+    #expect(wrongKey.isStoreUnreadable)
     #expect(errors.messages.count == 1)
+    let png = samplePNG(seed: 2)
+    wrongKey.record(.text("captured while unreadable"))
+    wrongKey.record(try #require(ClipCapture(png: png)))
+    wrongKey.record(.link("https://example.com"))
+    wrongKey.setPinned(true, for: wrongKey.items[2].id)
+    wrongKey.delete(wrongKey.items[0].id)
+    wrongKey.clearUnpinned()
+    wrongKey.record(try #require(ClipCapture(png: png)))
+    wrongKey.flush()
+    #expect(wrongKey.items.map(\.kind) == [.image, .text])
+    #expect(wrongKey.imageData(for: wrongKey.items[0]) == png)
+    #expect(try contents(of: directory) == stored)
 
-    let list = try #require(try files(in: directory).first)
+    // A damaged list is left alone the same way.
+    let list = directory.appendingPathComponent(ClipboardStore.listFileName)
     try Data("damaged".utf8).write(to: list)
-    let damaged = ErrorLog()
-    let key = makeKey()
-    let fresh = makeHistory(directory: directory, key: key, errors: damaged)
-    #expect(fresh.items.isEmpty)
-    #expect(damaged.messages.count == 1)
+    let damagedFiles = try contents(of: directory)
+    let damagedErrors = ErrorLog()
+    let damaged = makeHistory(directory: directory, key: makeKey(), errors: damagedErrors)
+    #expect(damaged.isStoreUnreadable)
+    #expect(damagedErrors.messages.count == 1)
+    damaged.record(.text("after the damage"))
+    damaged.flush()
+    #expect(damaged.items.map(\.content) == [.text("after the damage")])
+    #expect(try contents(of: directory) == damagedFiles)
 
-    // Recording still works and replaces the unreadable file.
-    fresh.record(.text("after the damage"))
-    #expect(makeHistory(directory: directory, key: key).items.map(\.content) == [.text("after the damage")])
-
-    // No list file at all is simply an empty history, not an error.
+    // No list file at all is a first run: an empty history that is saved as usual.
     let none = ErrorLog()
-    #expect(makeHistory(directory: try makeDirectory(), key: key, errors: none).items.isEmpty)
+    let fresh = try makeDirectory()
+    let key = makeKey()
+    let firstRun = makeHistory(directory: fresh, key: key, errors: none)
+    #expect(firstRun.items.isEmpty)
+    #expect(!firstRun.isStoreUnreadable)
     #expect(none.messages.isEmpty)
+    firstRun.record(.text("first run"))
+    firstRun.flush()
+    #expect(makeHistory(directory: fresh, key: key).items.map(\.content) == [.text("first run")])
+}
+
+/// Resetting deletes the unreadable files and saves what this session captured in a new store.
+@MainActor
+@Test func R09__resetting_an_unreadable_store_writes_a_new_one() throws {
+    let directory = try makeDirectory()
+    let old = makeHistory(directory: directory, key: makeKey())
+    old.record(.text("unreadable later"))
+    old.record(try #require(ClipCapture(png: samplePNG(seed: 4))))
+    old.flush()
+    let oldImage = try #require(old.items.first { $0.kind == .image })
+
+    let key = makeKey()
+    let history = makeHistory(directory: directory, key: key)
+    #expect(history.isStoreUnreadable)
+    let png = samplePNG(seed: 5)
+    history.record(.text("kept after the reset"))
+    history.record(try #require(ClipCapture(png: png)))
+    history.setPinned(true, for: history.items[1].id)
+
+    history.resetUnreadableStore()
+    #expect(!history.isStoreUnreadable)
+    history.flush()
+    let names = try files(in: directory).map(\.lastPathComponent)
+    #expect(names.count == 2)  // the new list and the new image
+    #expect(!names.contains("\(oldImage.id.uuidString).\(ClipboardStore.imageExtension)"))
+
+    let errors = ErrorLog()
+    let reloaded = makeHistory(directory: directory, key: key, errors: errors)
+    #expect(!reloaded.isStoreUnreadable)
+    #expect(reloaded.items == history.items)
+    #expect(errors.messages.isEmpty)
+    let image = try #require(reloaded.items.first { $0.kind == .image })
+    #expect(reloaded.imageData(for: image) == png)
+
+    // Later changes are saved again.
+    history.record(.link("https://example.com/after"))
+    history.flush()
+    #expect(makeHistory(directory: directory, key: key).items == history.items)
+}
+
+/// An image file goes only after a list without its entry is on disk: when that write fails the
+/// file stays, so the list still on disk keeps a readable image.
+@MainActor
+@Test func R09__image_files_stay_when_the_list_write_fails() throws {
+    let directory = try makeDirectory()
+    let key = makeKey()
+    let png = samplePNG(seed: 6)
+    let history = makeHistory(directory: directory, key: key)
+    history.record(try #require(ClipCapture(png: png)))
+    history.record(.text("next to the image"))
+    history.flush()
+    let image = try #require(history.items.first { $0.kind == .image })
+    let imageFile = directory.appendingPathComponent(image.id.uuidString).appendingPathExtension(ClipboardStore.imageExtension)
+    let list = directory.appendingPathComponent(ClipboardStore.listFileName)
+    let savedList = try Data(contentsOf: list)
+
+    // A non-empty folder in place of the list makes the next list write fail.
+    try FileManager.default.removeItem(at: list)
+    try FileManager.default.createDirectory(at: list, withIntermediateDirectories: false)
+    try Data("blocker".utf8).write(to: list.appendingPathComponent("blocker"))
+    history.delete(image.id)
+    history.flush()
+    #expect(FileManager.default.fileExists(atPath: imageFile.path))
+
+    try FileManager.default.removeItem(at: list)
+    try savedList.write(to: list)
+    let reloaded = makeHistory(directory: directory, key: key)
+    let restored = try #require(reloaded.items.first { $0.id == image.id })
+    #expect(reloaded.imageData(for: restored) == png)
 }
 
 private func bytes(of key: SymmetricKey) -> Data {

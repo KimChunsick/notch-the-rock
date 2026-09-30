@@ -47,6 +47,16 @@ func files(in directory: URL) throws -> [URL] {
     }
 }
 
+/// The bytes of every regular file under `directory`, keyed by its path relative to `directory`.
+func contents(of directory: URL) throws -> [String: Data] {
+    let base = directory.resolvingSymlinksInPath().path + "/"
+    var result: [String: Data] = [:]
+    for file in try files(in: directory) {
+        result[String(file.resolvingSymlinksInPath().path.dropFirst(base.count))] = try Data(contentsOf: file)
+    }
+    return result
+}
+
 /// Collects what the history reports as errors.
 @MainActor
 final class ErrorLog {

@@ -6,38 +6,90 @@ import Observation
 ///
 /// Rules: an identical repeat moves the existing entry to the top; pinned entries stay until they
 /// are deleted; at most `unpinnedLimit` unpinned entries are kept and the oldest go first. Every
-/// change is written to the store at once. Without a store (no key) the history lives in memory.
+/// change is handed to a `HistoryWriter`, which writes the list in the background. Without a
+/// writable store (no key, or a stored list that cannot be read) the history lives in memory,
+/// image originals included.
 @MainActor
 @Observable
 final class ClipboardHistory {
     static let unpinnedLimit = 200
 
     private(set) var items: [ClipItem] = []
+    /// A stored list that could not be read. It is left untouched, and nothing is written, until
+    /// `resetUnreadableStore()`.
+    private var unreadableStore: ClipboardStore?
     @ObservationIgnored private var store: ClipboardStore?
+    @ObservationIgnored private var writer: HistoryWriter?
+    /// The PNG of every image entry while there is no writable store, dropped with its entry.
+    @ObservationIgnored private var originals: [ClipItem.ID: Data] = [:]
     @ObservationIgnored private let logError: @MainActor (String) -> Void
 
     init(logError: @escaping @MainActor (String) -> Void) {
         self.logError = logError
     }
 
-    /// Replaces the list with what `store` holds and saves every later change there. An unreadable
-    /// list starts empty and is replaced by the next save. With nil the history keeps its entries
-    /// in memory only.
+    /// Whether the stored history could not be read, so this session is kept in memory only.
+    var isStoreUnreadable: Bool { unreadableStore != nil }
+
+    /// Replaces the list with what `store` holds and saves every later change there. A list that
+    /// exists but cannot be read leaves the history empty and in memory, and the store untouched.
+    /// With nil the history keeps its entries in memory only.
     func open(_ store: ClipboardStore?) {
-        self.store = store
+        flush()
+        self.store = nil
+        writer = nil
+        unreadableStore = nil
         guard let store else { return }
+        originals = [:]
         do {
             items = try store.loadItems()
         } catch {
             items = []
-            logError("could not read the clipboard history, starting empty: \(error)")
+            unreadableStore = store
+            logError("could not read the clipboard history, keeping it untouched and this session in memory: \(error)")
             return
         }
+        attach(store)
         do {
             try store.deleteImages(notIn: Set(items.map(\.id)))
         } catch {
             logError("could not remove unused clipboard images: \(error)")
         }
+    }
+
+    /// Deletes the unreadable stored history and saves the entries of this session in its place.
+    /// Later changes are saved again.
+    func resetUnreadableStore() {
+        guard let store = unreadableStore else { return }
+        do {
+            try store.deleteAll()
+        } catch {
+            logError("could not delete the unreadable clipboard history: \(error)")
+            return
+        }
+        unreadableStore = nil
+        attach(store)
+        // Each image goes to its file before the list refers to it; one that cannot be written
+        // leaves the history with its entry.
+        let unsaved = Set(items.filter { item in
+            guard item.kind == .image else { return false }
+            guard let png = originals[item.id] else { return true }
+            do {
+                try store.saveImage(png, for: item.id)
+                return false
+            } catch {
+                logError("could not save a copied image: \(error)")
+                return true
+            }
+        }.map(\.id))
+        originals = [:]
+        items.removeAll { unsaved.contains($0.id) }
+        save()
+    }
+
+    /// Returns once every change so far is on disk.
+    func flush() {
+        writer?.flush()
     }
 
     /// Records the pasteboard's current content unless it is excluded or empty.
@@ -70,12 +122,17 @@ final class ClipboardHistory {
         }
 
         let item = ClipItem(id: UUID(), content: content, date: date, isPinned: false)
-        if let png, let store {
-            do {
-                try store.saveImage(png, for: item.id)
-            } catch {
-                logError("could not save a copied image: \(error)")
-                return
+        if let png {
+            // One file per image, written here before the list that refers to it.
+            if let store {
+                do {
+                    try store.saveImage(png, for: item.id)
+                } catch {
+                    logError("could not save a copied image: \(error)")
+                    return
+                }
+            } else {
+                originals[item.id] = png
             }
         }
         items.insert(item, at: 0)
@@ -112,7 +169,8 @@ final class ClipboardHistory {
     func imageData(for item: ClipItem) -> Data? {
         guard case .image = item.content else { return nil }
         guard let store else {
-            logError("the image of a clipboard entry is not available without a history key")
+            if let png = originals[item.id] { return png }
+            logError("the image of a clipboard entry is not in memory")
             return nil
         }
         do {
@@ -160,29 +218,29 @@ final class ClipboardHistory {
         remove { dropped.contains($0.id) }
     }
 
-    /// Removes matching entries, saves the list, then deletes their image files. In that order an
-    /// interruption leaves at worst an unused image file, which the next `open(_:)` removes.
+    /// Removes matching entries and saves the list. Their image files are deleted only once that
+    /// list is written; an interruption leaves at worst an unused image file, which the next
+    /// `open(_:)` removes.
     private func remove(where shouldRemove: (ClipItem) -> Bool) {
         let removed = items.filter(shouldRemove)
         guard !removed.isEmpty else { return }
         items.removeAll(where: shouldRemove)
-        save()
-        guard let store else { return }
-        for item in removed where item.kind == .image {
-            do {
-                try store.deleteImage(for: item.id)
-            } catch {
-                logError("could not delete a clipboard image: \(error)")
-            }
+        let removedImages = Set(removed.filter { $0.kind == .image }.map(\.id))
+        for id in removedImages {
+            originals[id] = nil
         }
+        save(deletingImagesOf: removedImages)
     }
 
-    private func save() {
-        guard let store else { return }
-        do {
-            try store.saveItems(items)
-        } catch {
-            logError("could not save the clipboard history: \(error)")
+    private func save(deletingImagesOf removedImages: Set<ClipItem.ID> = []) {
+        writer?.save(items, deletingImagesOf: removedImages)
+    }
+
+    private func attach(_ store: ClipboardStore) {
+        self.store = store
+        let logError = logError
+        writer = HistoryWriter(store: store) { message in
+            Task { @MainActor in logError(message) }
         }
     }
 }

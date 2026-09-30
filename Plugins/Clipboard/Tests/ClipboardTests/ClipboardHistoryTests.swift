@@ -32,6 +32,7 @@ import Testing
     for item in history.items where item.kind == .text {
         history.setPinned(true, for: item.id)
     }
+    history.flush()
     #expect(try files(in: directory).count == 2)  // the list and the image
 
     for number in 1...250 {
@@ -45,6 +46,7 @@ import Testing
     #expect(unpinned.first?.content == .text("entry 250"))
     #expect(unpinned.last?.content == .text("entry 51"))
     // The dropped image took its encrypted file with it.
+    history.flush()
     #expect(try files(in: directory).count == 1)
 
     // Unpinning enters the capped set: the older of the two is now past the limit.
@@ -70,6 +72,7 @@ import Testing
 
     history.clearUnpinned()
     #expect(history.items.map(\.id) == [keep.id])
+    history.flush()
     #expect(try files(in: directory).count == 1)  // the list only; the image file is gone
     #expect(makeHistory(directory: directory, key: key).items.map(\.id) == [keep.id])
 }
@@ -86,4 +89,29 @@ import Testing
     #expect(history.matching("장보기").map(\.content) == [.text("장보기 목록")])
     #expect(history.matching("  ").count == 4)
     #expect(history.matching("nothing like this").isEmpty)
+}
+
+/// Changes are written in the background, the latest list winning over the ones queued before it;
+/// a flush waits for the write, so a burst ends with its final state on disk.
+@MainActor
+@Test func R09__a_burst_of_changes_ends_with_the_last_snapshot_on_disk() throws {
+    let directory = try makeDirectory()
+    let key = makeKey()
+    let history = makeHistory(directory: directory, key: key)
+    let long = String(repeating: "긴 글 ", count: 2_000)
+    for number in 1...300 {
+        history.record(.text("\(long)\(number)"))
+        if number.isMultiple(of: 7) {
+            history.setPinned(true, for: history.items[0].id)
+        }
+    }
+    history.record(.text("\(long)150"))
+    history.delete(history.items[1].id)
+    history.flush()
+
+    let errors = ErrorLog()
+    let reloaded = makeHistory(directory: directory, key: key, errors: errors)
+    #expect(reloaded.items == history.items)
+    #expect(reloaded.items.first?.content == .text("\(long)150"))
+    #expect(errors.messages.isEmpty)
 }

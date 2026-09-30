@@ -36,9 +36,11 @@ public final class ClipboardPlugin: NotchPlugin {
         monitor.start()
     }
 
+    /// Stops watching and waits for the pending history write, so quitting loses no change.
     public func deactivate() {
         monitor?.stop()
         monitor = nil
+        history.flush()
     }
 
     public var expandedTab: PluginTab? {
@@ -51,8 +53,8 @@ public final class ClipboardPlugin: NotchPlugin {
         AnyView(ClipboardSettingsView(history: history))
     }
 
-    /// The encrypted store, or nil when the Keychain cannot give a key. Then the history stays in
-    /// memory for this session and nothing is written to disk.
+    /// The encrypted store, or nil when the Keychain cannot give a key. Then the history, image
+    /// originals included, stays in memory for this session and nothing is written to disk.
     private func openStore() -> ClipboardStore? {
         do {
             let key = try HistoryKey.loadOrCreate(in: context.storage)
