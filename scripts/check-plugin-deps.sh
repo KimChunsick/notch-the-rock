@@ -7,8 +7,9 @@
 # Checks, for every <plugins-dir>/*/Package.swift (read with `swift package dump-package`):
 #   - package dependencies: only the NotchKit package of this repository (SDK/NotchKit)
 #   - target dependencies: only the NotchKit product and the plugin's own targets
-#   - Swift sources: no `import NotchTheRock` and no import of another plugin's module; text inside
-#     comments and string literals is not code and is ignored
+#   - Swift sources: no import of NotchTheRock or another plugin's module in any form the compiler
+#     accepts (`@testable internal import X`, `import struct X.T`, `import X.Sub`, `a; import X`);
+#     text inside comments, string literals and regex literals is not code and is ignored
 # Requires bash 3.2 or later and python3 (part of the Command Line Tools).
 set -euo pipefail
 shopt -s nullglob
@@ -72,12 +73,17 @@ for target in manifest["targets"]:
         if not allowed:
             problems.append(f"타깃 {target['name']}은 NotchKit과 자기 타깃만 의존할 수 있어요: {label}")
 
-string_start = re.compile(r'(#*)("""|")')
+# A multi-line string's opening `"""` ends its line; the compiler rejects anything after it. So a
+# `"""` that the scanner meets inside text it failed to recognize cannot hide the lines below.
+string_start = re.compile(r'(#*)("""(?=\r?\n)|")')
+extended_regex_start = re.compile(r"(#+)/")
+operator_characters = "/=-+!*%<>&|^~?"
 
 def code_only(source):
-    """The source with comments and string literals blanked out. Newlines stay, so line-anchored
-    patterns still see real code at the start of a line. Follows Swift's lexical rules: block
-    comments nest, `#` delimits raw strings, and `\\(` (`\\#(` in raw strings) interpolates code."""
+    """The source with comments, string literals and regex literals blanked out. Newlines stay, so
+    line-anchored patterns still see real code at the start of a line. Follows Swift's lexical rules:
+    block comments nest, `#` delimits raw strings, `\\(` (`\\#(` in raw strings) interpolates code,
+    and `/.../` or `#/.../#` is a regex literal whose quotes open no string."""
     out = []
     end_of_source = len(source)
 
@@ -102,6 +108,7 @@ def code_only(source):
         depth = 0
         while i < end_of_source:
             string = string_start.match(source, i)
+            regex = extended_regex_start.match(source, i)
             if source.startswith("//", i):
                 end = source.find("\n", i)
                 end = end_of_source if end < 0 else end
@@ -109,6 +116,13 @@ def code_only(source):
                 i = end
             elif source.startswith("/*", i):
                 end = block_comment_end(i)
+                blank(i, end)
+                i = end
+            elif regex:
+                end = extended_regex_end(i, len(regex.group(1)))
+                blank(i, end)
+                i = end
+            elif source[i] == "/" and (end := bare_regex_end(i)):
                 blank(i, end)
                 i = end
             elif string:
@@ -121,6 +135,59 @@ def code_only(source):
                 out.append(source[i])
                 i += 1
         return i
+
+    # `#/.../#` with any number of `#`: ends at the first `/` followed by as many `#`, and a backslash
+    # escapes the next character. Only a literal whose opening delimiter ends its line may span lines.
+    def extended_regex_end(i, hashes):
+        closing = "/" + "#" * hashes
+        i += hashes + 1
+        multiline = source.startswith("\n", i) or source.startswith("\r\n", i)
+        while i < end_of_source:
+            if source.startswith(closing, i):
+                return i + len(closing)
+            if source[i] == "\n" and not multiline:
+                return i  # unterminated; the compiler reports it
+            i += 2 if source[i] == "\\" and source[i + 1:i + 2] not in ("", "\n") else 1
+        return end_of_source
+
+    # A bare `/.../` literal, told from the `/` operator the way the Swift lexer tells it: the `/`
+    # starts an expression (it follows whitespace, `(`, `[`, `{`, `,`, `;`, `:`, the start of the
+    # source, or prefix operator characters that do), not an operator name after `func` or
+    # `operator`; no space or tab follows it; it closes on the same line after a character other
+    # than space or tab, with balanced parentheses, and the closing `/` does not start a comment.
+    # Returns where it ends, or None when the `/` is an operator. When any rule fails the text stays
+    # code, which can report a false import but cannot hide a real one.
+    def bare_regex_end(i):
+        start = i
+        while start > 0 and source[start - 1] in operator_characters:
+            start -= 1
+        if start > 0 and source[start - 1] not in " \t\r\n([{,;:":
+            return None
+        k = start
+        while k > 0 and source[k - 1] in " \t\r\n":
+            k -= 1
+        if re.search(r"(?<![\w`])(?:func|operator)\Z", source[max(0, k - 9):k]):
+            return None
+        j, depth = i + 1, 0
+        if j >= end_of_source or source[j] in " \t\r\n":
+            return None
+        while j < end_of_source and source[j] not in "\r\n":
+            character = source[j]
+            if character == "\\":
+                if source[j + 1:j + 2] in ("", "\r", "\n"):
+                    return None
+                j += 2
+                continue
+            if character == "/":
+                if source[j - 1] in " \t" or depth != 0 or source[j + 1:j + 2] in ("/", "*"):
+                    return None
+                return j + 1
+            if character in "()":
+                depth += 1 if character == "(" else -1
+                if depth < 0:
+                    return None
+            j += 1
+        return None
 
     def string_literal(i, hashes, multiline):
         closing = ('"""' if multiline else '"') + "#" * hashes
@@ -150,7 +217,14 @@ def code_only(source):
     code(0, False)
     return "".join(out)
 
-import_pattern = re.compile(r"^\s*(?:@[\w()]+\s+)*import\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\s+)?(\w+)", re.M)
+# An import declaration: at the start of a line or after `;`, attributes (`@testable`, `@_spi(Name)`),
+# an access level, an optional kind (`import struct X.T`), then the module, possibly in backticks and
+# followed by a submodule path. The captured name is the top-level module.
+import_pattern = re.compile(
+    r"(?:^|;)\s*(?:@\w+(?:\s*\([^()]*\))?\s*)*(?:(?:public|package|internal|fileprivate|private)\s+)?"
+    r"import\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\s+)?`?(\w+)",
+    re.M,
+)
 for directory, _, files in os.walk(package):
     if "/.build" in directory or "/build" in directory[len(package):]:
         continue
