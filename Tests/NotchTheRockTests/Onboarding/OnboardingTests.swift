@@ -109,6 +109,80 @@ private final class FakePermissions {
         model.finish()
     }
 
+    /// Both cards checked wait `grantPause` before the step moves on. A permission turned off in that
+    /// pause keeps the 권한 step up with its card off; turning it on again moves on after a new pause.
+    @Test func R13__turning_a_permission_off_during_the_pause_keeps_the_permissions_step() async {
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let fake = FakePermissions()
+        let model = OnboardingModel(
+            permissions: fake.permissions,
+            record: OnboardingRecord(defaults: defaults),
+            pollInterval: .milliseconds(10),
+            grantPause: .milliseconds(100)
+        )
+        model.start()
+        model.advance()
+        fake.trusted = true
+        let deadline = ContinuousClock.now + .seconds(3)
+        while model.accessibilityState != .on, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(model.accessibilityState == .on)
+
+        model.enableLaunchAtLogin()
+        fake.trusted = false
+        while model.accessibilityState != .off, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        try? await Task.sleep(for: .milliseconds(300))
+        #expect(model.step == .permissions, "Accessibility was turned off during the pause")
+        #expect(model.accessibilityState == .off)
+        #expect(model.loginItemState == .on)
+
+        fake.trusted = true
+        while model.step == .permissions, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(model.step == .usage)
+        model.finish()
+    }
+
+    /// Right before moving on the step reads both permissions again, so one turned off after the
+    /// last poll keeps it up too; a grant after that starts the pause again.
+    @Test func R13__moving_on_reads_both_permissions_again_first() async {
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let fake = FakePermissions()
+        fake.trusted = true
+        let model = OnboardingModel(
+            permissions: fake.permissions,
+            record: OnboardingRecord(defaults: defaults),
+            pollInterval: .milliseconds(300),
+            grantPause: .milliseconds(10)
+        )
+        model.start()
+        model.advance()
+        #expect(model.accessibilityState == .on)
+        model.enableLaunchAtLogin()
+        #expect(model.loginItemState == .on)
+        // Turned off before the first poll: only the read at the end of the pause can see it.
+        fake.trusted = false
+        let deadline = ContinuousClock.now + .seconds(3)
+        while model.accessibilityState != .off, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(model.accessibilityState == .off)
+        #expect(model.step == .permissions)
+
+        fake.trusted = true
+        while model.step == .permissions, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(model.step == .usage)
+        model.finish()
+    }
+
     @Test func R13__login_item_status_is_shown_in_korean() {
         let labels = [SystemPermissions.LoginItemStatus.enabled, .requiresApproval, .notRegistered, .notFound].map(\.label)
         // Before the first registration the system reports `.notFound`; that is "off", not an error.

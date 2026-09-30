@@ -171,7 +171,7 @@ final class OnboardingModel {
             loginItemFailure = SystemPermissions.launchAtLoginFailure(enabling: true, error)
         }
         loginItemStatus = permissions.loginItemStatus()
-        noticeGrant(since: before)
+        noticeChange(since: before)
     }
 
     /// For 허용 필요: the login item is registered and waits for the user in System Settings.
@@ -212,7 +212,7 @@ final class OnboardingModel {
         guard step == .permissions else { return }
         let before = permissionsOn
         readPermissions()
-        noticeGrant(since: before)
+        noticeChange(since: before)
     }
 
     private var permissionsOn: (accessibility: Bool, loginItem: Bool) {
@@ -220,16 +220,29 @@ final class OnboardingModel {
     }
 
     /// A permission that just turned on brings the window back; once both are on, the step moves on
-    /// after `grantPause`, so the user sees both checks first.
-    private func noticeGrant(since before: (accessibility: Bool, loginItem: Bool)) {
+    /// after `grantPause`, so the user sees both checks first. A permission that is off stops that
+    /// pause, and the step reads both again before moving on, so it never leaves one off behind the
+    /// user's back; the next grant starts a new pause.
+    private func noticeChange(since before: (accessibility: Bool, loginItem: Bool)) {
         let now = permissionsOn
-        guard step == .permissions,
-              (!before.accessibility && now.accessibility) || (!before.loginItem && now.loginItem) else { return }
+        guard step == .permissions else { return }
+        if !now.accessibility || !now.loginItem {
+            autoAdvance?.cancel()
+            autoAdvance = nil
+        }
+        guard (!before.accessibility && now.accessibility) || (!before.loginItem && now.loginItem) else { return }
         onPermissionGranted?()
         guard now.accessibility, now.loginItem, autoAdvance == nil else { return }
         autoAdvance = Task { [weak self, grantPause] in
             try? await Task.sleep(for: grantPause)
             guard let self, !Task.isCancelled, self.step == .permissions else { return }
+            // Polling may not have seen a permission turned off late in the pause.
+            self.readPermissions()
+            let now = self.permissionsOn
+            guard now.accessibility, now.loginItem else {
+                self.autoAdvance = nil
+                return
+            }
             self.next()
         }
     }
