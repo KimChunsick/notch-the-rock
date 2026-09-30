@@ -46,8 +46,9 @@ enum Week {
 }
 
 /// Height in points of the opaque ink (pixels at least 90% opaque), which leaves out the soft glow.
+/// `band` limits it to rows that far from the top, in points.
 @MainActor
-func inkHeight(of image: CGImage, scale: CGFloat) -> CGFloat {
+func inkHeight(of image: CGImage, scale: CGFloat, band: Range<CGFloat>? = nil) -> CGFloat {
     let width = image.width, height = image.height
     var pixels = [UInt8](repeating: 0, count: width * height * 4)
     let context = CGContext(
@@ -55,8 +56,9 @@ func inkHeight(of image: CGImage, scale: CGFloat) -> CGFloat {
         space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
     )!
     context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    let rows = band.map { max(Int($0.lowerBound * scale), 0)..<min(Int($0.upperBound * scale), height) } ?? 0..<height
     var top: Int?, bottom: Int?
-    for row in 0..<height {
+    for row in rows {
         for column in 0..<width where pixels[(row * width + column) * 4 + 3] >= 230 {
             top = top ?? row
             bottom = row
@@ -65,6 +67,17 @@ func inkHeight(of image: CGImage, scale: CGFloat) -> CGFloat {
     }
     guard let top, let bottom else { return 0 }
     return CGFloat(bottom - top + 1) / scale
+}
+
+/// The rows each line of `phrase` takes in a render of its artwork at its own size, in points from
+/// the top: the line's outlines with 8 pt for the pen on either side, less than half the space
+/// between lines.
+func lineBands(of phrase: String) -> [Range<CGFloat>] {
+    let top = HelloArtwork(phrase: phrase).canvas.minY
+    return HelloOutline.lines(for: phrase).map { line in
+        let bounds = line.stroke.boundingRect
+        return (bounds.minY - top - 8)..<(bounds.maxY - top + 8)
+    }
 }
 
 extension HelloArtwork {
@@ -215,8 +228,11 @@ func render(_ view: some View, proposed: ProposedViewSize = .unspecified) -> CGI
             let image = render(HelloLetteringView(artwork: artwork, frame: written))
             #expect(abs(CGFloat(image.width) / 2 - artwork.size.width.rounded()) <= 1, "\(phrase)")
             #expect(abs(CGFloat(image.height) / 2 - artwork.size.height.rounded()) <= 1, "\(phrase)")
-            let height = inkHeight(of: image, scale: 2)
-            #expect(abs(height / formerHeight - 0.5) < 0.075, "\(phrase): \(height) pt")
+            // Every line of a wrapped phrase is half as tall as the former hello.
+            for band in lineBands(of: phrase) {
+                let height = inkHeight(of: image, scale: 2, band: band)
+                #expect(abs(height / formerHeight - 0.5) < 0.075, "\(phrase): \(height) pt")
+            }
 
             // In the former fixed-size takeover the widest phrase shrinks to fit instead of clipping.
             let squeezed = render(HelloLetteringView(artwork: artwork, frame: written), proposed: ProposedViewSize(width: 564, height: 162))
@@ -224,32 +240,128 @@ func render(_ view: some View, proposed: ProposedViewSize = .unspecified) -> CGI
         }
     }
 
-    /// Offscreen captures of the greeting every half second, written only when HELLO_CAPTURE_DIR is
-    /// set: `R19-frame-<phrase>-<seconds>s.png` plus the measured heights in `R19-size.txt`.
+    @Test func R19__every_phrase_fits_the_maximum_line_width() {
+        for phrase in Week.everyPhrase where phrase != HelloPhrases.hello {
+            let artwork = HelloArtwork(phrase: phrase)
+            #expect(artwork.stroke.boundingRect.width <= HelloOutline.maxLineWidth, "\(phrase)")
+            #expect(artwork.size.width <= HelloOutline.maxLineWidth + 2 * HelloOutline.margin, "\(phrase)")
+            // Lines are centred on one another.
+            for line in HelloOutline.lines(for: phrase) {
+                #expect(abs(line.stroke.boundingRect.midX - artwork.stroke.boundingRect.midX) < 0.5, "\(phrase): \(line.text)")
+            }
+        }
+        // The handwritten word never wraps.
+        #expect(HelloArtwork(phrase: HelloPhrases.hello).size == HelloArtwork.hello.size)
+    }
+
+    @Test func R19__long_phrases_wrap_at_spaces() {
+        #expect(HelloOutline.lineBreaks(for: "편안한 주말 오후 되세요.") == ["편안한 주말", "오후 되세요."])
+        // Two even lines rather than a long first line and a short last one.
+        #expect(HelloOutline.lineBreaks(for: "오늘 밤도 푹 쉬세요.") == ["오늘 밤도", "푹 쉬세요."])
+        #expect(HelloOutline.lineBreaks(for: "안녕하세요!") == ["안녕하세요!"])
+
+        for phrase in Week.everyPhrase where phrase != HelloPhrases.hello {
+            let breaks = HelloOutline.lineBreaks(for: phrase)
+            #expect(breaks.joined(separator: " ") == phrase)
+            if HelloOutline.width(of: phrase) > HelloOutline.maxLineWidth {
+                #expect(breaks.count >= 2, "\(phrase)")
+            } else {
+                #expect(breaks == [phrase])
+            }
+        }
+    }
+
+    @Test func R19__word_wider_than_a_line_breaks_between_characters() {
+        let word = "가나다라마바사아자차카타파하"
+        #expect(HelloOutline.width(of: word) > 2 * HelloOutline.maxLineWidth)
+        let breaks = HelloOutline.lineBreaks(for: word)
+        #expect(breaks.count == 3)
+        #expect(breaks.joined() == word)
+        for line in breaks {
+            #expect(HelloOutline.width(of: line) <= HelloOutline.maxLineWidth, "\(line)")
+        }
+    }
+
+    @Test func R19__wrapped_lines_keep_the_single_line_glyph_height() {
+        let written = HelloTimeline.frame(at: HelloTimeline.fadeStart)
+        let wrapped = Week.everyPhrase.filter { HelloOutline.lineBreaks(for: $0).count > 1 }
+        #expect(!wrapped.isEmpty)
+        for phrase in wrapped {
+            let image = render(HelloLetteringView(artwork: HelloArtwork(phrase: phrase), frame: written))
+            for (line, band) in zip(HelloOutline.lines(for: phrase), lineBands(of: phrase)) {
+                let alone = render(HelloLetteringView(artwork: HelloArtwork(phrase: line.text), frame: written))
+                let height = inkHeight(of: image, scale: 2, band: band)
+                #expect(abs(height - inkHeight(of: alone, scale: 2)) <= 1, "\(phrase): \(line.text) \(height) pt")
+            }
+        }
+    }
+
+    @Test func R19__lines_are_written_in_reading_order() throws {
+        for phrase in Week.everyPhrase where HelloOutline.lineBreaks(for: phrase).count > 1 {
+            let artwork = HelloArtwork(phrase: phrase)
+            let lines = HelloOutline.lines(for: phrase).map { $0.stroke.boundingRect }
+            for (upper, lower) in zip(lines, lines.dropFirst()) {
+                #expect(upper.maxY < lower.minY, "\(phrase)")
+            }
+            // The pen moves from line to line, top to bottom, never back.
+            var current = 0
+            for step in 1...100 {
+                let tip = try #require(artwork.stroke.trimmedPath(from: 0, to: Double(step) / 100).currentPoint)
+                let line = try #require(lines.firstIndex { $0.insetBy(dx: -1, dy: -1).contains(tip) }, "\(phrase)")
+                #expect(line >= current, "\(phrase)")
+                current = line
+            }
+            #expect(current == lines.count - 1, "\(phrase)")
+        }
+    }
+
+    /// Offscreen captures of wrapped greetings, written only when HELLO_CAPTURE_DIR is set:
+    /// `R19-wrap-<phrase>-<seconds>s.png` mid-writing and finished, plus every phrase's line breaks
+    /// and laid-out size in `R19-wrap.txt`.
     @Test func R19__offscreen_captures() throws {
         guard let directory = ProcessInfo.processInfo.environment["HELLO_CAPTURE_DIR"] else { return }
         let folder = URL(fileURLWithPath: directory, isDirectory: true)
-        let former = HelloArtwork.formerHello
-        let written = HelloTimeline.frame(at: HelloTimeline.fadeStart)
-        let formerHeight = inkHeight(of: render(HelloLetteringView(artwork: former, frame: written)), scale: 2)
-        var report = ["# R19 size — ink height in points (pixels ≥ 90% opaque at 2x), measured offscreen", ""]
-        report.append("former hello (fitted into 564×162): canvas \(Int(former.size.width))×\(Int(former.size.height)) pt, ink \(formerHeight) pt")
-
+        let phrases = Week.everyPhrase.filter { $0 != HelloPhrases.hello }
+            .sorted { HelloOutline.width(of: $0) > HelloOutline.width(of: $1) }
         let captures: [(name: String, phrase: String)] = [
-            ("hello", HelloPhrases.hello), ("joeun-achim", "좋은 아침이에요."), ("pyeonan-jumal-ohu", "편안한 주말 오후 되세요."),
+            ("pyeonan-jumal-ohu", "편안한 주말 오후 되세요."), ("jeulgeoun-jumal-jeonyeok", "즐거운 주말 저녁 보내세요."),
         ]
+        // The second capture is the phrase that is widest on one line.
+        #expect(phrases.first == captures[1].phrase)
         for capture in captures {
             let artwork = HelloArtwork(phrase: capture.phrase)
-            for elapsed in [0.5, 1.0, 1.5, 2.0, 2.5] {
+            for elapsed in [1.0, 2.5] {
                 let frame = HelloTimeline.frame(at: elapsed)
                 let image = render(HelloLetteringView(artwork: artwork, frame: frame).padding(8).background(Color.black))
-                let url = folder.appendingPathComponent("R19-frame-\(capture.name)-\(elapsed)s.png")
+                let url = folder.appendingPathComponent("R19-wrap-\(capture.name)-\(elapsed)s.png")
                 let data = try #require(NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))
                 try data.write(to: url)
             }
-            let height = inkHeight(of: render(HelloLetteringView(artwork: artwork, frame: written)), scale: 2)
-            report.append("\(capture.phrase): canvas \(Int(artwork.size.width))×\(Int(artwork.size.height)) pt, ink \(height) pt, ratio to former hello \(String(format: "%.3f", height / formerHeight))")
         }
-        try (report.joined(separator: "\n") + "\n").write(to: folder.appendingPathComponent("R19-size.txt"), atomically: true, encoding: .utf8)
+
+        let written = HelloTimeline.frame(at: HelloTimeline.fadeStart)
+        let formerHeight = inkHeight(of: render(HelloLetteringView(artwork: .formerHello, frame: written)), scale: 2)
+        var report = [
+            "# R19 wrap — line breaks and laid-out size of every phrase, widest first (max line width \(Int(HelloOutline.maxLineWidth)) pt, baselines \(Int(HelloOutline.lineSpacing)) pt apart), measured offscreen",
+            "",
+            "former hello ink \(formerHeight) pt; hello: handwritten, never wraps, canvas \(Int(HelloArtwork.hello.size.width))×\(Int(HelloArtwork.hello.size.height)) pt",
+        ]
+        for phrase in phrases {
+            let artwork = HelloArtwork(phrase: phrase)
+            let image = render(HelloLetteringView(artwork: artwork, frame: written))
+            let inks = lineBands(of: phrase).map { band in
+                let height = inkHeight(of: image, scale: 2, band: band)
+                return "\(height) pt (\(String(format: "%.3f", height / formerHeight)))"
+            }
+            let breaks = HelloOutline.lineBreaks(for: phrase)
+            let lines = breaks.map { "\"\($0)\"" }.joined(separator: " / ")
+            let ink = artwork.stroke.boundingRect
+            report.append(
+                "\(phrase): one line \(Int(HelloOutline.width(of: phrase).rounded())) pt → \(breaks.count) line(s) \(lines); "
+                    + "laid out \(Int(ink.width.rounded()))×\(Int(ink.height.rounded())) pt, canvas \(Int(artwork.size.width.rounded()))×\(Int(artwork.size.height.rounded())) pt; "
+                    + "line ink height (ratio to former hello) \(inks.joined(separator: ", "))"
+            )
+        }
+        try (report.joined(separator: "\n") + "\n").write(to: folder.appendingPathComponent("R19-wrap.txt"), atomically: true, encoding: .utf8)
     }
 }
