@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import ServiceManagement
 
@@ -25,12 +26,13 @@ enum SystemPermissions {
         /// Registered, even when the user still has to approve it in System Settings.
         var isRegistered: Bool { self == .enabled || self == .requiresApproval }
 
+        /// `.notFound` is what the system reports before the app has ever registered, so it reads as
+        /// "off" like `.notRegistered`; a failed registration shows `launchAtLoginFailure` instead.
         var label: String {
             switch self {
             case .enabled: "켜져 있어요"
             case .requiresApproval: "시스템 설정의 로그인 항목에서 허용해야 해요"
-            case .notRegistered: "등록되지 않았어요"
-            case .notFound: "시스템에서 로그인 항목을 찾지 못했어요"
+            case .notRegistered, .notFound: "꺼져 있어요"
             }
         }
     }
@@ -42,6 +44,11 @@ enum SystemPermissions {
         _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
     }
 
+    /// Opens System Settings at Privacy & Security > Accessibility.
+    static func openAccessibilitySettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+    }
+
     static var loginItemStatus: LoginItemStatus { LoginItemStatus(SMAppService.mainApp.status) }
 
     /// Registers or unregisters the app as a login item. The error is the system's, unchanged.
@@ -51,6 +58,12 @@ enum SystemPermissions {
         } else {
             try SMAppService.mainApp.unregister()
         }
+    }
+
+    /// What the Settings pane and onboarding say when `setLaunchAtLogin(_:)` throws.
+    static func launchAtLoginFailure(enabling enabled: Bool, _ error: any Error) -> String {
+        let action = enabled ? "등록하지" : "해제하지"
+        return "로그인 항목을 \(action) 못했어요: \(error.localizedDescription)"
     }
 
     static func openLoginItemsSettings() {

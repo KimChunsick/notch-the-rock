@@ -38,8 +38,7 @@ struct GeneralSettingsPane: View {
             try SystemPermissions.setLaunchAtLogin(enabled)
             failure = nil
         } catch {
-            let action = enabled ? "등록하지" : "해제하지"
-            failure = "로그인 항목을 \(action) 못했어요: \(error.localizedDescription)"
+            failure = SystemPermissions.launchAtLoginFailure(enabling: enabled, error)
         }
         status = SystemPermissions.loginItemStatus
     }
