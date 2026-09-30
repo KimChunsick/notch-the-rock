@@ -159,6 +159,18 @@ final class NotchHostModel: NotchHost {
         }
     }
 
+    /// Removes everything `pluginID` shows: its live activities, HUD and takeover, and answers its
+    /// waiting attention requests with `.cancelled`. Called when the plugin is turned off.
+    func withdraw(from pluginID: String) {
+        activities = activities.filter { $0.key.pluginID != pluginID }
+        if hud?.pluginID == pluginID { hud = nil }
+        if takeover?.pluginID == pluginID { takeover = nil }
+        for pending in attentions where pending.pluginID == pluginID {
+            respond(.cancelled, to: pending.id)
+        }
+        scheduleExpiry()
+    }
+
     // MARK: NotchHost
 
     func post(_ activity: LiveActivity, from pluginID: String) {
