@@ -21,7 +21,7 @@ struct NotchRootView: View {
             metrics.shape
                 .fill(Color.black)
                 .background(AttentionGlow(color: glow, shape: metrics.shape))
-            content(for: state)
+            content(for: state, width: metrics.size.width)
                 .frame(width: metrics.size.width, height: metrics.size.height, alignment: .top)
                 .clipShape(metrics.shape)
         }
@@ -39,7 +39,7 @@ struct NotchRootView: View {
     }
 
     @ViewBuilder
-    private func content(for state: NotchState) -> some View {
+    private func content(for state: NotchState, width: CGFloat) -> some View {
         switch state {
         case .collapsed:
             if let posted = host.liveActivity {
@@ -57,7 +57,7 @@ struct NotchRootView: View {
                     .transition(Self.contentTransition)
             }
         case .expanded:
-            ExpandedContent(host: host, notchSize: notchSize, openSettings: openSettings)
+            ExpandedContent(host: host, notchSize: notchSize, width: width, openSettings: openSettings)
                 .transition(Self.contentTransition)
         case .attention:
             if let pending = host.attention {
@@ -158,40 +158,60 @@ private struct HUDWings: View {
     }
 }
 
-/// Tab icons left of the camera, the gear right of it, the selected plugin's view below.
+/// Tab icons in the left wing, the gear in the right wing, the selected plugin's view below.
+/// `TabBarLayout` places every control of the top row clear of the camera housing; tabs that do
+/// not fit are listed in the overflow menu.
 private struct ExpandedContent: View {
     let host: NotchHostModel
     let notchSize: CGSize
+    let width: CGFloat
     let openSettings: @MainActor () -> Void
 
     var body: some View {
+        let tabs = host.tabs
+        let layout = TabBarLayout(notch: notchSize, expandedWidth: width, tabCount: tabs.count)
         VStack(spacing: 0) {
-            HStack(spacing: 4) {
-                ForEach(host.tabs) { tab in
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(zip(tabs, layout.tabFrames)), id: \.0.id) { tab, frame in
                     Button {
                         host.selectTab(tab.pluginID)
                     } label: {
-                        Image(systemName: tab.tab.symbol)
-                            .frame(width: 26, height: 22)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(.white.opacity(tab.id == host.selectedTabID ? 0.18 : 0))
-                            )
+                        TabBarIcon(symbol: tab.tab.symbol, selected: tab.id == host.selectedTabID)
                     }
                     .help(tab.tab.title)
+                    .position(x: frame.midX, y: frame.midY)
                 }
-                Spacer(minLength: notchSize.width + 16)
+                if let frame = layout.overflowFrame {
+                    let hidden = tabs[layout.overflow]
+                    Menu {
+                        ForEach(hidden) { tab in
+                            let pluginID = tab.pluginID
+                            Toggle(isOn: Binding(
+                                get: { host.selectedTabID == pluginID },
+                                set: { _ in host.selectTab(pluginID) }
+                            )) {
+                                Label(tab.tab.title, systemImage: tab.tab.symbol)
+                            }
+                        }
+                    } label: {
+                        TabBarIcon(symbol: "ellipsis", selected: hidden.contains { $0.id == host.selectedTabID })
+                    }
+                    .menuStyle(.button)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("탭 더 보기")
+                    .position(x: frame.midX, y: frame.midY)
+                }
                 Button(action: openSettings) {
-                    Image(systemName: "gearshape")
-                        .frame(width: 26, height: 22)
+                    TabBarIcon(symbol: "gearshape", selected: false)
                 }
                 .help("설정")
+                .position(x: layout.gearFrame.midX, y: layout.gearFrame.midY)
             }
             .buttonStyle(.plain)
             .font(.system(size: 13, weight: .medium))
             .foregroundStyle(.white.opacity(0.9))
-            .padding(.horizontal, NotchLayout.openShoulder + 14)
-            .frame(height: notchSize.height)
+            .frame(width: width, height: notchSize.height)
 
             Group {
                 if let selected = host.tabs.first(where: { $0.id == host.selectedTabID }) {
@@ -206,6 +226,17 @@ private struct ExpandedContent: View {
             .padding(.horizontal, NotchLayout.openShoulder + 16)
             .padding(.bottom, 16)
         }
+    }
+}
+
+private struct TabBarIcon: View {
+    let symbol: String
+    let selected: Bool
+
+    var body: some View {
+        Image(systemName: symbol)
+            .frame(width: TabBarLayout.buttonSize.width, height: TabBarLayout.buttonSize.height)
+            .background(RoundedRectangle(cornerRadius: 6).fill(.white.opacity(selected ? 0.18 : 0)))
     }
 }
 

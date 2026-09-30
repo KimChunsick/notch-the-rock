@@ -88,6 +88,8 @@ enum NotchLayout {
     /// Whether a screen point lies on the drawn shape (not merely in its bounding box).
     static func contains(_ point: CGPoint, metrics: Metrics, notchRect: CGRect) -> Bool {
         let frame = frame(of: metrics, notchRect: notchRect)
+        // Above the frame is another display arranged over this one, not the notch.
+        guard point.y <= frame.maxY else { return false }
         // Shape coordinates are flipped; the pointer at the very top row still counts as inside.
         let local = CGPoint(x: point.x - frame.minX, y: max(frame.maxY - point.y, 0.5))
         return metrics.shape.path(in: CGRect(origin: .zero, size: metrics.size)).contains(local)
