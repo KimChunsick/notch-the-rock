@@ -9,6 +9,8 @@ enum HelloTimeline {
         var opacity: Double
         /// Strength of the glow around the ink, 0...1.
         var glow: Double
+        /// How far outlined letters have filled in, 0...1.
+        var fill: Double
     }
 
     /// The notch finishes opening before the pen starts.
@@ -29,7 +31,9 @@ enum HelloTimeline {
         return Frame(
             drawn: drawn,
             opacity: 1 - fraction(of: elapsed, from: fadeStart, to: total),
-            glow: 0.65 + 0.35 * swell - 0.15 * settle
+            glow: 0.65 + 0.35 * swell - 0.15 * settle,
+            // Outlined letters fill in as the last outline lands and are solid before the fade.
+            fill: fraction(of: elapsed, from: drawEnd - 0.2, to: drawEnd + 0.35)
         )
     }
 
@@ -40,22 +44,24 @@ enum HelloTimeline {
 
 /// The takeover content: writes the greeting from the moment it appears.
 struct HelloGreetingView: View {
+    let artwork: HelloArtwork
     @State private var start: Date?
 
     var body: some View {
         TimelineView(.animation) { timeline in
             let elapsed = start.map { timeline.date.timeIntervalSince($0) } ?? 0
-            HelloLetteringView(frame: HelloTimeline.frame(at: elapsed))
+            HelloLetteringView(artwork: artwork, frame: HelloTimeline.frame(at: elapsed))
         }
         .padding(8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { start = .now }
     }
 }
 
 /// One frame of the greeting: the written part of the stroke in a soft gradient, a blurred glow
-/// beneath it and a bright pen tip while writing.
+/// beneath it, a bright pen tip while writing and, for outlined letters, the fill at the end.
+/// It is the artwork's own size and shrinks to fit when offered less.
 struct HelloLetteringView: View {
+    let artwork: HelloArtwork
     let frame: HelloTimeline.Frame
 
     private static let ink = Gradient(colors: [
@@ -68,8 +74,8 @@ struct HelloLetteringView: View {
     var body: some View {
         GeometryReader { proxy in
             let bounds = CGRect(origin: .zero, size: proxy.size)
-            let width = HelloLettering.strokeWidth * HelloLettering.scale(toFit: bounds)
-            let written = HelloLettering().trim(from: 0, to: frame.drawn)
+            let width = artwork.penWidth * artwork.scale(toFit: bounds)
+            let written = artwork.trim(from: 0, to: frame.drawn)
             let gradient = LinearGradient(gradient: Self.ink, startPoint: .leading, endPoint: .trailing)
             ZStack {
                 written.stroke(gradient, style: Self.pen(width * 3.2))
@@ -78,10 +84,13 @@ struct HelloLetteringView: View {
                 written.stroke(gradient, style: Self.pen(width * 1.7))
                     .blur(radius: width * 0.7)
                     .opacity(0.85 * frame.glow)
+                if artwork.fillsWhenWritten {
+                    artwork.fill(gradient).opacity(frame.fill)
+                }
                 written.stroke(gradient, style: Self.pen(width))
                 written.stroke(Color.white.opacity(0.45), style: Self.pen(width * 0.3))
                 if frame.drawn > 0, frame.drawn < 1,
-                   let tip = HelloLettering().path(in: bounds).trimmedPath(from: 0, to: frame.drawn).currentPoint {
+                   let tip = artwork.path(in: bounds).trimmedPath(from: 0, to: frame.drawn).currentPoint {
                     Circle()
                         .fill(Color.white)
                         .frame(width: width * 1.8, height: width * 1.8)
@@ -90,7 +99,11 @@ struct HelloLetteringView: View {
                 }
             }
         }
-        .aspectRatio(HelloLettering.canvas.width / HelloLettering.canvas.height, contentMode: .fit)
+        .aspectRatio(artwork.canvas.width / artwork.canvas.height, contentMode: .fit)
+        .frame(
+            idealWidth: artwork.size.width, maxWidth: artwork.size.width,
+            idealHeight: artwork.size.height, maxHeight: artwork.size.height
+        )
         .opacity(frame.opacity)
     }
 
