@@ -3,19 +3,37 @@ import OSLog
 import SwiftUI
 
 /// The first-launch onboarding window. It opens after the notch's greeting so it never covers it,
-/// and closing it counts as finishing. It floats above other apps' windows until then: once the
-/// user clicks another app, an ordinary window of this accessory app ends up behind that app's
-/// windows, with no Dock icon or app switcher entry to bring it back.
+/// and closing it counts as finishing; the app quitting does not. It floats above other apps'
+/// windows until then: once the user clicks another app, an ordinary window of this accessory app
+/// ends up behind that app's windows, with no Dock icon or app switcher entry to bring it back.
+/// While the user is in System Settings for a permission it steps down to the normal level, so it
+/// does not cover the switch they have to flip, and a grant brings it back to the front.
+///
+/// Debug builds only: NOTCH_DEBUG_ONBOARDING_AUTOPLAY=<seconds> in the environment does what Enter
+/// does every that many seconds until the last step, which stays open, so every step can be
+/// captured without a keyboard. It never turns a permission or the login item on.
 @MainActor
 final class OnboardingWindowController: NSObject, NSWindowDelegate {
+    static let size = NSSize(width: 540, height: 460)
+    static let cornerRadius: CGFloat = 16
+
     let model: OnboardingModel
     private var window: NSWindow?
+    private var appIsTerminating = false
     private let logger = Logger(subsystem: "com.notchtherock.NotchTheRock", category: "onboarding")
 
     init(model: OnboardingModel) {
         self.model = model
         super.init()
         model.onFinish = { [weak self] in self?.window?.close() }
+        model.onOpenSystemSettings = { [weak self] in self?.stepAside() }
+        model.onPermissionGranted = { [weak self] in self?.bringForward() }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationWillTerminate(_:)),
+            name: NSApplication.willTerminateNotification,
+            object: nil
+        )
     }
 
     /// Opens the window once `isGreeting` turns false, or after `limit` at the latest.
@@ -33,139 +51,121 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
 
     private func present() {
         let window = makeWindow()
-        self.window = window
         model.start()
         window.showInFront()
+        #if DEBUG
+        autoplayForCaptures()
+        #endif
     }
 
-    /// Brings the open window back to the front, for a reopen of the running app. During the
-    /// greeting there is no window yet; it opens by itself when the greeting ends.
+    /// Brings the open window back to the front and floating again, for a reopen of the running app
+    /// and for a grant noticed while the user was in System Settings. During the greeting there is
+    /// no window yet; it opens by itself when the greeting ends.
     func bringForward() {
         guard let window else {
             logger.notice("reopened during the greeting; the onboarding window opens when it ends")
             return
         }
+        window.level = .floating
         window.showInFront()
     }
 
+    /// 권한 열기 or 설정 열기 sent the user to System Settings, which the floating window would cover.
+    private func stepAside() {
+        window?.level = .normal
+        logger.notice("onboarding window stepped aside for System Settings")
+    }
+
+    /// The user came back to the window by clicking it: it floats again, so the next app the user
+    /// clicks does not bury it.
+    func windowDidBecomeKey(_ notification: Notification) {
+        window?.level = .floating
+    }
+
+    /// Makes the window this controller shows. It has no title bar: a rounded, dark translucent
+    /// background, whatever the system appearance, that can be dragged anywhere. It gets its size
+    /// before it is centred.
     func makeWindow() -> NSWindow {
-        let window = NSWindow(contentViewController: NSHostingController(rootView: OnboardingView(model: model)))
+        let frame = NSRect(origin: .zero, size: Self.size)
+        let window = OnboardingWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        // Not drawn; names the window for accessibility and the window list.
         window.title = "NotchTheRock 시작하기"
-        window.styleMask = [.titled, .closable]
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.isMovableByWindowBackground = true
+
+        let background = NSVisualEffectView(frame: frame)
+        background.material = .hudWindow
+        background.blendingMode = .behindWindow
+        background.state = .active
+        background.maskImage = Self.roundedMask(radius: Self.cornerRadius)
+        let content = NSHostingView(rootView: OnboardingView(model: model))
+        content.sizingOptions = []
+        content.frame = background.bounds
+        content.autoresizingMask = [.width, .height]
+        background.addSubview(content)
+        window.contentView = background
+
         window.isReleasedWhenClosed = false
         window.level = .floating
         window.hidesOnDeactivate = false
         window.delegate = self
         window.center()
+        self.window = window
         return window
+    }
+
+    /// A stretchable rounded rectangle: the window's shape, and with it the shadow's.
+    private static func roundedMask(radius: CGFloat) -> NSImage {
+        let edge = 2 * radius + 1
+        let image = NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+        image.resizingMode = .stretch
+        return image
     }
 
     func windowWillClose(_ notification: Notification) {
         // Drop the window first: finish() calls onFinish, which would close it a second time.
         window?.delegate = nil
         window = nil
+        guard !appIsTerminating else {
+            logger.notice("app quit with the onboarding open; it shows again on the next launch")
+            return
+        }
         model.finish()
         logger.notice("onboarding completed")
     }
+
+    /// Quitting or logging out closes the window as well; that is not the user finishing it.
+    @objc private func applicationWillTerminate(_ notification: Notification) {
+        appIsTerminating = true
+    }
+
+    #if DEBUG
+    private func autoplayForCaptures() {
+        guard let value = ProcessInfo.processInfo.environment["NOTCH_DEBUG_ONBOARDING_AUTOPLAY"],
+              let seconds = Double(value), seconds > 0 else { return }
+        logger.notice("NOTCH_DEBUG_ONBOARDING_AUTOPLAY: pressing Enter every \(seconds, privacy: .public) s")
+        Task { [weak self] in
+            while true {
+                try? await Task.sleep(for: .seconds(seconds))
+                guard let self, !self.model.isFinished, !self.model.isLastStep else { return }
+                self.model.advance()
+            }
+        }
+    }
+    #endif
 }
 
-/// Four calm steps; every action goes through the model.
-struct OnboardingView: View {
-    let model: OnboardingModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            content
-            Spacer(minLength: 0)
-            HStack {
-                Text("\(stepNumber) / \(OnboardingModel.Step.allCases.count)")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                buttons
-            }
-        }
-        .padding(24)
-        .frame(width: 460, height: 300)
-    }
-
-    private var stepNumber: Int {
-        (OnboardingModel.Step.allCases.firstIndex(of: model.step) ?? 0) + 1
-    }
-
-    @ViewBuilder private var content: some View {
-        switch model.step {
-        case .welcome:
-            header("macbook", "NotchTheRock을 시작해요")
-            Text("노치가 배터리 같은 소식을 보여 주고, 포인터를 올리면 펼쳐져요. 설정은 노치에 포인터를 올린 뒤 톱니바퀴를 누르거나, 노치를 오른쪽 클릭해 설정…을 고르면 열 수 있어요.")
-                .foregroundStyle(.secondary)
-        case .accessibility:
-            header("accessibility", "손쉬운 사용 권한")
-            Text("볼륨·밝기 키를 노치에서 보여주려면 필요해요. 버튼을 누르면 시스템 설정의 손쉬운 사용 목록이 열려요. 거기서 NotchTheRock을 켜 주세요.")
-                .foregroundStyle(.secondary)
-            if model.isAccessibilityTrusted {
-                Label("허용됐어요", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            } else {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("허용하면 바로 알아채고 다음 단계로 넘어가요.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        case .launchAtLogin:
-            header("power", "로그인 시 자동 실행")
-            Text("Mac에 로그인하면 NotchTheRock이 저절로 켜져요.")
-                .foregroundStyle(.secondary)
-            LabeledContent("상태", value: model.loginItemStatus.label)
-            if model.loginItemStatus == .requiresApproval {
-                Button("로그인 항목 설정 열기") { model.openLoginItemsSettings() }
-            }
-            if let failure = model.loginItemFailure {
-                Text(failure)
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
-            }
-        case .done:
-            header("checkmark.circle", "준비가 끝났어요")
-            Text("건너뛴 항목은 설정에서 언제든 켤 수 있어요. 손쉬운 사용은 권한 탭에, 로그인 시 자동 실행은 일반 탭에 있어요.")
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    @ViewBuilder private var buttons: some View {
-        switch model.step {
-        case .welcome:
-            Button("다음") { model.next() }
-                .keyboardShortcut(.defaultAction)
-        case .accessibility:
-            Button("나중에 할게요") { model.next() }
-            Button("시스템 설정 열기") { model.requestAccessibility() }
-                .keyboardShortcut(.defaultAction)
-        case .launchAtLogin:
-            if model.loginItemStatus.isRegistered {
-                Button("다음") { model.next() }
-                    .keyboardShortcut(.defaultAction)
-            } else {
-                Button("나중에 할게요") { model.next() }
-                Button("자동 실행 켜기") { model.enableLaunchAtLogin() }
-                    .keyboardShortcut(.defaultAction)
-            }
-        case .done:
-            Button("완료") { model.finish() }
-                .keyboardShortcut(.defaultAction)
-        }
-    }
-
-    private func header(_ symbol: String, _ title: String) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: symbol)
-                .font(.system(size: 28))
-                .foregroundStyle(.tint)
-            Text(title)
-                .font(.title2.weight(.semibold))
-        }
-    }
+/// Borderless, so there is no title bar, yet it takes the keyboard like a titled window: Enter and
+/// Esc drive the steps.
+final class OnboardingWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }
