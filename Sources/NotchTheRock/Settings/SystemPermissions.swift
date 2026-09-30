@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import ServiceManagement
 
@@ -42,6 +43,11 @@ enum SystemPermissions {
         _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
     }
 
+    /// Opens System Settings at Privacy & Security > Accessibility.
+    static func openAccessibilitySettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+    }
+
     static var loginItemStatus: LoginItemStatus { LoginItemStatus(SMAppService.mainApp.status) }
 
     /// Registers or unregisters the app as a login item. The error is the system's, unchanged.
@@ -51,6 +57,12 @@ enum SystemPermissions {
         } else {
             try SMAppService.mainApp.unregister()
         }
+    }
+
+    /// What the Settings pane and onboarding say when `setLaunchAtLogin(_:)` throws.
+    static func launchAtLoginFailure(enabling enabled: Bool, _ error: any Error) -> String {
+        let action = enabled ? "등록하지" : "해제하지"
+        return "로그인 항목을 \(action) 못했어요: \(error.localizedDescription)"
     }
 
     static func openLoginItemsSettings() {
