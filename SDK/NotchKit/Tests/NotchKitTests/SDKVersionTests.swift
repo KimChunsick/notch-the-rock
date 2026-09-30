@@ -26,10 +26,6 @@ import Testing
         #expect(!host.supports(SDKVersion(major: 1, minor: 3)))
     }
 
-    @Test func R03__sdk_starts_at_1_0() {
-        #expect(NotchKitSDK.version == SDKVersion(major: 1, minor: 0))
-    }
-
     @Test func R03__incompatible_sdk_reason_is_readable() {
         let error = PluginLoadError.incompatibleSDK(
             required: SDKVersion(major: 2, minor: 0),

@@ -4,7 +4,7 @@ import SwiftUI
 public struct PluginManifest: Hashable, Sendable {
     /// Reverse-DNS identifier, e.g. `com.example.clock`. Must equal the bundle's `CFBundleIdentifier`.
     public let id: String
-    /// Name shown in the tab bar and in Settings.
+    /// Name shown in the home and in Settings.
     public let name: String
     /// The plugin's own version, e.g. `1.0.0`.
     public let version: String
@@ -42,21 +42,29 @@ public protocol NotchPlugin: AnyObject {
     init(context: NotchContext)
     func activate()
     func deactivate()
-    /// The tab this plugin adds to the expanded notch, or nil for none.
+    /// The plugin's screen in the expanded notch, or nil for none.
     var expandedTab: PluginTab? { get }
     /// The plugin's page in the Settings window, or nil for none.
     var settingsView: AnyView? { get }
+    /// The plugin's tile in the home grid, or nil for none. Added in SDK 1.1; a plugin built
+    /// against 1.0 reads nil.
+    var tile: PluginTile? { get }
 }
 
 extension NotchPlugin {
     public var expandedTab: PluginTab? { nil }
     public var settingsView: AnyView? { nil }
+    public var tile: PluginTile? { nil }
 }
 
-/// A tab in the expanded notch: an icon in the tab bar and the view shown when it is selected.
+/// A plugin's screen in the expanded notch, opened from the plugin's tile or, without a tile, from
+/// its row in the home list.
+///
+/// The view should have a definite intrinsic size (no `.infinity` frames): the host measures it and
+/// sizes the expanded notch to fit, within the notch's own size and the width of the home grid.
 public struct PluginTab {
     public let title: String
-    /// SF Symbol name for the tab bar.
+    /// SF Symbol name for the plugin's row in the home list.
     public let symbol: String
     public let content: AnyView
 

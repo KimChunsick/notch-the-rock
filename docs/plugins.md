@@ -21,7 +21,8 @@ scripts/new-plugin.sh Clock --id com.me.clock     # 식별자를 직접 정해�
 ```
 
 이름은 대문자로 시작하고 영문자와 숫자만 쓸 수 있어요. 식별자를 주지 않으면 `com.example.<이름 소문자>`가
-돼요. 만들어진 패키지는 바로 빌드되고, 접힌 노치 양옆에 표시 하나와 펼친 화면에 탭 하나를 보여줘요.
+돼요. 만들어진 패키지는 바로 빌드돼요. 접힌 노치 양옆에 표시 하나를 올리고, 홈에 작은 타일 하나를 두고,
+그 타일을 누르면 열리는 플러그인 화면 하나를 보여줘요.
 
 ```
 Clock/
@@ -61,7 +62,7 @@ Clock.notchplugin/Contents/
 |---|---|
 | `CFBundleIdentifier` | `PluginManifest.id` |
 | `CFBundleExecutable` | 패키지 이름 |
-| `NotchKitSDKVersion` | 플러그인을 빌드한 SDK 버전(예: `1.0`) |
+| `NotchKitSDKVersion` | 플러그인을 빌드한 SDK 버전(예: `1.1`) |
 | `NotchPluginEntry` | 진입 함수 이름, `notchkit_plugin_entry` |
 
 NotchKit은 앱 안에 한 벌만 있어요. 플러그인 실행 파일은 NotchKit을 `@rpath/libNotchKit.dylib`로만
@@ -83,8 +84,9 @@ PROBE="$(swift build -c release --package-path SDK/NotchKit/Probe --show-bin-pat
 "$PROBE" Plugins/Clock/build/Clock.notchplugin
 ```
 
-성공하면 manifest와 탭 정보를 출력하고 종료 코드 0으로 끝나요. 실패하면 이유를 한 줄로 출력하고 1로
-끝나요. 앱의 설정 화면에도 같은 문장이 표시돼요.
+성공하면 manifest, 플러그인 화면(`expandedTab`), 타일이 지원하는 크기(`tile: small (2x2)`, 타일이
+없으면 `tile: none`)를 출력하고 종료 코드 0으로 끝나요. 실패하면 이유를 한 줄로 출력하고 1로 끝나요.
+앱의 설정 화면에도 같은 문장이 표시돼요.
 
 | 출력되는 이유 | 고칠 곳 |
 |---|---|
@@ -147,8 +149,11 @@ public final class ClockPlugin: NotchPlugin {
     public func activate() { /* 표시를 올리고 작업을 시작해요 */ }
     public func deactivate() { /* 올린 표시를 지우고 작업을 멈춰요 */ }
 
-    public var expandedTab: PluginTab? {           // 선택: 펼친 화면의 탭
-        PluginTab(title: "Clock", symbol: "clock") { Text("12:00") }
+    public var expandedTab: PluginTab? {           // 선택: 펼친 노치의 플러그인 화면
+        PluginTab(title: "Clock", symbol: "clock") { Text("12:00").padding() }
+    }
+    public var tile: PluginTile? {                  // 선택: 홈의 타일 (SDK 1.1)
+        PluginTile(supportedSizes: [.small]) { _ in Text("12:00").padding(8) }
     }
     public var settingsView: AnyView? { nil }       // 선택: 설정 화면의 페이지
 }
@@ -216,6 +221,59 @@ case .dismissed, .timedOut, .cancelled: break
 요청을 거두고 `.cancelled`를 돌려줘요. 응답은 언제나 한 번만 와요. NotchKit의 열거형은 부 버전에서
 경우가 늘어날 수 있어서, `switch`에 `@unknown default`를 넣어야 컴파일돼요.
 
+### 홈과 타일
+
+노치를 펼치면 플러그인 타일이 격자로 놓인 홈이 나와요. 격자는 가로 8칸이고, 한 줄의 높이는 2칸이며,
+줄은 최대 2줄까지 놓여요. 격자에 넣지 않은 플러그인은 격자 아래 목록에 한 줄씩 보여요. 사용자는 편집
+모드에서 타일을 옮기고, 플러그인이 지원하는 크기 안에서 크기를 바꾸고, 타일을 격자와 목록 사이로 옮겨요.
+
+홈에서 플러그인이 어떻게 보일지는 `tile`과 `expandedTab`을 주는지에 따라 정해져요.
+
+| `tile` | `expandedTab` | 홈에서 보이는 모습 |
+|---|---|---|
+| 있음 | 있음 | 타일이 보이고, 누르면 플러그인 화면이 열려요. |
+| 없음 | 있음 | 목록에 한 줄로 보여요. 탭의 `symbol` 아이콘과 플러그인 이름(`manifest.name`)이 나오고, 누르면 플러그인 화면이 열려요. |
+| 있음 | 없음 | 정보만 보여 주는 타일이에요. 눌러도 열리는 화면은 없어요. |
+| 없음 | 없음 | 홈에 나오지 않아요. 인사만 띄우는 Hello가 이런 플러그인이에요. |
+
+타일 크기는 `TileSize`의 세 가지 중에서 골라요. 크기의 단위는 격자 칸이고, 한 칸이 몇 포인트인지는
+앱이 정해요.
+
+| `TileSize` | 가로 x 세로 (`columns` x `rows`) |
+|---|---|
+| `.small` | 2 x 2 |
+| `.wide` | 4 x 2 |
+| `.large` | 4 x 4 |
+
+```swift
+public var tile: PluginTile? {
+    PluginTile(supportedSizes: [.small, .wide]) { size in   // 첫 번째가 기본 크기예요
+        ClockTile(showsDate: size == .wide)
+    }
+}
+```
+
+`supportedSizes`에는 사용자가 고를 수 있는 크기만 넣어요. 타일은 첫 번째 크기로 처음 놓이고, 이 크기는
+`defaultSize`로 읽을 수 있어요. 빈 배열을 넘기면 `PluginTile`을 만들지 않고 `nil`을 돌려줘서 타일이 없는
+플러그인이 돼요. 플러그인 코드는 앱 안에서 돌기 때문에, 이런 실수로 앱 전체가 멈추지 않게 하려는 거예요.
+앱은 타일을 그릴 때 메인 액터에서 지금 크기를 넘겨 `content`를 불러요. `TileSize`도 NotchKit
+열거형이라 `switch`로 나눌 때는 `@unknown default`가 있어야 해요.
+
+### 화면 크기
+
+펼친 노치에는 정해진 크기가 없어요. 앱은 지금 보여 주는 화면(홈, 플러그인 화면, 알림, HUD, 인사)의 크기를
+재고, 그 크기에 맞춰 노치를 키워요. 가장자리 여백은 어느 화면에서나 같아요. 그래서 `expandedTab`과
+`tile`의 뷰는 내용으로 정해지는 크기를 스스로 가져야 해요.
+
+- 글자, 이미지, `padding()`, `frame(width:height:)`처럼 크기가 정해지는 뷰로 만들어요.
+- `.frame(maxWidth: .infinity)`나 `.frame(maxHeight: .infinity)`로 남는 공간을 채우지 않아요. 이런 뷰는
+  앱이 내준 공간만큼 늘어나서, 노치 크기가 내용과 맞지 않게 돼요.
+- `Color`나 `Rectangle`만 있는 뷰는 자기 크기가 없으니 `frame(width:height:)`로 크기를 정해 줘요.
+
+앱은 뷰가 스스로 알려 주는 크기를 재서 써요. 잰 크기가 노치 모양보다 작으면 노치 모양 크기를 쓰고, 홈
+격자 8칸 너비보다 넓으면 그 너비까지만 써요. 직접 확인하려면 `NSHostingView(rootView:).fittingSize`를
+보면 돼요. 너비와 높이가 0보다 크고 유한해야 해요.
+
 ## 7. 진입 함수
 
 앱은 번들의 실행 파일을 연 다음 `Info.plist`의 `NotchPluginEntry`에 적힌 C 함수를 찾아 불러요. 플러그인마다
@@ -231,7 +289,7 @@ public func notchkitPluginEntry() -> UnsafeMutableRawPointer {
 
 ## 8. SDK 버전
 
-지금 SDK는 `NotchKitSDK.version` = `1.0`이에요. 버전은 `주.부` 형식이고, 앱은 아래 조건을 만족하는
+지금 SDK는 `NotchKitSDK.version` = `1.1`이에요. 버전은 `주.부` 형식이고, 앱은 아래 조건을 만족하는
 플러그인만 불러와요.
 
 - 주 버전이 앱과 같아요.
@@ -241,3 +299,17 @@ public func notchkitPluginEntry() -> UnsafeMutableRawPointer {
 플러그인을 다시 빌드해야 해요. NotchKit은 라이브러리 진화 모드(`-enable-library-evolution`)로 빌드해서
 부 버전이 올라가도 이미 빌드한 플러그인의 바이너리가 그대로 맞아요. `sdkVersion: NotchKitSDK.version`은
 플러그인을 빌드할 때의 값이 바이너리에 들어가서, 나중에 어느 앱이 불러오든 빌드한 버전을 알려줘요.
+
+| 버전 | 달라진 점 |
+|---|---|
+| `1.0` | 처음 공개한 API예요. |
+| `1.1` | 홈 타일을 위한 `TileSize`, `PluginTile`, `NotchPlugin.tile`이 추가됐어요. |
+
+1.0으로 빌드한 플러그인에는 `tile` 구현이 없어서, 1.1 앱은 기본 구현이 돌려주는 `nil`을 읽어요. 이런
+플러그인은 "홈과 타일"의 규칙대로 목록에 한 줄로 보이거나 홈에 나오지 않아요. 1.0 SDK로 빌드한 템플릿을
+1.1 로더로 불러오는 검사는 아래 스크립트가 해요. 스크립트는 1.0 코드를 임시 git 작업 트리로 꺼내
+빌드하고, 끝나면 지워요.
+
+```sh
+SDK/NotchKit/Tests/sdk-compat-test.sh
+```
