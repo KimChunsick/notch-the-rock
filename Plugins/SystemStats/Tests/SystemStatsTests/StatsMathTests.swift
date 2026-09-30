@@ -80,8 +80,11 @@ func R11__rates_are_formatted_in_decimal_units(bytesPerSecond: Double, text: Str
 }
 
 @Test func R11__fan_row_shows_none_on_a_mac_without_fans() {
-    #expect(SensorReading(cpuTemperature: 45, gpuTemperature: nil, fanSpeeds: []).fanText == "없음")
-    #expect(SensorReading(cpuTemperature: 45, gpuTemperature: nil, fanSpeeds: [1200, 1350.4]).fanText == "1200 rpm · 1350 rpm")
+    #expect(SensorReading(cpuTemperature: 45, gpuTemperature: nil, fans: .noFans).fanText == "없음")
+    #expect(SensorReading(cpuTemperature: 45, gpuTemperature: nil, fans: .speeds([1200, 1350.4])).fanText == "1200 rpm · 1350 rpm")
+    // What could not be read shows as unavailable, never as "no fans" or 0 rpm.
+    #expect(SensorReading(cpuTemperature: 45, gpuTemperature: nil, fans: .unavailable).fanText == "—")
+    #expect(SensorReading(cpuTemperature: 45, gpuTemperature: nil, fans: .speeds([1200, nil])).fanText == "1200 rpm · —")
 }
 
 @Test func R11__memory_used_is_app_wired_and_compressed_pages() {

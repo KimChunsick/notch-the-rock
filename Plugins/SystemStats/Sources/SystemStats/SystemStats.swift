@@ -135,17 +135,31 @@ struct DiskSpace: Equatable, Sendable {
     var free: UInt64
 }
 
+/// What the SMC tells about the fans.
+enum FanReading: Equatable, Sendable {
+    /// The SMC reports no fan (a fanless Mac such as the MacBook Air).
+    case noFans
+    /// The fans could not be counted, e.g. the SMC refused the request.
+    case unavailable
+    /// Each fan's speed in rpm, nil for a fan whose speed could not be read.
+    case speeds([Double?])
+}
+
 struct SensorReading: Equatable, Sendable {
     /// Average of the CPU sensors in °C, nil while none has been read.
     var cpuTemperature: Double?
     /// Average of the GPU sensors in °C.
     var gpuTemperature: Double?
-    /// Speed of each fan in rpm; empty on a Mac without fans.
-    var fanSpeeds: [Double]
+    var fans: FanReading
 
-    /// "없음" on a Mac without fans, otherwise each fan's speed, e.g. "1200 rpm · 1350 rpm".
+    /// "없음" on a Mac without fans, "—" for what could not be read, otherwise each fan's speed, e.g.
+    /// "1200 rpm · 1350 rpm".
     var fanText: String {
-        fanSpeeds.isEmpty ? "없음" : fanSpeeds.map { "\(Int($0.rounded())) rpm" }.joined(separator: " · ")
+        switch fans {
+        case .noFans: "없음"
+        case .unavailable: "—"
+        case .speeds(let speeds): speeds.map { $0.map { "\(Int($0.rounded())) rpm" } ?? "—" }.joined(separator: " · ")
+        }
     }
 }
 

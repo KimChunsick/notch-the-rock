@@ -81,8 +81,9 @@ final class StatsCollector {
         self.samplers = samplers
     }
 
-    /// - Parameter time: a monotonic clock in seconds, e.g. `ProcessInfo.systemUptime`.
-    func sample(at time: Double) -> SystemSnapshot {
+    /// - Parameter time: a monotonic clock in seconds; the plugin uses the default,
+    ///   `ProcessInfo.systemUptime`.
+    func sample(at time: Double = ProcessInfo.processInfo.systemUptime) -> SystemSnapshot {
         let current = Counters(
             time: time,
             cpu: samplers.cpu.coreTicks(),

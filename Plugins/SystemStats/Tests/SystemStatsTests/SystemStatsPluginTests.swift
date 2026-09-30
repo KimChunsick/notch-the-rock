@@ -1,5 +1,6 @@
 import Foundation
 import NotchKit
+import os
 import Testing
 @testable import SystemStats
 
@@ -36,11 +37,82 @@ private final class FakeSystem: CPUSampler, GPUSampler, MemorySampler, DiskSampl
     func counters() -> [String: ByteCounters] {
         networkCounters.isEmpty ? [:] : networkCounters[min(cpuReads - 1, networkCounters.count - 1)]
     }
-    func sensors() -> SensorReading? { SensorReading(cpuTemperature: 48, gpuTemperature: 40, fanSpeeds: []) }
+    func sensors() -> SensorReading? { SensorReading(cpuTemperature: 48, gpuTemperature: 40, fans: .noFans) }
 
     var samplers: Samplers {
         Samplers(cpu: self, gpu: self, memory: self, disk: self, network: self, sensors: self)
     }
+}
+
+/// A clock whose time moves only when told: a sleep jumps straight to its deadline, and every sleep
+/// after the first `sleeps` parks in a real sleep until its task is cancelled.
+private final class VirtualClock: Clock {
+    struct Instant: InstantProtocol {
+        var offset: Swift.Duration
+
+        func advanced(by duration: Swift.Duration) -> Instant { Instant(offset: offset + duration) }
+        func duration(to other: Instant) -> Swift.Duration { other.offset - offset }
+        static func < (lhs: Instant, rhs: Instant) -> Bool { lhs.offset < rhs.offset }
+    }
+
+    private struct State {
+        var now = Instant(offset: .zero)
+        var sleeps: Int
+    }
+
+    private let state: OSAllocatedUnfairLock<State>
+
+    init(sleeps: Int) {
+        state = OSAllocatedUnfairLock(initialState: State(sleeps: sleeps))
+    }
+
+    var now: Instant { state.withLock { $0.now } }
+    var minimumResolution: Swift.Duration { .zero }
+
+    func advance(by duration: Swift.Duration) {
+        state.withLock { $0.now = $0.now.advanced(by: duration) }
+    }
+
+    func sleep(until deadline: Instant, tolerance: Swift.Duration?) async throws {
+        let park = state.withLock { state in
+            guard state.sleeps > 0 else { return true }
+            state.sleeps -= 1
+            state.now = max(state.now, deadline)
+            return false
+        }
+        if park { try await Task.sleep(for: .seconds(3600)) }
+    }
+}
+
+/// A CPU reading that takes `durations[n]` of virtual time the n-th time and records when each
+/// reading started.
+@MainActor
+private final class SlowCPU: CPUSampler {
+    private let clock: VirtualClock
+    private let durations: [Duration]
+    private(set) var starts: [Duration] = []
+
+    init(clock: VirtualClock, durations: [Duration]) {
+        self.clock = clock
+        self.durations = durations
+    }
+
+    func coreTicks() -> [CoreTicks]? {
+        starts.append(clock.now.offset)
+        clock.advance(by: durations[min(starts.count - 1, durations.count - 1)])
+        return nil
+    }
+}
+
+@MainActor
+private func makeContext() throws -> NotchContext {
+    let id = SystemStatsPlugin.manifest.id
+    let storage = try PluginStorage(
+        directory: FileManager.default.temporaryDirectory.appendingPathComponent("systemstats-tests-\(UUID().uuidString)"),
+        defaultsSuiteName: "systemstats-tests.\(id)",
+        keychainService: "systemstats-tests.\(id)"
+    )
+    return NotchContext(pluginID: id, bundleURL: URL(fileURLWithPath: "/nonexistent"), host: SilentHost(), storage: storage)
 }
 
 @MainActor
@@ -83,15 +155,8 @@ private final class FakeSystem: CPUSampler, GPUSampler, MemorySampler, DiskSampl
 @Test func R11__plugin_refreshes_until_deactivated() async throws {
     #expect(SystemStatsPlugin.refreshInterval <= .seconds(2))
 
-    let id = SystemStatsPlugin.manifest.id
-    let storage = try PluginStorage(
-        directory: FileManager.default.temporaryDirectory.appendingPathComponent("systemstats-tests-\(UUID().uuidString)"),
-        defaultsSuiteName: "systemstats-tests.\(id)",
-        keychainService: "systemstats-tests.\(id)"
-    )
-    let context = NotchContext(pluginID: id, bundleURL: URL(fileURLWithPath: "/nonexistent"), host: SilentHost(), storage: storage)
     let system = FakeSystem()
-    let plugin = SystemStatsPlugin(context: context, interval: .milliseconds(20)) { system.samplers }
+    let plugin = SystemStatsPlugin(context: try makeContext(), interval: .milliseconds(20)) { system.samplers }
 
     plugin.activate()
     // The first reading is taken at once so the tab never opens empty.
@@ -110,4 +175,33 @@ private final class FakeSystem: CPUSampler, GPUSampler, MemorySampler, DiskSampl
     let readsAtStop = system.cpuReads
     try await Task.sleep(for: .milliseconds(200))
     #expect(system.cpuReads == readsAtStop)
+}
+
+@MainActor
+@Test func R11__refreshes_start_every_two_seconds_however_long_a_reading_takes() async throws {
+    let clock = VirtualClock(sleeps: 3)
+    // Readings take 0.3 s, except the second one, which overruns the interval with 2.5 s.
+    let cpu = SlowCPU(clock: clock, durations: [.milliseconds(300), .milliseconds(2_500), .milliseconds(300)])
+    let samplers = {
+        var samplers = FakeSystem().samplers
+        samplers.cpu = cpu
+        return samplers
+    }()
+    let plugin = SystemStatsPlugin(context: try makeContext(), interval: SystemStatsPlugin.refreshInterval, clock: clock) {
+        samplers
+    }
+
+    plugin.activate()
+    let deadline = ContinuousClock.now + .seconds(5)
+    while cpu.starts.count < 4, ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    // Each reading starts two seconds after the previous one started, not two seconds after it
+    // ended; the one after the overrun starts at once, and the cadence then continues from it.
+    #expect(cpu.starts == [.zero, .seconds(2), .milliseconds(4_500), .milliseconds(6_500)])
+
+    // The loop now waits in its next sleep; deactivate() ends it without another reading.
+    plugin.deactivate()
+    try await Task.sleep(for: .milliseconds(200))
+    #expect(cpu.starts.count == 4)
 }
