@@ -9,7 +9,9 @@
 # The path stays the same on every install on purpose: Accessibility (TCC) and the login item
 # (SMAppService) key on the installed copy, so a rebuild keeps both after reinstalling here.
 # The new bundle is copied under a hidden temporary name inside /Applications, verified and then
-# renamed into place, so a half-copied app never sits at the final path. Never uses sudo: when
+# renamed into place, so a half-copied app never sits at the final path. The previous app is kept
+# under a hidden name until the new one is verified and running, and goes back into place when any
+# step fails; if even that fails, its path is printed. Never uses sudo: when
 # /Applications is not writable it stops and says so.
 #
 # NOTCH_INSTALL_DIR overrides /Applications. It exists for scripts/tests only; TCC and the login
@@ -44,8 +46,36 @@ done
 [ -d "$DEST_DIR" ] || fail "설치할 폴더가 없어요: $DEST_DIR"
 [ -w "$DEST_DIR" ] || fail "$DEST_DIR 폴더에 쓸 수 없어요. 관리자 계정으로 로그인해서 다시 실행해 주세요."
 
+# Recovery state, read only by the EXIT trap. `previous` is set once the installed app has been
+# moved aside to $OLD; `installed` once the new app is at $FINAL, verified and running. The previous
+# app is deleted only when both are set; on any other exit it goes back to $FINAL, and when that
+# fails it stays at $OLD and the message says so.
+previous=""
+installed=0
+
+# Puts the previous app back at $FINAL. A new copy already at $FINAL failed, so it is moved to
+# $STAGED (free again after the swap) for the trap to remove. `mv` into an existing directory would
+# move the previous app inside it, hence the check that $FINAL is gone.
+restore_previous() {
+    [ -e "$FINAL" ] && [ ! -e "$STAGED" ] && mv "$FINAL" "$STAGED"
+    if [ ! -e "$FINAL" ] && mv "$previous" "$FINAL"; then
+        say "이전 앱을 ${FINAL}에 되돌려 놓았어요."
+    else
+        say "이전 앱을 ${FINAL}에 되돌려 놓지 못했어요. 이전 앱은 ${previous}에 남겨 뒀어요."
+    fi
+}
+
 cleanup() {
-    rm -rf "$STAGED" "$OLD"
+    # A failing command here must neither stop the recovery nor change the exit status.
+    set +e
+    if [ -n "$previous" ]; then
+        if [ "$installed" -eq 1 ]; then
+            rm -rf "$previous"
+        else
+            restore_previous
+        fi
+    fi
+    rm -rf "$STAGED"
 }
 trap cleanup EXIT
 
@@ -89,12 +119,9 @@ quit_running
 
 if [ -e "$FINAL" ]; then
     mv "$FINAL" "$OLD" || fail "기존 앱을 옮기지 못했어요: $FINAL"
+    previous=$OLD
 fi
-if ! mv "$STAGED" "$FINAL"; then
-    [ -e "$OLD" ] && mv "$OLD" "$FINAL"
-    fail "새 앱을 제자리에 옮기지 못했어요. 기존 앱을 되돌려 놓았어요."
-fi
-rm -rf "$OLD"
+mv "$STAGED" "$FINAL" || fail "새 앱을 제자리에 옮기지 못했어요: $FINAL"
 
 codesign --verify --deep --strict "$FINAL" || fail "설치한 앱의 서명 검증에 실패했어요: $FINAL"
 
@@ -106,5 +133,6 @@ until [ -n "$(running_pid)" ]; do
     sleep 0.1
     waited=$((waited + 1))
 done
+installed=1
 
 printf '%s\n' "$FINAL"

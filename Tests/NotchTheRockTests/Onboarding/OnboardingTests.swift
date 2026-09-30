@@ -91,7 +91,8 @@ private final class FakePermissions {
 
     @Test func R13__login_item_status_is_shown_in_korean() {
         let labels = [SystemPermissions.LoginItemStatus.enabled, .requiresApproval, .notRegistered, .notFound].map(\.label)
-        #expect(labels == ["켜져 있어요", "시스템 설정의 로그인 항목에서 허용해야 해요", "등록되지 않았어요", "시스템에서 로그인 항목을 찾지 못했어요"])
+        // Before the first registration the system reports `.notFound`; that is "off", not an error.
+        #expect(labels == ["켜져 있어요", "시스템 설정의 로그인 항목에서 허용해야 해요", "꺼져 있어요", "꺼져 있어요"])
 
         withRecord { record in
             let fake = FakePermissions()
