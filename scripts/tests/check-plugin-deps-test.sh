@@ -1,10 +1,11 @@
 #!/bin/bash
 # R03: scripts/check-plugin-deps.sh rejects plugins that depend on anything but NotchKit, through
 # the manifest or through any Swift import form (attributes, access levels, kinds, submodules,
-# backticks, several statements on a line), and ignores text that only looks like an import: in
-# comments, string literals and regex literals. A quote inside a regex literal opens no string, so
-# real imports after it still count. Builds nothing; each fixture is read with
-# `swift package dump-package`. Requires bash 3.2 or later.
+# backticks, several statements on a line, `#if` branches of a debug or a release build), and
+# ignores text that only looks like an import: in comments, string literals and regex literals. A
+# quote inside a regex literal opens no string, so real imports after it still count. A Swift file
+# the compiler cannot parse fails the check. Builds nothing; each fixture is read with
+# `swift package dump-package` and the compiler's parser. Requires bash 3.2 or later.
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd -P)
@@ -137,6 +138,13 @@ FORMS=(
     AfterOperatorFunction NotchTheRock $'struct Ratio {}\nfunc /(a: Ratio, b: Ratio) -> Ratio { a }; import NotchTheRock; let q = 4/2'
     AfterOperatorDeclaration NotchTheRock 'infix operator /+; import NotchTheRock; let a = 4/2'
     AfterOperatorReference NotchTheRock 'let divide: (Int, Int) -> Int = (/); import NotchTheRock; let z = 4/2'
+    # Review round 019: a backtick right after `import`, and an extended regex literal whose opening
+    # delimiter is followed by a space before the line ends, with quotes inside it.
+    BacktickAfterImport NotchTheRock 'import`NotchTheRock`'
+    AfterSpacedExtendedRegex NotchTheRock $'let r = #/ \n"""\n/#\nimport NotchTheRock\nlet s = """\nexample\n"""'
+    # Imports that only one build configuration compiles.
+    DebugOnly NotchTheRock $'#if DEBUG\nimport NotchTheRock\n#endif'
+    ReleaseOnly NotchTheRock $'#if DEBUG\n#else\nimport NotchTheRock\n#endif'
 )
 
 R03__check_plugin_deps_rejects_every_import_form() {
@@ -172,6 +180,7 @@ let extended = #/x; import NotchTheRock/#
 let doubled = ##/a/#; import NotchTheRock/##
 let prefixed = !/x; import NotchTheRock/
 let grouped = (/x; import NotchTheRock/)
+let r = /[(]; import NotchTheRock/
 EOF
     cat >"$sources/Quotes.swift" <<'EOF'
 let pattern = #/"""/#
@@ -197,11 +206,27 @@ EOF
     ! contains "$output" 'Clean:' || fail "the clean plugin was reported"
 }
 
+# A file the compiler cannot parse cannot be shown to be free of imports, so it fails the check and
+# is named.
+R03__check_plugin_deps_fails_on_a_file_the_compiler_cannot_parse() {
+    current=${FUNCNAME[0]}
+    local output status
+    write_fixture "$WORK/broken" Broken "" "" ""
+    printf 'let x = (\nimport NotchKit\n' >"$WORK/broken/Broken/Sources/Broken/Syntax.swift"
+    output=$("$ROOT/scripts/check-plugin-deps.sh" "$WORK/broken" 2>&1)
+    status=$?
+    printf '%s\n(exit %s)\n' "$output" "$status"
+    [ "$status" -ne 0 ] || fail "check-plugin-deps.sh passed a plugin with a file the compiler cannot parse"
+    contains "$output" 'Broken: Sources/Broken/Syntax.swift' || fail "the file that does not parse is not named"
+    ! contains "$output" 'Broken.swift' || fail "the file that parses was reported"
+}
+
 R03__check_plugin_deps_accepts_clean_plugins
 R03__check_plugin_deps_rejects_app_and_plugin_dependencies
 R03__check_plugin_deps_ignores_imports_in_comments_and_strings
 R03__check_plugin_deps_rejects_every_import_form
 R03__check_plugin_deps_ignores_imports_in_regex_literals
+R03__check_plugin_deps_fails_on_a_file_the_compiler_cannot_parse
 
 if [ "$failures" -ne 0 ]; then
     printf '%d check(s) failed\n' "$failures"
