@@ -11,8 +11,9 @@
 # The new bundle is copied under a hidden temporary name inside /Applications, verified and then
 # renamed into place, so a half-copied app never sits at the final path. The previous app is kept
 # under a hidden name until the new one is verified and running, and goes back into place when any
-# step fails; if even that fails, its path is printed. Never uses sudo: when
-# /Applications is not writable it stops and says so.
+# step fails; if even that fails, its path is printed. A new copy that was already launched is
+# stopped before it is moved away, also when Launch Services never reported it running. Never uses
+# sudo: when /Applications is not writable it stops and says so.
 #
 # NOTCH_INSTALL_DIR overrides /Applications. It exists for scripts/tests only; TCC and the login
 # item expect /Applications.
@@ -47,16 +48,20 @@ done
 [ -w "$DEST_DIR" ] || fail "$DEST_DIR 폴더에 쓸 수 없어요. 관리자 계정으로 로그인해서 다시 실행해 주세요."
 
 # Recovery state, read only by the EXIT trap. `previous` is set once the installed app has been
-# moved aside to $OLD; `installed` once the new app is at $FINAL, verified and running. The previous
-# app is deleted only when both are set; on any other exit it goes back to $FINAL, and when that
-# fails it stays at $OLD and the message says so.
+# moved aside to $OLD; `launching` once `open` was asked to start the new app at $FINAL; `installed`
+# once the new app is at $FINAL, verified and running. The previous app is deleted only when
+# `previous` and `installed` are set; on any other exit it goes back to $FINAL, and when that fails
+# it stays at $OLD and the message says so.
 previous=""
+launching=0
 installed=0
 
 # Puts the previous app back at $FINAL. A new copy already at $FINAL failed, so it is moved to
-# $STAGED (free again after the swap) for the trap to remove. `mv` into an existing directory would
-# move the previous app inside it, hence the check that $FINAL is gone.
+# $STAGED (free again after the swap) for the trap to remove; when it was launched, whatever runs
+# from it is stopped first. `mv` into an existing directory would move the previous app inside it,
+# hence the check that $FINAL is gone.
 restore_previous() {
+    [ "$launching" -eq 1 ] && stop_new_app
     [ -e "$FINAL" ] && [ ! -e "$STAGED" ] && mv "$FINAL" "$STAGED"
     if [ ! -e "$FINAL" ] && mv "$previous" "$FINAL"; then
         say "이전 앱을 ${FINAL}에 되돌려 놓았어요."
@@ -104,6 +109,51 @@ quit_running() {
     done
 }
 
+# The given pids that are still running. Succeeds also when none is, so callers read the output.
+alive() {
+    local pid
+    for pid; do
+        if kill -0 "$pid" 2>/dev/null; then printf '%s\n' "$pid"; fi
+    done
+}
+
+# The running processes of the new app at $FINAL: the copy Launch Services lists under the bundle id
+# and any process started from the bundle's executable, which Launch Services may not list yet. The
+# path reaches awk through the environment, so the filter does not find its own command line.
+new_app_pids() {
+    alive $( {
+        running_pid
+        ps -axww -o pid=,args= | EXECUTABLE="$FINAL/Contents/MacOS/" awk '
+            { pid = $1; sub(/^ *[0-9]+ /, "") }
+            index(" " $0, " " ENVIRON["EXECUTABLE"]) { print pid }'
+    } | sort -u )
+}
+
+# Stops the new app before rollback moves it away, so no process is left running from a bundle that
+# is about to be deleted: TERM, then KILL what still runs after 10 seconds. Asks again afterwards,
+# because a copy that Launch Services only started meanwhile has to stop as well.
+stop_new_app() {
+    local pids rounds=0 waited
+    while pids=$(new_app_pids) && [ -n "$pids" ]; do
+        pids=$(printf '%s ' $pids)
+        rounds=$((rounds + 1))
+        if [ "$rounds" -gt 3 ]; then
+            say "새로 설치한 NotchTheRock을 종료하지 못했어요 (pid ${pids% })."
+            return 1
+        fi
+        say "되돌리기 전에 새로 설치한 NotchTheRock을 종료해요 (pid ${pids% })."
+        kill -TERM $pids 2>/dev/null
+        waited=0
+        while [ -n "$(alive $pids)" ] && [ "$waited" -lt 100 ]; do
+            sleep 0.1
+            waited=$((waited + 1))
+        done
+        pids=$(alive $pids)
+        [ -z "$pids" ] || kill -KILL $pids 2>/dev/null
+        sleep 0.2
+    done
+}
+
 if [ "$build" -eq 1 ]; then
     APP=$("$ROOT/scripts/build-app.sh") || fail "앱을 빌드하지 못했어요."
 else
@@ -126,6 +176,7 @@ mv "$STAGED" "$FINAL" || fail "새 앱을 제자리에 옮기지 못했어요: $
 codesign --verify --deep --strict "$FINAL" || fail "설치한 앱의 서명 검증에 실패했어요: $FINAL"
 
 say "앱을 실행해요: $FINAL"
+launching=1
 open "$FINAL" || fail "앱을 실행하지 못했어요: $FINAL"
 waited=0
 until [ -n "$(running_pid)" ]; do

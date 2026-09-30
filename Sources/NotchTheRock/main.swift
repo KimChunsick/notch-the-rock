@@ -6,6 +6,9 @@ import OSLog
 //
 // `--print-permissions` prints `accessibility=trusted|untrusted` and
 // `login-item=enabled|requiresApproval|notRegistered|notFound` to stdout and exits 0 without any UI.
+// Started from a terminal, the terminal is the responsible process and `accessibility=` reports the
+// terminal's grant, so one line on stderr says how to read the app's own through Launch Services:
+// `open -n --stdout <file> -a /Applications/NotchTheRock.app --args --print-permissions`.
 //
 // Debugging: NOTCH_DEBUG_STATE=expanded or NOTCH_DEBUG_STATE=collapsed in the environment pins the
 // notch in that state (the pointer and plugins cannot change it), so it can be captured without a
@@ -14,6 +17,9 @@ import OSLog
 // 다시 불러오기 buttons in Settings do for that user plugin, without clicking. The path is the listed
 // one: ~/Library/Application Support/NotchTheRock/Plugins/<Name>.notchplugin with ~ expanded. Release
 // builds (scripts/build-app.sh) ignore it: consent is given in Settings only.
+// NOTCH_DEBUG_ONBOARDING_AUTOPLAY=<seconds>, in debug builds only, does what Enter does in the
+// onboarding window every that many seconds until its last step, so every step can be captured
+// without a keyboard. It never turns a permission or the login item on.
 //
 // First-launch onboarding (Onboarding/): shown once, after the greeting, until it is finished or its
 // window is closed (defaults key `OnboardingCompleted` in com.notchtherock.NotchTheRock). Launch
@@ -35,6 +41,9 @@ MainActor.assumeIsolated {
     let arguments = Array(CommandLine.arguments.dropFirst())
     if arguments.contains("--print-permissions") {
         print(SystemPermissions.report)
+        let note = "note: started from a terminal, accessibility= is the terminal's grant; "
+            + "`open -n --stdout <file> -a /Applications/NotchTheRock.app --args --print-permissions` reads the app's own\n"
+        FileHandle.standardError.write(Data(note.utf8))
         exit(0)
     }
 

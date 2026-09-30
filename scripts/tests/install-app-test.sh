@@ -3,12 +3,14 @@
 # given an unknown argument or a destination it cannot write to, and it never loses the previously
 # installed app: a failure at the swap, at restoring or at the verify/launch step leaves the previous
 # app at the final path or at the backup path it reports, and only a successful install removes it.
+# A launched copy that the pid detection never saw is stopped before rollback moves it away.
 #
 # Nothing here touches /Applications or a running NotchTheRock. Every destination is a scratch
 # folder (NOTCH_INSTALL_DIR), --no-build is always passed, and the failure checks run a copy of the
 # script next to a fake build/NotchTheRock.app with `lsappinfo`, `open`, `codesign` and `mv` shimmed
 # on PATH. The `lsappinfo` shim reports no running copy until the `open` shim has run, so the script
-# never quits a real process.
+# never quits a real process. The only process any check starts is the fake app of a sandbox bundle,
+# and rollback finds it by that sandbox path.
 # Requires bash 3.2 or later.
 set -uo pipefail
 
@@ -38,7 +40,9 @@ run_install() {
 }
 
 # The shims read INSTALL_TEST_STATE (a folder for their records) and INSTALL_TEST_FAIL (the steps
-# that fail: swap, restore, verify-installed, launch).
+# that fail: swap, restore, verify-installed, launch; unlisted: the app starts a second after `open`
+# returns but is never listed, so the pid detection times out; started-then-failed: `open` starts
+# the app, Launch Services lists a pid that is already gone, and `open` still fails).
 SHIMS="$WORK/shims"
 mkdir "$SHIMS"
 cat >"$SHIMS/lsappinfo" <<'EOF'
@@ -50,7 +54,17 @@ EOF
 cat >"$SHIMS/open" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >>"$INSTALL_TEST_STATE/open.log"
-case " $INSTALL_TEST_FAIL " in *" launch "*) echo "open: injected failure" >&2; exit 1 ;; esac
+case " $INSTALL_TEST_FAIL " in
+    *" launch "*) echo "open: injected failure" >&2; exit 1 ;;
+    *" unlisted "*) (sleep 1; exec "$1/Contents/MacOS/NotchTheRock") </dev/null >/dev/null 2>&1 & exit 0 ;;
+    *" started-then-failed "*)
+        "$1/Contents/MacOS/NotchTheRock" </dev/null >/dev/null 2>&1 &
+        waited=0
+        until [ -s "$INSTALL_TEST_STATE/app.pid" ] || [ "$waited" -ge 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+        touch "$INSTALL_TEST_STATE/launched"
+        echo "open: injected failure after the app started" >&2
+        exit 1 ;;
+esac
 touch "$INSTALL_TEST_STATE/launched"
 EOF
 cat >"$SHIMS/codesign" <<'EOF'
@@ -83,9 +97,18 @@ if [ "$(PATH="$SHIMS:$PATH" command -v lsappinfo)" != "$SHIMS/lsappinfo" ] \
 fi
 
 # make_bundle <path> <marker>: a fake app whose Contents/marker tells the old copy from the new one.
+# Its executable runs until it is stopped; on TERM it records the marker of the app then installed at
+# the path it was started from.
 make_bundle() {
-    mkdir -p "$1/Contents"
+    mkdir -p "$1/Contents/MacOS"
     printf '%s\n' "$2" >"$1/Contents/marker"
+    cat >"$1/Contents/MacOS/NotchTheRock" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$$" >"$INSTALL_TEST_STATE/app.pid"
+trap 'cat "$(dirname "$0")/../marker" >"$INSTALL_TEST_STATE/app.stopped" 2>/dev/null; exit 0' TERM
+while :; do sleep 0.1; done
+EOF
+    chmod +x "$1/Contents/MacOS/NotchTheRock"
 }
 
 marker() {
@@ -162,6 +185,37 @@ R13__install_app_restores_the_previous_app_when_launch_fails() {
     expect_restored
 }
 
+# expect_new_app_stopped: the fake app started from the new bundle ran, no longer runs, and was
+# stopped while the new bundle was still at the final path.
+expect_new_app_stopped() {
+    local pid
+    pid=$(cat "$SANDBOX/state/app.pid" 2>/dev/null)
+    [ -n "$pid" ] || fail "the new app never started, so there was nothing to stop"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        fail "the app launched from the new bundle still runs (pid $pid)"
+        kill -KILL "$pid"
+    fi
+    [ "$(cat "$SANDBOX/state/app.stopped" 2>/dev/null)" = new ] || fail "the app was not stopped while the new bundle was still at $FINAL"
+}
+
+R13__install_app_stops_an_unlisted_launch_before_restoring() {
+    current=${FUNCNAME[0]}
+    run_sandboxed unlisted
+    contains "$output" "앱이 10초 안에 실행되지 않았어요" || fail "the timed-out pid detection is not named"
+    expect_new_app_stopped
+    expect_restored
+}
+
+# Launch Services lists 999999, which is not running and sorts after every real pid; the running app
+# must still be found and stopped.
+R13__install_app_stops_a_started_app_next_to_a_stale_listed_pid() {
+    current=${FUNCNAME[0]}
+    run_sandboxed started-then-failed
+    contains "$output" "앱을 실행하지 못했어요" || fail "the failed launch is not named"
+    expect_new_app_stopped
+    expect_restored
+}
+
 R13__install_app_replaces_the_app_and_removes_the_backup_after_success() {
     current=${FUNCNAME[0]}
     run_sandboxed ""
@@ -177,6 +231,8 @@ R13__install_app_restores_the_previous_app_when_the_swap_fails
 R13__install_app_keeps_the_backup_when_restoring_fails
 R13__install_app_restores_the_previous_app_when_the_installed_copy_fails_verification
 R13__install_app_restores_the_previous_app_when_launch_fails
+R13__install_app_stops_an_unlisted_launch_before_restoring
+R13__install_app_stops_a_started_app_next_to_a_stale_listed_pid
 R13__install_app_replaces_the_app_and_removes_the_backup_after_success
 
 if [ "$failures" -ne 0 ]; then
