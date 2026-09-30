@@ -6,7 +6,8 @@ import NotchKit
 /// with AES-GCM under the history key. Every file is mode 0600 and holds ciphertext only.
 ///
 /// Images are kept apart so that recording a text does not rewrite every image, and an image is
-/// written once when it is first copied.
+/// written once when it is first copied. An image file is always written before any list names
+/// it, so a list on disk never refers to an image that is not.
 struct ClipboardStore: Sendable {
     static let listFileName = "history.sealed"
     static let imageExtension = "image"
@@ -28,14 +29,14 @@ struct ClipboardStore: Sendable {
 
     /// The stored list, empty when none was written yet. Throws when the file cannot be read or
     /// opened with this key.
-    func loadItems() throws -> [ClipItem] {
+    func loadList() throws -> StoredList {
         let url = directory.appendingPathComponent(Self.listFileName)
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
-        return try JSONDecoder().decode([ClipItem].self, from: open(Data(contentsOf: url)))
+        guard FileManager.default.fileExists(atPath: url.path) else { return StoredList() }
+        return try JSONDecoder().decode(StoredList.self, from: open(Data(contentsOf: url)))
     }
 
-    func saveItems(_ items: [ClipItem]) throws {
-        try write(JSONEncoder().encode(items), to: directory.appendingPathComponent(Self.listFileName))
+    func saveList(_ list: StoredList) throws {
+        try write(JSONEncoder().encode(list), to: directory.appendingPathComponent(Self.listFileName))
     }
 
     func saveImage(_ png: Data, for id: UUID) throws {
@@ -58,17 +59,24 @@ struct ClipboardStore: Sendable {
         if FileManager.default.fileExists(atPath: list.path) {
             try FileManager.default.removeItem(at: list)
         }
-        try deleteImages(notIn: [])
-    }
-
-    /// Removes image files that no entry of `ids` refers to (left behind when the app stopped
-    /// between writing an image and the list, or between the list and the image removal).
-    func deleteImages(notIn ids: Set<UUID>) throws {
-        for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-        where url.pathExtension == Self.imageExtension {
-            if let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent), ids.contains(id) { continue }
+        for url in try imageURLs() {
             try FileManager.default.removeItem(at: url)
         }
+    }
+
+    /// The entry id of every image file on disk, with the time the file was written.
+    func imageFiles() throws -> [UUID: Date] {
+        var files: [UUID: Date] = [:]
+        for url in try imageURLs() {
+            guard let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent) else { continue }
+            files[id] = try url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate ?? .distantPast
+        }
+        return files
+    }
+
+    private func imageURLs() throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey])
+            .filter { $0.pathExtension == Self.imageExtension }
     }
 
     private func imageURL(_ id: UUID) -> URL {
@@ -85,6 +93,19 @@ struct ClipboardStore: Sendable {
     private func open(_ sealed: Data) throws -> Data {
         try AES.GCM.open(AES.GCM.SealedBox(combined: sealed), using: key)
     }
+}
+
+/// What the list file holds.
+///
+/// Opening a store deletes only the image files that `removedImageIDs` names. Any other image file
+/// that `items` does not name was written before a list write that failed or never ran, so it is
+/// brought back as an entry rather than deleted.
+struct StoredList: Codable, Equatable, Sendable {
+    /// Newest first.
+    var items: [ClipItem] = []
+    /// Images whose entry was removed and whose file may still be on disk: each was named by the
+    /// list this one replaces, or its file could not be deleted.
+    var removedImageIDs: Set<UUID> = []
 }
 
 /// The 256-bit history key, kept in the Keychain under the plugin's service (this Mac only).

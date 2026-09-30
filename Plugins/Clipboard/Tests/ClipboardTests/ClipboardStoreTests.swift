@@ -165,7 +165,7 @@ import Testing
     old.flush()
 
     let key = makeKey()
-    let fault = ImageWriteFault()
+    let fault = WriteFault()
     let errors = ErrorLog()
     let history = ClipboardHistory(logError: errors.append)
     history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
@@ -178,7 +178,7 @@ import Testing
     let captured = history.items
     errors.messages = []
 
-    fault.isFull = true
+    fault.failsImages = true
     history.resetUnreadableStore()
     #expect(!history.isStoreUnreadable)
     #expect(history.items == captured)
@@ -202,7 +202,7 @@ import Testing
     #expect(history.unsavedImageIDs == [image.id])
     #expect(history.imageData(for: image) == png)
 
-    fault.isFull = false
+    fault.failsImages = false
     history.saveUnsavedImages()
     #expect(history.unsavedImageIDs.isEmpty)
     history.flush()
@@ -213,6 +213,113 @@ import Testing
     // The original has left memory: without its file the image can no longer be read.
     try FileManager.default.removeItem(at: imageFile)
     #expect(history.imageData(for: image) == nil)
+}
+
+/// Retrying a reset's unsaved image can write its file and still fail to write the list. The entry
+/// stays unsaved, with its notice and retry, and its original stays in memory until a list that
+/// names it is on disk. The next flush writes the failed list again; after that a new history on
+/// the same store restores the pinned image.
+@MainActor
+@Test func R09__a_retried_image_stays_unsaved_until_a_list_that_names_it_is_written() throws {
+    let directory = try makeDirectory()
+    let old = makeHistory(directory: directory, key: makeKey())
+    old.record(.text("unreadable later"))
+    old.flush()
+
+    let key = makeKey()
+    let fault = WriteFault()
+    let history = ClipboardHistory(logError: { _ in })
+    history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
+    let png = samplePNG(seed: 9)
+    history.record(try #require(ClipCapture(png: png)))
+    history.record(.text("kept after the reset"))
+    let image = try #require(history.items.first { $0.kind == .image })
+    history.setPinned(true, for: image.id)
+    fault.failsImages = true
+    history.resetUnreadableStore()
+    #expect(history.unsavedImageIDs == [image.id])
+
+    // The retry writes the image file, but not the list that would name it.
+    fault.failsImages = false
+    fault.failsList = true
+    history.saveUnsavedImages()
+    let file = imageFile(for: image.id, in: directory)
+    #expect(FileManager.default.fileExists(atPath: file.path))
+    #expect(history.unsavedImageIDs == [image.id])
+    history.flush()
+    #expect(history.unsavedImageIDs == [image.id])
+
+    // The original is still in memory: the image is copyable even without its file.
+    let moved = file.appendingPathExtension("moved")
+    try FileManager.default.moveItem(at: file, to: moved)
+    let pasteboard = makePasteboard()
+    defer { pasteboard.releaseGlobally() }
+    #expect(history.copy(image, to: pasteboard))
+    #expect(pasteboard.data(forType: .png) == png)
+    try FileManager.default.moveItem(at: moved, to: file)
+
+    // Once the list can be written, a flush writes the failed one again.
+    fault.failsList = false
+    history.flush()
+    #expect(history.unsavedImageIDs.isEmpty)
+    let reloaded = makeHistory(directory: directory, key: key)
+    #expect(reloaded.items == history.items)
+    let restored = try #require(reloaded.items.first { $0.id == image.id })
+    #expect(restored.isPinned)
+    #expect(reloaded.imageData(for: restored) == png)
+}
+
+/// A list write that fails after an image file is written leaves the file on disk and out of the
+/// list. Opening the store again, in this session or after a restart, brings the image back as an
+/// unpinned entry instead of deleting the file as unused: the pin was never on disk, the image
+/// was. An image deleted while the list could not be written is gone for good, since no list on
+/// disk named it, and so is one the list on disk marks as removed.
+@MainActor
+@Test func R09__an_image_whose_list_write_failed_comes_back_after_a_restart() throws {
+    let directory = try makeDirectory()
+    let key = makeKey()
+    let fault = WriteFault()
+    let history = ClipboardHistory(logError: { _ in })
+    history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
+    history.record(.text("on disk"))
+    history.flush()
+    let text = try #require(history.items.first)
+
+    fault.failsList = true
+    let png = samplePNG(seed: 10)
+    history.record(try #require(ClipCapture(png: png)))
+    let image = try #require(history.items.first)
+    history.setPinned(true, for: image.id)
+    history.record(try #require(ClipCapture(png: samplePNG(seed: 11))))
+    let deleted = try #require(history.items.first)
+    history.delete(deleted.id)
+    history.flush()
+    #expect(FileManager.default.fileExists(atPath: imageFile(for: image.id, in: directory).path))
+    #expect(!FileManager.default.fileExists(atPath: imageFile(for: deleted.id, in: directory).path))
+
+    // Opening the store again in this session, while the list still cannot be written.
+    history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
+    #expect(history.items.map(\.id) == [image.id, text.id])
+    history.flush()
+
+    // A restart: a new history on the same store, whose list names only the text.
+    let errors = ErrorLog()
+    let restarted = makeHistory(directory: directory, key: key, errors: errors)
+    #expect(errors.messages.isEmpty)
+    #expect(restarted.items.map(\.id) == [image.id, text.id])
+    let recovered = try #require(restarted.items.first)
+    #expect(recovered.content == image.content)
+    #expect(!recovered.isPinned)
+    #expect(restarted.imageData(for: recovered) == png)
+    restarted.flush()
+    #expect(makeHistory(directory: directory, key: key).items == restarted.items)
+
+    let removedID = UUID()
+    let store = ClipboardStore(directory: directory, key: key)
+    try store.saveImage(samplePNG(seed: 12), for: removedID)
+    try store.saveList(StoredList(items: restarted.items, removedImageIDs: [removedID]))
+    #expect(makeHistory(directory: directory, key: key).items == restarted.items)
+    #expect(!FileManager.default.fileExists(atPath: imageFile(for: removedID, in: directory).path))
 }
 
 /// An image file goes only after a list without its entry is on disk: when that write fails the

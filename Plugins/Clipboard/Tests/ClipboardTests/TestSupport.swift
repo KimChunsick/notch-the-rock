@@ -58,22 +58,33 @@ func contents(of directory: URL) throws -> [String: Data] {
     return result
 }
 
-/// A disk that refuses image files while `isFull` is on, as a full disk would; the list is written
-/// as usual. Pass `write(_:to:)` as the store's `writeFile`.
-final class ImageWriteFault: Sendable {
-    private let full = OSAllocatedUnfairLock(initialState: false)
+/// A disk that refuses image files while `failsImages` is on and the list file while `failsList` is
+/// on, as a full disk would; other writes go through. Pass `write(_:to:)` as the store's `writeFile`.
+final class WriteFault: Sendable {
+    private let state = OSAllocatedUnfairLock(initialState: (images: false, list: false))
 
-    var isFull: Bool {
-        get { full.withLock { $0 } }
-        set { full.withLock { $0 = newValue } }
+    var failsImages: Bool {
+        get { state.withLock { $0.images } }
+        set { state.withLock { $0.images = newValue } }
+    }
+
+    var failsList: Bool {
+        get { state.withLock { $0.list } }
+        set { state.withLock { $0.list = newValue } }
     }
 
     func write(_ data: Data, to url: URL) throws {
-        if isFull && url.pathExtension == ClipboardStore.imageExtension {
+        let isImage = url.pathExtension == ClipboardStore.imageExtension
+        if isImage ? failsImages : failsList {
             throw CocoaError(.fileWriteOutOfSpace)
         }
         try data.write(to: url, options: .atomic)
     }
+}
+
+/// Where the store keeps the image file of the entry `id`.
+func imageFile(for id: UUID, in directory: URL) -> URL {
+    directory.appendingPathComponent(id.uuidString).appendingPathExtension(ClipboardStore.imageExtension)
 }
 
 /// Collects what the history reports as errors.

@@ -8,9 +8,13 @@ import Observation
 /// are deleted; at most `unpinnedLimit` unpinned entries are kept and the oldest go first. Every
 /// change is handed to a `HistoryWriter`, which writes the list in the background. Without a
 /// writable store (no key, or a stored list that cannot be read) the history lives in memory,
-/// image originals included. An image whose file cannot be written when an unreadable store is
-/// reset stays in memory the same way, and out of the list on disk, until `saveUnsavedImages()`
-/// writes it.
+/// image originals included.
+///
+/// An image is saved once its file is written and a list on disk names it; the file always comes
+/// first. The images of an unreadable store's session stay in memory, and in `unsavedImageIDs`,
+/// until both hold after the reset. A list write that fails is written again later; until then a
+/// restart loses the changes since the last list on disk (texts, pins, deletions), but not an
+/// image whose file is written: `open(_:)` brings it back as an unpinned entry.
 @MainActor
 @Observable
 final class ClipboardHistory {
@@ -20,15 +24,18 @@ final class ClipboardHistory {
     /// A stored list that could not be read. It is left untouched, and nothing is written, until
     /// `resetUnreadableStore()`.
     private var unreadableStore: ClipboardStore?
-    /// Image entries whose file could not be written. They stay in the list and copyable, and
-    /// `saveUnsavedImages()` tries again.
+    /// Image entries of an unreadable store's session that are not saved yet after the reset: their
+    /// file is not written, or no list on disk names them. They stay in the list and copyable from
+    /// memory, and `saveUnsavedImages()` tries again.
     private(set) var unsavedImageIDs: Set<ClipItem.ID> = []
     @ObservationIgnored private var store: ClipboardStore?
     @ObservationIgnored private var writer: HistoryWriter?
-    /// The PNG of each image entry that is not safely on disk: every image while there is no
-    /// writable store, and with one, an image until its file and a list that refers to it are
-    /// written. Dropped with its entry.
+    /// The PNG of each image entry that is not saved: every image while there is no writable
+    /// store, and with one, an image until its file is written and a list on disk names it.
+    /// Dropped with its entry.
     @ObservationIgnored private var originals: [ClipItem.ID: Data] = [:]
+    /// Images whose file is not written yet. The lists handed to the writer leave them out.
+    @ObservationIgnored private var imagesWithoutFile: Set<ClipItem.ID> = []
     @ObservationIgnored private let logError: @MainActor (String) -> Void
 
     init(logError: @escaping @MainActor (String) -> Void) {
@@ -41,33 +48,45 @@ final class ClipboardHistory {
     /// Replaces the list with what `store` holds and saves every later change there. A list that
     /// exists but cannot be read leaves the history empty and in memory, and the store untouched.
     /// With nil the history keeps its entries in memory only.
+    ///
+    /// Of the image files no stored entry names, only those the list marks as removed are deleted;
+    /// the others were written before a list write that failed or never ran, and come back as
+    /// unpinned entries dated by their file.
     func open(_ store: ClipboardStore?) {
         flush()
         self.store = nil
         writer = nil
         unreadableStore = nil
         unsavedImageIDs = []
+        imagesWithoutFile = []
         guard let store else { return }
         originals = [:]
+        let list: StoredList
         do {
-            items = try store.loadItems()
+            list = try store.loadList()
         } catch {
             items = []
             unreadableStore = store
             logError("could not read the clipboard history, keeping it untouched and this session in memory: \(error)")
             return
         }
-        attach(store)
-        do {
-            try store.deleteImages(notIn: Set(items.map(\.id)))
-        } catch {
-            logError("could not remove unused clipboard images: \(error)")
+        items = list.items
+        var undeleted: Set<ClipItem.ID> = []
+        for id in list.removedImageIDs {
+            do {
+                try store.deleteImage(for: id)
+            } catch {
+                logError("could not delete a clipboard image: \(error)")
+                undeleted.insert(id)
+            }
         }
+        attach(store, listedIDs: Set(items.map(\.id)), removedImages: undeleted)
+        recoverUnlistedImages(from: store, removed: list.removedImageIDs)
     }
 
     /// Deletes the unreadable stored history and saves the entries of this session in its place.
-    /// Every entry stays; an image whose file cannot be written joins `unsavedImageIDs`. Later
-    /// changes are saved again.
+    /// Every entry stays; an image stays in `unsavedImageIDs` until it is saved. Later changes are
+    /// saved again.
     func resetUnreadableStore() {
         guard let store = unreadableStore else { return }
         do {
@@ -77,30 +96,34 @@ final class ClipboardHistory {
             return
         }
         unreadableStore = nil
-        attach(store)
-        unsavedImageIDs = Set(originals.keys)
+        attach(store, listedIDs: [], removedImages: [])
+        imagesWithoutFile = Set(originals.keys)
         saveUnsavedImages()
     }
 
-    /// Writes the file of every image in `unsavedImageIDs`, then saves the list, which refers to
-    /// the ones written. An image that still cannot be written stays unsaved, copyable from memory.
+    /// Writes the file of every image that has none yet, then saves the list, which names the ones
+    /// written, and waits for it. An image stays unsaved, copyable from memory, until a list that
+    /// names it is on disk.
     func saveUnsavedImages() {
         guard let store else { return }
-        for (id, png) in originals where unsavedImageIDs.contains(id) {
+        for id in imagesWithoutFile {
+            guard let png = originals[id] else { continue }
             do {
                 try store.saveImage(png, for: id)
-                unsavedImageIDs.remove(id)
+                imagesWithoutFile.remove(id)
             } catch {
                 logError("could not save a copied image: \(error)")
             }
         }
         save()
+        flush()
     }
 
-    /// Returns once every change so far is on disk.
+    /// Returns once every change so far has been tried on disk, writing again a list whose write
+    /// failed.
     func flush() {
         writer?.flush()
-        releaseSavedOriginals()
+        refreshUnsavedImages()
     }
 
     /// Records the pasteboard's current content unless it is excluded or empty.
@@ -119,8 +142,7 @@ final class ClipboardHistory {
         case .link(let url):
             content = .link(url)
         case .image(let data, let thumbnail):
-            let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-            content = .image(digest: digest, thumbnail: thumbnail)
+            content = .image(digest: Self.digest(of: data), thumbnail: thumbnail)
             png = data
         }
 
@@ -239,34 +261,80 @@ final class ClipboardHistory {
         let removedImages = Set(removed.filter { $0.kind == .image }.map(\.id))
         for id in removedImages {
             originals[id] = nil
-            unsavedImageIDs.remove(id)
+            imagesWithoutFile.remove(id)
         }
         save(deletingImagesOf: removedImages)
     }
 
-    /// Queues the list for writing. It leaves out the images in `unsavedImageIDs`, so the list on
-    /// disk refers only to images whose file is written.
+    /// Queues the list for writing. It leaves out the images without a file, so a list on disk
+    /// names only images whose file is written.
     private func save(deletingImagesOf removedImages: Set<ClipItem.ID> = []) {
-        releaseSavedOriginals()
-        writer?.save(items.filter { !unsavedImageIDs.contains($0.id) }, deletingImagesOf: removedImages)
+        refreshUnsavedImages()
+        writer?.save(items.filter { !imagesWithoutFile.contains($0.id) }, deletingImagesOf: removedImages)
     }
 
-    /// Drops the PNG kept in memory for each image that a list written to disk refers to; such a
-    /// list names only images whose file is written (see `save`).
-    private func releaseSavedOriginals() {
-        guard let writer, !originals.isEmpty else { return }
-        let written = writer.writtenIDs
-        for id in originals.keys where written.contains(id) {
+    /// Drops the PNG kept in memory for each image that the list on disk names, whose file is
+    /// therefore written (see `save`), and marks the others unsaved.
+    private func refreshUnsavedImages() {
+        guard let writer else { return }
+        let listed = writer.writtenIDs
+        for id in originals.keys where listed.contains(id) {
             originals[id] = nil
         }
+        let unsaved = Set(originals.keys)
+        if unsaved != unsavedImageIDs {
+            unsavedImageIDs = unsaved
+        }
     }
 
-    private func attach(_ store: ClipboardStore) {
+    /// Adds an entry for every image file that neither `items` nor `removed` names, newest first by
+    /// the time its file was written, and saves the list that names them.
+    private func recoverUnlistedImages(from store: ClipboardStore, removed: Set<ClipItem.ID>) {
+        let files: [ClipItem.ID: Date]
+        do {
+            files = try store.imageFiles()
+        } catch {
+            logError("could not look for clipboard images to recover: \(error)")
+            return
+        }
+        let listed = Set(items.map(\.id))
+        var recovered = false
+        for (id, date) in files where !listed.contains(id) && !removed.contains(id) {
+            let capture: ClipCapture?
+            do {
+                capture = ClipCapture(png: try store.imageData(for: id))
+            } catch {
+                logError("could not read a clipboard image to recover: \(error)")
+                continue
+            }
+            guard case .image(let png, let thumbnail)? = capture else {
+                logError("a clipboard image to recover is not an image")
+                continue
+            }
+            let item = ClipItem(id: id, content: .image(digest: Self.digest(of: png), thumbnail: thumbnail), date: date, isPinned: false)
+            items.insert(item, at: items.firstIndex { $0.date < date } ?? items.endIndex)
+            recovered = true
+        }
+        if recovered {
+            dropUnpinnedOverLimit()
+        }
+    }
+
+    private func attach(_ store: ClipboardStore, listedIDs: Set<ClipItem.ID>, removedImages: Set<ClipItem.ID>) {
         self.store = store
         let logError = logError
-        writer = HistoryWriter(store: store) { message in
-            Task { @MainActor in logError(message) }
-        }
+        writer = HistoryWriter(
+            store: store,
+            listedIDs: listedIDs,
+            removedImages: removedImages,
+            reportError: { message in Task { @MainActor in logError(message) } },
+            didWrite: { [weak self] in Task { @MainActor in self?.refreshUnsavedImages() } }
+        )
+    }
+
+    /// The SHA-256 of an image's PNG bytes, which identifies a repeat of the same image.
+    private static func digest(of png: Data) -> String {
+        SHA256.hash(data: png).map { String(format: "%02x", $0) }.joined()
     }
 }
 
