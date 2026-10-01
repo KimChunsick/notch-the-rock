@@ -2,8 +2,8 @@ import Foundation
 import NotchKit
 import SwiftUI
 
-/// CPU, GPU, memory, disk, network and sensor readings in the expanded notch, refreshed every two
-/// seconds while the plugin is active, each with a one-minute sparkline.
+/// CPU, GPU, memory, disk, network and sensor readings in the expanded notch and a home tile,
+/// refreshed every two seconds while the plugin is active, each with a one-minute sparkline.
 @MainActor
 public final class SystemStatsPlugin: NotchPlugin {
     public static let manifest = PluginManifest(
@@ -79,6 +79,13 @@ public final class SystemStatsPlugin: NotchPlugin {
     public var expandedTab: PluginTab? {
         PluginTab(title: Self.manifest.name, symbol: Self.manifest.symbol) { [model] in
             SystemStatsView(model: model)
+        }
+    }
+
+    /// Small: CPU. Wide: CPU, memory and temperature. Large: every reading.
+    public var tile: PluginTile? {
+        PluginTile(supportedSizes: [.small, .wide, .large]) { [model] size in
+            SystemStatsTile(model: model, size: size)
         }
     }
 

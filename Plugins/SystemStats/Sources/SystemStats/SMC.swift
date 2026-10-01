@@ -107,10 +107,11 @@ final class SMCConnection: SMCReading {
         }
     }
 
-    /// Every `flt ` key whose name starts with one of `prefixes`. Walks all keys the SMC has — about
-    /// 1,600 on an M2, roughly 0.4 s — so call it once and off the main thread.
-    func floatKeys(withPrefixes prefixes: [String]) -> [SMCKey] {
-        guard case .found(let countKey) = key("#KEY"), let count = value(countKey) else { return [] }
+    /// Every `flt ` key whose name starts with one of `prefixes`, or nil when the SMC could not say
+    /// how many keys it has. Walks all keys the SMC has — about 1,600 on an M2, roughly 0.4 s — so
+    /// call it off the main thread.
+    func floatKeys(withPrefixes prefixes: [String]) -> [SMCKey]? {
+        guard case .found(let countKey) = key("#KEY"), let count = value(countKey) else { return nil }
         let floatType = Self.code("flt ")
         return (0..<UInt32(count)).compactMap { index in
             guard case .data(let reply) = call(.keyAtIndex, index: index) else { return nil }
@@ -151,6 +152,63 @@ private extension [UInt8] {
     }
 }
 
+/// Finds the SMC's temperature keys off the main thread. The key list of an SMC does not change, so
+/// a list once found is kept for the process. An attempt that could not list the keys (no
+/// connection, an unreadable key count) is not an answer about this Mac: it is tried again
+/// `retryInterval` seconds later.
+final class TemperatureKeyDiscovery: Sendable {
+    static let retryInterval = 30.0
+    /// The discovery every live sampler shares.
+    static let shared = TemperatureKeyDiscovery(listKeys: listSMCKeys)
+
+    /// The CPU and GPU temperature keys of this Mac's SMC, read over a connection of their own.
+    @Sendable static func listSMCKeys() -> [SMCKey]? {
+        SMCConnection()?.floatKeys(withPrefixes: [SMCSensorSampler.cpuPrefix, SMCSensorSampler.gpuPrefix])
+    }
+
+    private enum State: Sendable {
+        /// No attempt is running; the next one may start at `retryAt` (-infinity before the first).
+        case waiting(retryAt: Double)
+        case running
+        case found([SMCKey])
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State.waiting(retryAt: -.infinity))
+    private let listKeys: @Sendable () -> [SMCKey]?
+    private let start: @Sendable (@escaping @Sendable () -> Void) -> Void
+
+    /// - Parameters:
+    ///   - listKeys: the temperature keys of the SMC, or nil when it could not list them.
+    ///   - start: runs an attempt; by default in a background task. Tests run it at once.
+    init(
+        start: @escaping @Sendable (@escaping @Sendable () -> Void) -> Void = { work in Task.detached(priority: .utility) { work() } },
+        listKeys: @escaping @Sendable () -> [SMCKey]?
+    ) {
+        self.start = start
+        self.listKeys = listKeys
+    }
+
+    /// The temperature keys, empty until they are found. Starts an attempt when none is running and
+    /// the last failed one is `retryInterval` old; `time` is seconds on a monotonic clock.
+    func keys(at time: Double) -> [SMCKey] {
+        let begins = state.withLock { state in
+            guard case .waiting(let retryAt) = state, time >= retryAt else { return false }
+            state = .running
+            return true
+        }
+        if begins {
+            start { [self] in
+                let keys = listKeys()
+                state.withLock { $0 = keys.map(State.found) ?? .waiting(retryAt: time + Self.retryInterval) }
+            }
+        }
+        return state.withLock { state in
+            if case .found(let keys) = state { return keys }
+            return []
+        }
+    }
+}
+
 /// Temperatures and fans from the SMC. On Apple silicon the CPU sensors are the `Tp…` keys and the
 /// GPU sensors the `Tg…` keys (type `flt `, °C); this M2 has 28 `Tp` and 6 `Tg` keys. `FNum` is the
 /// fan count and `F<n>Ac` each fan's speed in rpm. A fanless Mac such as the MacBook Air has no
@@ -164,51 +222,29 @@ final class SMCSensorSampler: SensorSampler {
     /// Seconds to wait before asking the SMC for the fans again after it could not tell.
     static let fanRetryInterval = 30.0
 
-    private enum Discovery: Sendable {
-        case notStarted
-        case running
-        case finished([SMCKey])
-    }
-
-    /// The temperature keys, found once per process: the key list of an SMC does not change.
-    private nonisolated static let discovery = OSAllocatedUnfairLock(initialState: Discovery.notStarted)
-
     private let smc: (any SMCReading)?
+    private let discovery: TemperatureKeyDiscovery
     private let now: () -> Double
     /// The speed key of every fan, empty on a Mac without fans; nil until the SMC has told.
     private var fans: [SMCKey]?
     private var nextFanLookup = -Double.infinity
 
-    /// Reads this Mac's SMC and starts finding its temperature sensors in the background.
+    /// Reads this Mac's SMC; its temperature sensors are found in the background on the first reading.
     convenience init() {
-        let smc = SMCConnection()
-        if smc != nil { Self.startDiscovery() }
-        self.init(smc: smc)
+        self.init(smc: SMCConnection())
     }
 
-    /// - Parameter now: seconds on a monotonic clock, for spacing the fan lookups.
-    init(smc: (any SMCReading)?, now: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime }) {
+    /// - Parameters:
+    ///   - discovery: finds the temperature keys whose values `smc` reads.
+    ///   - now: seconds on a monotonic clock, for spacing the fan lookups and discovery attempts.
+    init(
+        smc: (any SMCReading)?,
+        discovery: TemperatureKeyDiscovery = .shared,
+        now: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime }
+    ) {
         self.smc = smc
+        self.discovery = discovery
         self.now = now
-    }
-
-    /// Finds the temperature keys on the calling thread. The plugin discovers them in the background
-    /// instead; tests call this to read temperatures right away.
-    nonisolated static func discoverNow() {
-        let keys = SMCConnection()?.floatKeys(withPrefixes: [cpuPrefix, gpuPrefix]) ?? []
-        discovery.withLock { $0 = .finished(keys) }
-    }
-
-    private static func startDiscovery() {
-        let start = discovery.withLock { state in
-            guard case .notStarted = state else { return false }
-            state = .running
-            return true
-        }
-        guard start else { return }
-        Task.detached(priority: .utility) {
-            discoverNow()
-        }
     }
 
     /// The speed key of every fan: none when the SMC has no `FNum` key or counts 0 fans. nil when the
@@ -233,17 +269,12 @@ final class SMCSensorSampler: SensorSampler {
 
     func sensors() -> SensorReading? {
         guard let smc else { return nil }
-        if fans == nil {
-            let time = now()
-            if time >= nextFanLookup {
-                fans = Self.fanKeys(smc)
-                nextFanLookup = time + Self.fanRetryInterval
-            }
+        let time = now()
+        if fans == nil, time >= nextFanLookup {
+            fans = Self.fanKeys(smc)
+            nextFanLookup = time + Self.fanRetryInterval
         }
-        let keys: [SMCKey] = Self.discovery.withLock { state in
-            if case .finished(let keys) = state { return keys }
-            return []
-        }
+        let keys = discovery.keys(at: time)
         func average(_ prefix: String) -> Double? {
             let values = keys.filter { $0.name.hasPrefix(prefix) }
                 .compactMap(smc.value)
