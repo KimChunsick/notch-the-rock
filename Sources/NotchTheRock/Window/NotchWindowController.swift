@@ -59,6 +59,8 @@ final class NotchWindowController {
     /// Set once the window is placed over a notch.
     private var pointer: NotchPointer?
     private var hoverTask: Task<Void, Never>?
+    /// Checks the pointer again when the floor after a shrink ends (`NotchPointer.keepOpenFloorEnd`).
+    private var floorTask: Task<Void, Never>?
     private var monitors: [Any] = []
     /// The app in front when the hotkey opened the notch, to give the focus back to on collapse.
     private var previousApp: NSRunningApplication?
@@ -89,7 +91,7 @@ final class NotchWindowController {
         let track: (NSEvent) -> Void = { [weak self] event in
             let isClick = event.type == .leftMouseDown || event.type == .rightMouseDown
             MainActor.assumeIsolated {
-                self?.handle(.pointerMoved)
+                self?.handle(isClick ? .clicked : .pointerMoved)
                 if isClick { self?.clicked() }
             }
         }
@@ -221,21 +223,33 @@ final class NotchWindowController {
             host: host,
             notchSize: notchRect.size,
             openSettings: openSettings,
-            metricsChanged: { [weak self] metrics in self?.handle(.shapeChanged(metrics)) },
+            metricsChanged: { [weak self] metrics in
+                guard let self else { return }
+                handle(.shapeChanged(metrics, expanded: host.state == .expanded))
+            },
             shapeDrawn: { [weak self] metrics in self?.handle(.shapeDrawn(metrics)) },
             dragChanged: { [weak self] dragging in self?.handle(dragging ? .dragBegan : .dragEnded) }
         )
     }
 
     /// Feeds `event` to the pointer tracking, lets the window take mouse events where it says and
-    /// schedules the hover change it asks for.
+    /// schedules the hover change it asks for, and the check at the end of a shrink's floor.
     private func handle(_ event: NotchPointer.Event) {
         guard var pointer else { return }
         let location = NSEvent.mouseLocation
-        let hover = pointer.handle(event, at: location)
+        let floorEnd = pointer.keepOpenFloorEnd
+        let hover = pointer.handle(event, at: location, now: .now)
         self.pointer = pointer
         let ignores = !pointer.takesMouseEvents(at: location)
         if panel.ignoresMouseEvents != ignores { panel.ignoresMouseEvents = ignores }
+        if let end = pointer.keepOpenFloorEnd, end != floorEnd {
+            floorTask?.cancel()
+            floorTask = Task { [weak self] in
+                try? await Task.sleep(until: end, clock: .continuous)
+                guard !Task.isCancelled else { return }
+                self?.handle(.floorEnded)
+            }
+        }
         guard let hover else { return }
         hoverTask?.cancel()
         hoverTask = nil

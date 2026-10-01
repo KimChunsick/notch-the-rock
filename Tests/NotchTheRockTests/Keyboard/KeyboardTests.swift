@@ -345,6 +345,7 @@ struct KeyboardTests {
         let notchRect = CGRect(x: 646, y: 924, width: 179, height: 32)
         let home = NotchLayout.metrics(for: .expanded, notch: notchRect.size, content: CGSize(width: 390, height: 200))
         var pointer = NotchPointer(notchRect: notchRect, metrics: home)
+        let now = ContinuousClock.now
         let away = CGPoint(x: 100, y: 300)
         let inside = CGPoint(x: notchRect.midX, y: 800)
 
@@ -352,16 +353,16 @@ struct KeyboardTests {
         #expect(host.isHeldOpen)
         // The pointer moving or clicking elsewhere does not end it, nor does a leave left over from
         // before the open.
-        #expect(pointer.handle(.pointerMoved, at: away) == nil)
-        #expect(pointer.handle(.pointerMoved, at: CGPoint(x: 1200, y: 500)) == nil)
+        #expect(pointer.handle(.pointerMoved, at: away, now: now) == nil)
+        #expect(pointer.handle(.pointerMoved, at: CGPoint(x: 1200, y: 500), now: now) == nil)
         host.pointerLeft()
         #expect(host.state == .expanded)
 
         // Entering and then leaving does.
-        #expect(pointer.handle(.pointerMoved, at: inside) == .enter)
+        #expect(pointer.handle(.pointerMoved, at: inside, now: now) == .enter)
         host.setHovering(true)
         #expect(!host.isHeldOpen)
-        #expect(pointer.handle(.pointerMoved, at: away) == .leave)
+        #expect(pointer.handle(.pointerMoved, at: away, now: now) == .leave)
         host.pointerLeft()
         #expect(host.state == .collapsed)
 
