@@ -35,18 +35,6 @@ enum NotchSizing {
         )
     }
 
-    /// Content in the notch band, around the camera (a HUD): `content` spans both wings and the
-    /// camera between them. The outer edges keep the padding; the height is the notch's.
-    static func bandFrame(content: CGSize, notch: CGSize, shoulder: CGFloat = NotchLayout.collapsedShoulder) -> Frame {
-        let width = min(max(content.width + 2 * (shoulder + padding), notch.width + 2 * shoulder), maxWidth)
-        let contentWidth = min(content.width, width - 2 * (shoulder + padding))
-        let height = min(content.height, notch.height)
-        return Frame(
-            size: CGSize(width: width, height: notch.height),
-            content: CGRect(x: (width - contentWidth) / 2, y: (notch.height - height) / 2, width: contentWidth, height: height)
-        )
-    }
-
     private static func clamped(_ size: CGSize) -> CGSize {
         CGSize(width: max(0, min(size.width, maxContentSize.width)), height: max(0, min(size.height, maxContentSize.height)))
     }

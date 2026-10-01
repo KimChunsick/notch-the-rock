@@ -59,6 +59,8 @@ MainActor.assumeIsolated {
     case "collapsed": false
     default: nil
     }
+    // Before the home and the catalog read what the user saved about the old volume and brightness plugin.
+    MediaKeysSplit.migrate(.standard)
     let host = NotchHostModel(pinnedExpansion: pinnedExpansion)
     let catalog = PluginCatalog(host: host, locations: .standard)
     let settings = SettingsWindowController(catalog: catalog)

@@ -54,6 +54,8 @@ enum NotchLayout {
     /// The widest a live activity's wing gets, its views and their insets included, so a plugin
     /// cannot widen the collapsed notch without bound: the fixed wing the measured one replaced.
     static let maxActivityWing: CGFloat = 78
+    /// The widest a HUD's wing gets: room for its bar with the bar's inset on either side.
+    static let maxHUDWing: CGFloat = 120
     static let collapsedShoulder: CGFloat = 6
     static let collapsedBottom: CGFloat = 10
     static let openShoulder: CGFloat = 14
@@ -69,19 +71,19 @@ enum NotchLayout {
     }
 
     /// - Parameters:
-    ///   - activityWing: the width of each wing beside the camera for the live activity, as
-    ///     `ActivityWings` measures its views; 0 without one. Collapsed only, at most `maxActivityWing`.
-    ///   - content: the measured size of what the state shows (see `NotchSizing`); unused when collapsed.
+    ///   - activityWing: the width of each wing beside the camera for the live activity or the HUD,
+    ///     as `ActivityWings` measures their views; 0 without one. Collapsed (at most
+    ///     `maxActivityWing`) and HUD (at most `maxHUDWing`) only.
+    ///   - content: the measured size of what the state shows (see `NotchSizing`); unused when
+    ///     collapsed or showing a HUD.
     ///   - minWidth: a wider minimum for the expanded shape, e.g. for controls in the band.
     static func metrics(for state: NotchState, notch: CGSize, activityWing: CGFloat = 0, content: CGSize = .zero, minWidth: CGFloat = 0) -> Metrics {
         switch state {
-        case .collapsed:
-            let wing = min(max(activityWing, 0), maxActivityWing)
+        case .collapsed, .hud:
+            // A HUD widens the collapsed notch sideways only, like a live activity.
+            let wing = min(max(activityWing, 0), state == .hud ? maxHUDWing : maxActivityWing)
             let size = CGSize(width: notch.width + 2 * (collapsedShoulder + wing), height: notch.height)
             return Metrics(size: size, shoulderRadius: collapsedShoulder, bottomRadius: collapsedBottom, content: CGRect(origin: .zero, size: size))
-        case .hud:
-            let frame = NotchSizing.bandFrame(content: content, notch: notch)
-            return Metrics(size: frame.size, shoulderRadius: collapsedShoulder, bottomRadius: collapsedBottom, content: frame.content)
         case .expanded, .attention, .takeover:
             let frame = NotchSizing.frame(content: content, notch: notch, minWidth: minWidth)
             return Metrics(size: frame.size, shoulderRadius: openShoulder, bottomRadius: openBottom, content: frame.content)

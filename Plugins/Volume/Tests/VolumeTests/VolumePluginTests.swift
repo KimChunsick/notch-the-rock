@@ -5,7 +5,7 @@ import Foundation
 import NotchKit
 import SwiftUI
 import Testing
-@testable import MediaKeys
+@testable import Volume
 
 /// Records the notch calls the plugin makes and answers attention requests with `attentionResponse`.
 @MainActor
@@ -84,22 +84,6 @@ private final class FakeVolume: VolumeControl {
 }
 
 @MainActor
-private final class FakeBrightness: BrightnessControl {
-    var value: Double?
-    var refuses = false
-    /// Every write asked of the display, the refused ones included.
-    var writes: [String] = []
-    init(_ value: Double?) { self.value = value }
-    func read() -> Double? { value }
-    func set(_ value: Double) -> Bool {
-        writes.append("brightness \(value)")
-        guard !refuses, self.value != nil else { return false }
-        self.value = value
-        return true
-    }
-}
-
-@MainActor
 private final class FakeTap: KeyEventTap {
     var refuses = false
     private(set) var handler: (@MainActor (SystemDefinedEvent) -> Bool)?
@@ -140,28 +124,24 @@ private let up = 0xB
 private final class Harness {
     let host = FakeHost()
     let volume: FakeVolume
-    let brightness: FakeBrightness
     let tap = FakeTap()
-    let plugin: MediaKeysPlugin
+    let plugin: VolumePlugin
 
     init(
         volume: VolumeState? = VolumeState(level: 0.5, isMuted: false, canMute: true),
-        brightness: Double? = 0.5,
         trusted: Bool = true
     ) throws {
         self.volume = FakeVolume(volume)
-        self.brightness = FakeBrightness(brightness)
         host.isAccessibilityTrusted = trusted
-        let id = MediaKeysPlugin.manifest.id
+        let id = VolumePlugin.manifest.id
         let storage = try PluginStorage(
-            directory: FileManager.default.temporaryDirectory.appendingPathComponent("mediakeys-tests-\(UUID().uuidString)"),
-            defaultsSuiteName: "mediakeys-tests.\(id)",
-            keychainService: "mediakeys-tests.\(id)"
+            directory: FileManager.default.temporaryDirectory.appendingPathComponent("volume-tests-\(UUID().uuidString)"),
+            defaultsSuiteName: "volume-tests.\(id)",
+            keychainService: "volume-tests.\(id)"
         )
-        plugin = MediaKeysPlugin(
+        plugin = VolumePlugin(
             context: NotchContext(pluginID: id, bundleURL: URL(fileURLWithPath: "/nonexistent"), host: host, storage: storage),
             volume: self.volume,
-            brightness: self.brightness,
             tap: tap,
             permissionPollInterval: .milliseconds(20)
         )
@@ -189,20 +169,21 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     let h = try Harness()
     h.plugin.activate()
 
-    for key in [0, 1, 2, 3, 7] {
+    for key in [0, 1, 7] {
         #expect(h.send(key, down) == true, "key \(key) down")
         #expect(h.send(key, down, repeat: true) == true, "key \(key) repeat")
         #expect(h.send(key, up) == true, "key \(key) up")
     }
-    for transport in 16...20 {
-        #expect(h.send(transport, down) == false, "key \(transport) down")
-        #expect(h.send(transport, up) == false, "key \(transport) up")
+    // The brightness keys and the transport keys belong to other plugins.
+    for other in [2, 3] + Array(16...20) {
+        #expect(h.send(other, down) == false, "key \(other) down")
+        #expect(h.send(other, down, repeat: true) == false, "key \(other) repeat")
+        #expect(h.send(other, up) == false, "key \(other) up")
     }
     #expect(h.send(0, down, subtype: 7) == false)  // another subtype
     #expect(h.send(10, down) == false)             // eject
-    #expect(h.send(2, up) == false)                // a release whose press the plugin never saw
+    #expect(h.send(0, up) == false)                // a release whose press the plugin never saw
 }
-
 @MainActor
 @Test func R12__volume_keys_step_the_level_and_volume_up_unmutes() throws {
     let h = try Harness()
@@ -233,28 +214,9 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     _ = h.send(1, down)
     #expect(h.volume.state?.level == 0)
 }
-
-@MainActor
-@Test func R12__brightness_keys_step_the_built_in_display() throws {
-    let h = try Harness()
-    h.plugin.activate()
-
-    _ = h.send(2, down)
-    #expect(h.brightness.value == 0.5625)
-    _ = h.send(3, down)
-    _ = h.send(3, down, repeat: true)
-    #expect(h.brightness.value == 0.4375)
-    h.brightness.value = 1
-    _ = h.send(2, down)
-    #expect(h.brightness.value == 1)
-    h.brightness.value = 0
-    _ = h.send(3, down)
-    #expect(h.brightness.value == 0)
-}
-
 @MainActor
 @Test func R12__each_action_slides_out_its_hud() throws {
-    let h = try Harness(brightness: 0.25)
+    let h = try Harness()
     h.plugin.activate()
 
     _ = h.send(0, down)
@@ -262,8 +224,6 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     _ = h.send(1, down)
     _ = h.send(7, down)
     _ = h.send(7, down)
-    _ = h.send(2, down)
-    _ = h.send(3, down)
     h.volume.state?.level = 0.3
     _ = h.send(1, down)
     h.volume.state?.level = 0.9
@@ -276,14 +236,11 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
         "speaker.wave.2.fill 볼륨 0.5 50%",
         "speaker.slash.fill 음소거 0.0 -",
         "speaker.wave.2.fill 볼륨 0.5 50%",
-        "sun.max.fill 밝기 0.3125 31%",
-        "sun.max.fill 밝기 0.25 25%",
         "speaker.wave.1.fill 볼륨 0.25 25%",
         "speaker.wave.3.fill 볼륨 0.9375 94%",
         "speaker.slash.fill 볼륨 0.0 0%",
     ])
 }
-
 @MainActor
 @Test func R12__a_device_without_settable_volume_gets_a_hud_and_the_system_keeps_the_keys() throws {
     let h = try Harness(volume: nil)
@@ -306,19 +263,6 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
         "speaker.wave.2.fill 볼륨 0.5625 56%",
     ])
 }
-
-@MainActor
-@Test func R12__without_changeable_brightness_the_keys_pass_silently() throws {
-    let h = try Harness(brightness: nil)
-    h.plugin.activate()
-
-    #expect(h.send(2, down) == false)
-    #expect(h.send(2, up) == false)
-    #expect(h.send(3, down) == false)
-    #expect(h.send(3, up) == false)
-    #expect(h.host.huds.isEmpty)
-}
-
 @MainActor
 @Test func R12__a_refused_write_shows_what_the_device_holds_and_the_system_keeps_the_key() throws {
     let h = try Harness(volume: VolumeState(level: 0.5, isMuted: true, canMute: true))
@@ -336,18 +280,11 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     #expect(h.send(7, up) == false)
     #expect(h.volume.state?.isMuted == false)
 
-    h.brightness.refuses = true
-    #expect(h.send(2, down) == false)
-    #expect(h.send(2, up) == false)
-    #expect(h.brightness.value == 0.5)
-    #expect(h.plugin.model.brightness == 0.5)
-
     #expect(h.host.huds == [
         "speaker.wave.2.fill 볼륨 0.5 바꿀 수 없어요",
         "speaker.wave.2.fill 음소거 0.5 바꿀 수 없어요",
     ])
 }
-
 @MainActor
 @Test func R12__sliders_snap_back_to_what_a_refusing_device_holds() throws {
     let h = try Harness()
@@ -355,19 +292,13 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     model.refresh()
     h.volume.refusesLevel = true
     h.volume.refusesMute = true
-    h.brightness.refuses = true
 
     h.volume.state?.level = 0.25  // changed elsewhere since the last refresh
     model.setVolumeLevel(0.9)
     #expect(model.volume == VolumeState(level: 0.25, isMuted: false, canMute: true))
     model.setMuted(true)
     #expect(model.volume == VolumeState(level: 0.25, isMuted: false, canMute: true))
-
-    h.brightness.value = 0.75
-    model.setBrightness(0.1)
-    #expect(model.brightness == 0.75)
 }
-
 @MainActor
 @Test func R12__one_adjustment_reads_and_writes_the_device_it_started_with() throws {
     // Headphones (1) muted at 0.5, speakers (2) at 0.2.
@@ -418,7 +349,6 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
         "speaker.slash.fill 볼륨 - 바꿀 수 없어요",
     ])
 }
-
 @MainActor
 @Test func R12__a_handled_press_keeps_its_repeats_and_release_even_when_a_repeat_is_refused() throws {
     let h = try Harness()
@@ -432,27 +362,16 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     consumed += [h.send(0, down, repeat: true), h.send(0, up)]
     // Mute: holding it changes nothing more.
     consumed += [h.send(7, down), h.send(7, down, repeat: true), h.send(7, down, repeat: true), h.send(7, up)]
-    // Brightness up, refused and taken the same way.
-    consumed.append(h.send(2, down))
-    h.brightness.refuses = true
-    consumed.append(h.send(2, down, repeat: true))
-    h.brightness.refuses = false
-    consumed += [h.send(2, down, repeat: true), h.send(2, up)]
 
-    #expect(consumed == Array(repeating: true, count: 12))
+    #expect(consumed == Array(repeating: true, count: 8))
     #expect(h.volume.writes == ["level 0.5625", "level 0.625", "level 0.625", "mute true"])
-    #expect(h.brightness.writes == ["brightness 0.5625", "brightness 0.625", "brightness 0.625"])
     #expect(h.host.huds == [
         "speaker.wave.2.fill 볼륨 0.5625 56%",
         "speaker.wave.2.fill 볼륨 0.5625 바꿀 수 없어요",
         "speaker.wave.2.fill 볼륨 0.625 63%",
         "speaker.slash.fill 음소거 0.0 -",
-        "sun.max.fill 밝기 0.5625 56%",
-        "sun.max.fill 밝기 0.5625 바꿀 수 없어요",
-        "sun.max.fill 밝기 0.625 63%",
     ])
 }
-
 @MainActor
 @Test func R12__a_press_the_system_got_keeps_its_repeats_and_release_without_writes() throws {
     let h = try Harness()
@@ -473,50 +392,36 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     consumed.append(h.send(7, down))
     h.volume.refusesMute = false
     consumed += [h.send(7, down, repeat: true), h.send(7, up)]
-    // Brightness refused, then unavailable.
-    h.brightness.refuses = true
-    consumed.append(h.send(2, down))
-    h.brightness.refuses = false
-    consumed += [h.send(2, down, repeat: true), h.send(2, up)]
-    h.brightness.value = nil
-    consumed.append(h.send(3, down))
-    h.brightness.value = 0.5
-    consumed += [h.send(3, down, repeat: true), h.send(3, up)]
 
-    #expect(consumed == Array(repeating: false, count: 16))
+    #expect(consumed == Array(repeating: false, count: 10))
     #expect(h.volume.writes == ["level 0.5625", "mute true"])
-    #expect(h.brightness.writes == ["brightness 0.5625"])
     #expect(h.volume.state == VolumeState(level: 0.5, isMuted: false, canMute: true))
-    #expect(h.brightness.value == 0.5)
     #expect(h.host.huds == [
         "speaker.wave.2.fill 볼륨 0.5 바꿀 수 없어요",
         "speaker.slash.fill 볼륨 - 바꿀 수 없어요",
         "speaker.wave.2.fill 음소거 0.5 바꿀 수 없어요",
     ])
 }
-
 @MainActor
 @Test func R12__a_press_held_while_the_permission_arrives_stays_with_the_system() async throws {
     let h = try Harness(trusted: false)
     h.plugin.activate()
 
     // No tap yet: every key-down goes to the system.
-    #expect([h.send(0, down), h.send(7, down), h.send(2, down)] == [nil, nil, nil])
+    #expect([h.send(0, down), h.send(7, down)] == [nil, nil])
     h.host.isAccessibilityTrusted = true
     #expect(await waitUntil { h.tap.isInstalled })
     let rest = [
         h.send(0, down, repeat: true), h.send(0, up),
         h.send(7, down, repeat: true), h.send(7, up),
-        h.send(2, down, repeat: true), h.send(2, up),
     ]
-    #expect(rest == Array(repeating: false, count: 6))
-    #expect(h.volume.writes.isEmpty && h.brightness.writes.isEmpty)
+    #expect(rest == Array(repeating: false, count: 4))
+    #expect(h.volume.writes.isEmpty)
 
     // The next press is the plugin's.
     #expect([h.send(0, down), h.send(0, down, repeat: true), h.send(0, up)] == [true, true, true])
     h.plugin.deactivate()
 }
-
 @MainActor
 @Test func R12__a_key_down_after_a_missed_release_starts_a_new_press() throws {
     let h = try Harness()
@@ -533,33 +438,21 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     consumed.append(h.send(7, down))
     h.volume.refusesMute = false
     consumed += [h.send(7, down, repeat: true), h.send(7, up)]
-    // A refused press whose release never came, then a handled one.
-    h.brightness.refuses = true
-    consumed.append(h.send(2, down))
-    h.brightness.refuses = false
-    consumed += [h.send(2, down), h.send(2, down, repeat: true), h.send(2, up)]
 
-    #expect(consumed == [true, false, false, false, true, false, false, false, false, true, true, true])
+    #expect(consumed == [true, false, false, false, true, false, false, false])
     #expect(h.volume.writes == ["level 0.5625", "level 0.625", "mute true", "mute false"])
-    #expect(h.brightness.writes == ["brightness 0.5625", "brightness 0.5625", "brightness 0.625"])
 }
-
 @MainActor
 @Test func R12__a_press_made_while_the_tap_was_off_stays_with_the_system() throws {
-    let cases: [(key: Int, volumeWrites: [String], brightnessWrites: [String], huds: [String])] = [
-        (0, ["level 0.5625", "level 0.625", "level 0.6875"], [], [
+    let cases: [(key: Int, volumeWrites: [String], huds: [String])] = [
+        (0, ["level 0.5625", "level 0.625", "level 0.6875"], [
             "speaker.wave.2.fill 볼륨 0.5625 56%",
             "speaker.wave.2.fill 볼륨 0.625 63%",
             "speaker.wave.3.fill 볼륨 0.6875 69%",
         ]),
-        (7, ["mute true", "mute false"], [], [
+        (7, ["mute true", "mute false"], [
             "speaker.slash.fill 음소거 0.0 -",
             "speaker.wave.2.fill 볼륨 0.5 50%",
-        ]),
-        (2, [], ["brightness 0.5625", "brightness 0.625", "brightness 0.6875"], [
-            "sun.max.fill 밝기 0.5625 56%",
-            "sun.max.fill 밝기 0.625 63%",
-            "sun.max.fill 밝기 0.6875 69%",
         ]),
     ]
     for c in cases {
@@ -576,64 +469,58 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
 
         #expect(consumed == [true, false, false, false, true, true, true], "key \(c.key)")
         #expect(h.volume.writes == c.volumeWrites, "key \(c.key)")
-        #expect(h.brightness.writes == c.brightnessWrites, "key \(c.key)")
         #expect(h.host.huds == c.huds, "key \(c.key)")
     }
 }
-
 @MainActor
 @Test func R12__an_interruption_hands_every_open_press_to_the_system() throws {
     let h = try Harness()
     h.plugin.activate()
 
-    // Volume up and brightness down held together, then mute pressed: three open presses.
+    // Volume up and volume down held together, then mute pressed: three open presses.
     var consumed = [
-        h.send(0, down), h.send(3, down),
-        h.send(0, down, repeat: true), h.send(3, down, repeat: true),
+        h.send(0, down), h.send(1, down),
+        h.send(0, down, repeat: true), h.send(1, down, repeat: true),
         h.send(7, down),
     ]
     h.tap.interrupt()
     // The rest of all three presses goes to the system untouched.
     consumed += [
-        h.send(0, down, repeat: true), h.send(3, down, repeat: true), h.send(7, down, repeat: true),
-        h.send(0, up), h.send(3, up), h.send(7, up),
+        h.send(0, down, repeat: true), h.send(1, down, repeat: true), h.send(7, down, repeat: true),
+        h.send(0, up), h.send(1, up), h.send(7, up),
     ]
     // A new key-down starts a press of the plugin's.
     consumed += [h.send(0, down), h.send(0, down, repeat: true), h.send(0, up)]
 
     #expect(consumed == [true, true, true, true, true, false, false, false, false, false, false, true, true, true])
-    #expect(h.volume.writes == ["level 0.5625", "level 0.625", "mute true", "mute false", "level 0.6875", "level 0.75"])
-    #expect(h.brightness.writes == ["brightness 0.4375", "brightness 0.375"])
+    #expect(h.volume.writes == ["level 0.5625", "level 0.5", "level 0.5625", "level 0.5", "mute true", "mute false", "level 0.5625", "level 0.625"])
     #expect(h.host.huds == [
         "speaker.wave.2.fill 볼륨 0.5625 56%",
-        "sun.max.fill 밝기 0.4375 44%",
-        "speaker.wave.2.fill 볼륨 0.625 63%",
-        "sun.max.fill 밝기 0.375 38%",
+        "speaker.wave.2.fill 볼륨 0.5 50%",
+        "speaker.wave.2.fill 볼륨 0.5625 56%",
+        "speaker.wave.2.fill 볼륨 0.5 50%",
         "speaker.slash.fill 음소거 0.0 -",
-        "speaker.wave.3.fill 볼륨 0.6875 69%",
-        "speaker.wave.3.fill 볼륨 0.75 75%",
+        "speaker.wave.2.fill 볼륨 0.5625 56%",
+        "speaker.wave.2.fill 볼륨 0.625 63%",
     ])
 }
-
 @MainActor
 @Test func R12__a_press_open_across_deactivate_and_activate_stays_with_the_system() throws {
     let h = try Harness()
     h.plugin.activate()
 
-    var consumed = [h.send(0, down), h.send(7, down), h.send(2, down)]
+    var consumed = [h.send(0, down), h.send(7, down)]
     h.plugin.deactivate()
     h.plugin.activate()
     consumed += [
-        h.send(0, down, repeat: true), h.send(7, down, repeat: true), h.send(2, down, repeat: true),
-        h.send(0, up), h.send(7, up), h.send(2, up),
+        h.send(0, down, repeat: true), h.send(7, down, repeat: true),
+        h.send(0, up), h.send(7, up),
     ]
     consumed += [h.send(1, down), h.send(1, down, repeat: true), h.send(1, up)]
 
-    #expect(consumed == [true, true, true, false, false, false, false, false, false, true, true, true])
+    #expect(consumed == [true, true, false, false, false, false, true, true, true])
     #expect(h.volume.writes == ["level 0.5625", "mute true", "level 0.5", "level 0.4375"])
-    #expect(h.brightness.writes == ["brightness 0.5625"])
 }
-
 /// The labels of every slider under `element`, in order.
 @MainActor
 private func sliderLabels(in element: Any) -> [String] {
@@ -643,7 +530,7 @@ private func sliderLabels(in element: Any) -> [String] {
 }
 
 @MainActor
-@Test func R12__both_sliders_carry_an_accessibility_label() throws {
+@Test func R12__the_slider_carries_an_accessibility_label() throws {
     let h = try Harness()
     h.plugin.model.refresh()
     let tab = try #require(h.plugin.expandedTab)
@@ -654,13 +541,12 @@ private func sliderLabels(in element: Any) -> [String] {
     NSApplication.shared.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
     RunLoop.main.run(until: Date().addingTimeInterval(0.3))
 
-    #expect(sliderLabels(in: view) == ["볼륨", "밝기"])
+    #expect(sliderLabels(in: view) == ["볼륨"])
 }
-
 @MainActor
 @Test func R12__without_accessibility_the_notch_guides_once_and_the_tap_follows_the_grant() async throws {
     let h = try Harness(trusted: false)
-    h.host.attentionResponse = .answered(AttentionAnswer(buttonID: MediaKeysPlugin.openAccessibilityButtonID))
+    h.host.attentionResponse = .answered(AttentionAnswer(buttonID: VolumePlugin.openAccessibilityButtonID))
     h.plugin.activate()
     #expect(h.tap.installs == 0)
 
@@ -681,7 +567,6 @@ private func sliderLabels(in element: Any) -> [String] {
     h.plugin.deactivate()
     #expect(!h.tap.isInstalled)
 }
-
 @MainActor
 @Test func R12__deactivate_removes_the_tap_and_stops_waiting_for_the_permission() async throws {
     let h = try Harness()
@@ -709,10 +594,9 @@ private func sliderLabels(in element: Any) -> [String] {
     #expect(refused.tap.installs == 1)
     #expect(refused.host.attentions.isEmpty)
 }
-
 @MainActor
 @Test func R12__tile_offers_small_and_wide_and_every_view_has_a_finite_size() throws {
-    for h in [try Harness(), try Harness(volume: nil, brightness: nil)] {
+    for h in [try Harness(), try Harness(volume: nil)] {
         h.plugin.model.refresh()
         let tile = try #require(h.plugin.tile)
         #expect(tile.supportedSizes == [.small, .wide])
@@ -725,10 +609,10 @@ private func sliderLabels(in element: Any) -> [String] {
             #expect(size.width > 0 && size.width.isFinite && size.width < 1000, "width \(size.width)")
             #expect(size.height > 0 && size.height.isFinite && size.height < 1000, "height \(size.height)")
         }
-        #expect(wide.width > small.width)
+        // Wide adds the slider when the volume can be set.
+        #expect(h.plugin.model.volume == nil ? wide.width == small.width : wide.width > small.width)
     }
 }
-
 /// How far the outermost ink of `view` (any channel at least 14 over black, as the end-to-end
 /// capture counts it) stays from its left, right and bottom edges, drawn offscreen at its ideal
 /// size. The host adds the notch's margin around a tab, so a tab's own outer padding shows here.
@@ -779,12 +663,46 @@ private func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom
 }
 
 
-/// The tab is the size of what it draws, with both controls or neither: the host adds the margin
+/// The tab is the size of what it draws, with the slider or without: the host adds the margin
 /// around it.
 @MainActor
-@Test func R15__volume_and_brightness_tab_draws_to_its_edges() throws {
-    for (name, h) in [("controls", try Harness()), ("unavailable", try Harness(volume: nil, brightness: nil))] {
+@Test func R15__volume_tab_draws_to_its_edges() throws {
+    for (name, h) in [("controls", try Harness()), ("unavailable", try Harness(volume: nil))] {
         h.plugin.model.refresh()
         expectNoOuterSpace(try inkInsets(try #require(h.plugin.expandedTab).content), name)
     }
+}
+
+/// The brightness keys are the brightness plugin's: the volume plugin passes every event of them on
+/// untouched, so they reach the next tap (the brightness plugin's) or the system.
+@MainActor
+@Test func R26__brightness_keys_pass_on_untouched() throws {
+    let h = try Harness()
+    h.plugin.activate()
+
+    for key in [2, 3] {
+        let passed = [h.send(key, down), h.send(key, down, repeat: true), h.send(key, up)]
+        #expect(passed == [false, false, false], "key \(key)")
+    }
+    #expect(h.volume.writes.isEmpty)
+    #expect(h.host.huds.isEmpty)
+    // Its own keys still show their HUD.
+    #expect(h.send(0, down) == true)
+    #expect(h.host.huds == ["speaker.wave.2.fill 볼륨 0.5625 56%"])
+}
+
+/// Turned off in Settings, the plugin is deactivated: its tap is gone, so no key of its own is
+/// consumed and the system handles them.
+@MainActor
+@Test func R26__a_turned_off_volume_plugin_consumes_no_keys() throws {
+    let h = try Harness()
+    h.plugin.activate()
+    h.plugin.deactivate()
+
+    #expect(!h.tap.isInstalled)
+    for key in [0, 1, 7] {
+        #expect(h.send(key, down) == nil, "key \(key) never reaches the plugin")
+    }
+    #expect(h.volume.writes.isEmpty)
+    #expect(h.host.huds.isEmpty)
 }

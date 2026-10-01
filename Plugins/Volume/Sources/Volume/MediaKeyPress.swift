@@ -1,11 +1,10 @@
 import CoreGraphics
 
-/// A volume, mute or brightness key, by its `NX_KEYTYPE_*` code.
+/// A volume or mute key, by its `NX_KEYTYPE_*` code. The brightness keys (2 and 3) belong to the
+/// brightness plugin.
 enum MediaKey: Int, Hashable, Sendable {
     case soundUp = 0
     case soundDown = 1
-    case brightnessUp = 2
-    case brightnessDown = 3
     case mute = 7
 }
 
@@ -18,8 +17,9 @@ struct SystemDefinedEvent: Sendable {
 }
 
 /// A press or release of one of the keys in `MediaKey`, decoded from an `NX_SYSDEFINED` event of
-/// subtype 8 (`NX_SUBTYPE_AUX_CONTROL_BUTTONS`). Every other event decodes to nil, including
-/// play/pause, next and previous (key codes 16–20), which belong to another plugin.
+/// subtype 8 (`NX_SUBTYPE_AUX_CONTROL_BUTTONS`). Every other event decodes to nil, so the plugin
+/// passes it on: the brightness keys (2 and 3) and play/pause, next and previous (key codes 16–20),
+/// which belong to other plugins.
 struct MediaKeyPress: Equatable, Sendable {
     enum State: Equatable, Sendable {
         case down

@@ -13,7 +13,8 @@ Raycast 단축키를 지정하면 플러그인별 단축키처럼 쓸 수 있어
 | 배터리 열기 | `notchtherock://open/com.notchtherock.battery` |
 | 음악 열기 | `notchtherock://open/com.notchtherock.nowplaying` |
 | 에이전트 열기 | `notchtherock://open/com.notchtherock.agents` |
-| 미디어 키 열기 | `notchtherock://open/com.notchtherock.mediakeys` |
+| 볼륨 열기 | `notchtherock://open/com.notchtherock.volume` |
+| 밝기 열기 | `notchtherock://open/com.notchtherock.brightness` |
 | 플러그인 열기 | `notchtherock://open/<입력한 식별자>` |
 
 직접 만든 플러그인은 `플러그인 열기`에 식별자(예: `com.example.clock`)를 적어서 열어요. 꺼져

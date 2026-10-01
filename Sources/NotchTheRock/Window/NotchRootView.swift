@@ -5,9 +5,10 @@ import SwiftUI
 /// Everything drawn in the notch window. The black shape hangs from the top edge of the canvas,
 /// which is the top edge of the screen; the rest of the canvas stays transparent.
 ///
-/// Every presentation but the collapsed notch is measured at its own size and the shape grows to it
-/// with the same padding on every side (`NotchSizing`); a change of size springs like opening does,
-/// also between the home and a plugin's screen.
+/// Every presentation but the collapsed notch and the HUD is measured at its own size and the shape
+/// grows to it with the same padding on every side (`NotchSizing`); a change of size springs like
+/// opening does, also between the home and a plugin's screen. The HUD widens the collapsed notch
+/// sideways by wings measured like a live activity's.
 struct NotchRootView: View {
     let host: NotchHostModel
     let notchSize: CGSize
@@ -26,6 +27,9 @@ struct NotchRootView: View {
     /// What the live activity's leading and trailing views draw inside their layout boxes, measured
     /// once per post.
     @State private var activityInk: [ActivityInk?] = []
+    /// Each wing's width for the HUD, and its symbol's ink, measured as the live activity's are.
+    @State private var hudWing: CGFloat = 0
+    @State private var hudInk: [ActivityInk?] = []
     @Environment(\.displayScale) private var displayScale
 
     /// Opening is a little lively; closing settles without overshoot.
@@ -38,7 +42,7 @@ struct NotchRootView: View {
         let metrics = NotchLayout.metrics(
             for: state,
             notch: notchSize,
-            activityWing: host.liveActivity == nil ? 0 : activityWing,
+            activityWing: state == .hud ? hudWing : host.liveActivity == nil ? 0 : activityWing,
             content: contentSize,
             minWidth: showsHomeBand ? BandLayout.minimumWidth(notch: notchSize, leading: HomeChrome.editWidth, trailing: HomeChrome.gearWidth) : 0
         )
@@ -88,7 +92,13 @@ struct NotchRootView: View {
             }
         case .hud:
             if let shown = host.hud {
-                measured(HUDContent(hud: shown.hud, notchSize: notchSize))
+                // One view for every HUD shown in a row, so the bar springs from one value to the next.
+                HUDContent(hud: shown.hud, notch: notchSize, ink: hudInk)
+                    .onGeometryChange(for: CGFloat.self) { ($0.size.width - notchSize.width) / 2 } action: { hudWing = $0 }
+                    .onChange(of: shown.hud.symbol, initial: true) {
+                        hudInk = [ActivityInk.measure(AnyView(HUDSymbol(name: shown.hud.symbol)), scale: displayScale, notchHeight: notchSize.height)]
+                    }
+                    .frame(maxWidth: .infinity)
                     .transition(Self.contentTransition)
             }
         case .expanded:
@@ -206,6 +216,8 @@ private struct ActivityWings: Layout {
     /// The leading and trailing views' ink, as measured at the size each is placed at; nil or
     /// missing counts the whole box as drawn.
     var ink: [ActivityInk?] = []
+    /// The widest a wing gets, its view and insets included.
+    var maxWing: CGFloat = NotchLayout.maxActivityWing
 
     /// Where a view goes in its wing: its size, the visible inset beside and below it, and the
     /// blank space its box keeps on the outer side and toward the camera.
@@ -221,7 +233,7 @@ private struct ActivityWings: Layout {
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let wing = subviews.prefix(2).indices.map { fit(subviews[$0], at: $0).wing }.max() ?? 0
-        return CGSize(width: notch.width + 2 * min(wing, NotchLayout.maxActivityWing), height: notch.height)
+        return CGSize(width: notch.width + 2 * min(wing, maxWing), height: notch.height)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
@@ -239,7 +251,7 @@ private struct ActivityWings: Layout {
         let ideal = subview.sizeThatFits(.unspecified)
         guard index < ink.count, let measured = ink[index],
               abs(measured.ideal.width - ideal.width) <= 0.5, abs(measured.ideal.height - ideal.height) <= 0.5
-        else { return fit(Self.placedSize(ideal: ideal, margins: EdgeInsets(), notchHeight: notch.height), margins: EdgeInsets(), at: index) }
+        else { return fit(Self.placedSize(ideal: ideal, margins: EdgeInsets(), notchHeight: notch.height, maxWing: maxWing), margins: EdgeInsets(), at: index) }
         return fit(measured.size, margins: measured.margins, at: index)
     }
 
@@ -254,12 +266,12 @@ private struct ActivityWings: Layout {
     }
 
     /// The size a view whose own size is `ideal` is placed at when its box keeps `margins` blank
-    /// around its ink: no taller than the notch and no wider than the widest wing leaves room for.
-    /// The blank sides may hang past the wing's edges, so the box can be wider than the wing.
-    static func placedSize(ideal: CGSize, margins: EdgeInsets, notchHeight: CGFloat) -> CGSize {
+    /// around its ink: no taller than the notch and no wider than the widest wing (`maxWing`) leaves
+    /// room for. The blank sides may hang past the wing's edges, so the box can be wider than the wing.
+    static func placedSize(ideal: CGSize, margins: EdgeInsets, notchHeight: CGFloat, maxWing: CGFloat = NotchLayout.maxActivityWing) -> CGSize {
         let height = min(ideal.height, notchHeight)
         let inset = NotchLayout.activityInset(contentHeight: height, notchHeight: notchHeight) + margins.bottom
-        let room = NotchLayout.maxActivityWing - 2 * inset + margins.leading + margins.trailing
+        let room = maxWing - 2 * inset + margins.leading + margins.trailing
         return CGSize(width: min(ideal.width, room), height: height)
     }
 }
@@ -351,62 +363,65 @@ struct ActivityInk: Equatable {
     }
 }
 
-/// The HUD beside the camera: symbol and title in the left wing, level bar and detail in the right.
-/// Both wings are as wide as the wider one's content, so the shape stays centered on the notch.
+/// The HUD in the collapsed notch's wings, placed as a live activity's views are: the symbol in the
+/// left wing, as far from the side edge as from the bottom, and for a HUD with a value a thin bar in
+/// the right wing. Both wings are as wide as the bar's, so the shape keeps its width while the
+/// symbol changes (a speaker's waves by level). The title and detail are not drawn; VoiceOver reads
+/// them.
 private struct HUDContent: View {
     let hud: HUD
-    let notchSize: CGSize
+    let notch: CGSize
+    /// The symbol's ink, as measured at the size it is placed at.
+    let ink: [ActivityInk?]
 
     var body: some View {
-        WingPair(gap: notchSize.width + 2 * BandLayout.cameraClearance) {
-            HStack(spacing: 6) {
-                Image(systemName: hud.symbol)
-                Text(hud.title).lineLimit(1)
-            }
-            HStack(spacing: 6) {
-                if let value = hud.value {
-                    Capsule()
-                        .fill(.white.opacity(0.25))
-                        .overlay(alignment: .leading) {
-                            GeometryReader { proxy in
-                                Capsule().fill(.white).frame(width: proxy.size.width * value)
-                            }
-                        }
-                        .frame(width: 52, height: 5)
-                }
-                if let detail = hud.detail {
-                    Text(detail).monospacedDigit().lineLimit(1)
-                }
+        ActivityWings(notch: notch, ink: ink, maxWing: NotchLayout.maxHUDWing) {
+            HUDSymbol(name: hud.symbol)
+            if let value = hud.value {
+                HUDBar(value: value, colors: hud.symbol.hasPrefix("sun.") ? HUDBar.warm : HUDBar.cool)
             }
         }
-        .foregroundStyle(.white)
-        .font(.system(size: 12, weight: .medium))
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(hud.title)
+        .accessibilityValue(hud.detail ?? "")
     }
 }
 
-/// Two subviews either side of a gap, each in a wing as wide as the wider one: the first at the
-/// left edge, the second at the right edge. Offered less width, the wings shrink to fit.
-private struct WingPair: Layout {
-    var gap: CGFloat
+/// The HUD's symbol, white. Its own font, so measuring its ink and placing it lay it out alike.
+private struct HUDSymbol: View {
+    let name: String
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let wing = wingWidth(proposal: proposal, subviews: subviews)
-        let height = subviews.map { $0.sizeThatFits(ProposedViewSize(width: wing, height: nil)).height }.max() ?? 0
-        return CGSize(width: 2 * wing + gap, height: height)
+    var body: some View {
+        Image(systemName: name)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.white)
     }
+}
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let wing = wingWidth(proposal: ProposedViewSize(bounds.size), subviews: subviews)
-        let offer = ProposedViewSize(width: wing, height: bounds.height)
-        subviews.first?.place(at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading, proposal: offer)
-        subviews.dropFirst().first?.place(at: CGPoint(x: bounds.maxX, y: bounds.midY), anchor: .trailing, proposal: offer)
-    }
+/// A thin rounded bar on a dark translucent track, filled from the left in proportion to `value`
+/// with a soft gradient from end to end of the fill. A new value springs from the last one, also
+/// when a held key repeats.
+private struct HUDBar: View {
+    static let length: CGFloat = 80
+    static let thickness: CGFloat = 6
+    /// Brightness: warm beige to gold.
+    static let warm = [Color(red: 0.95, green: 0.87, blue: 0.72), Color(red: 0.97, green: 0.73, blue: 0.28)]
+    /// Everything else (volume): cool white to light grey.
+    static let cool = [Color(red: 0.98, green: 0.99, blue: 1), Color(red: 0.8, green: 0.82, blue: 0.86)]
 
-    private func wingWidth(proposal: ProposedViewSize, subviews: Subviews) -> CGFloat {
-        let ideal = subviews.map { $0.sizeThatFits(.unspecified).width }.max() ?? 0
-        guard let width = proposal.width else { return ideal }
-        return max(0, min(ideal, (width - gap) / 2))
+    let value: Double
+    let colors: [Color]
+
+    var body: some View {
+        Capsule()
+            .fill(.white.opacity(0.18))
+            .overlay(alignment: .leading) {
+                Capsule()
+                    .fill(LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing))
+                    .frame(width: Self.length * value)
+            }
+            .frame(width: Self.length, height: Self.thickness)
+            .animation(.spring(response: 0.32, dampingFraction: 0.86), value: value)
     }
 }
 

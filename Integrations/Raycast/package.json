@@ -48,9 +48,15 @@
       "mode": "no-view"
     },
     {
-      "name": "open-media-keys",
-      "title": "미디어 키 열기",
-      "description": "노치를 펼쳐 미디어 키 화면을 열어요.",
+      "name": "open-volume",
+      "title": "볼륨 열기",
+      "description": "노치를 펼쳐 볼륨 화면을 열어요.",
+      "mode": "no-view"
+    },
+    {
+      "name": "open-brightness",
+      "title": "밝기 열기",
+      "description": "노치를 펼쳐 밝기 화면을 열어요.",
       "mode": "no-view"
     },
     {

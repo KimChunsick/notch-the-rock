@@ -1,9 +1,11 @@
 import NotchKit
 import SwiftUI
 
-/// Takes the volume, mute and brightness keys away from the system: each press changes the value
-/// directly and slides a bar out of the notch instead of the system's own display. The expanded tab
-/// and the home tile adjust the same values.
+/// Takes the brightness keys away from the system: each press changes the built-in display's
+/// brightness directly and shows a bar in the notch instead of the system's own display. The
+/// expanded tab and the home tile adjust the same brightness. The volume and mute keys are not this
+/// plugin's: it passes them on untouched, so they reach the volume plugin's tap, or the system when
+/// that plugin is off.
 ///
 /// A key press is decided once, at its key-down: when the plugin handles it, its auto-repeats and
 /// its release are the plugin's as well; when the key-down goes to the system, the rest of that
@@ -16,12 +18,12 @@ import SwiftUI
 /// notch shows the guidance once per activation, and the plugin checks every
 /// `permissionPollInterval` until the permission is on, then installs the tap.
 @MainActor
-public final class MediaKeysPlugin: NotchPlugin {
+public final class BrightnessPlugin: NotchPlugin {
     public static let manifest = PluginManifest(
-        id: "com.notchtherock.mediakeys",
-        name: "볼륨과 밝기",
+        id: "com.notchtherock.brightness",
+        name: "밝기",
         version: "1.0.0",
-        symbol: "speaker.wave.2.fill",
+        symbol: "sun.max.fill",
         sdkVersion: NotchKitSDK.version
     )
 
@@ -31,7 +33,7 @@ public final class MediaKeysPlugin: NotchPlugin {
     static let fineSteps = 64
     static let hudDuration: Duration = .milliseconds(1500)
 
-    let model: MediaKeysModel
+    let model: BrightnessModel
     private let context: NotchContext
     private let tap: any KeyEventTap
     private let permissionPollInterval: Duration
@@ -47,7 +49,6 @@ public final class MediaKeysPlugin: NotchPlugin {
     public convenience init(context: NotchContext) {
         self.init(
             context: context,
-            volume: SystemVolume(),
             brightness: DisplayServicesBrightness(),
             tap: SystemDefinedEventTap(),
             permissionPollInterval: .seconds(2)
@@ -56,13 +57,12 @@ public final class MediaKeysPlugin: NotchPlugin {
 
     init(
         context: NotchContext,
-        volume: any VolumeControl,
         brightness: any BrightnessControl,
         tap: any KeyEventTap,
         permissionPollInterval: Duration
     ) {
         self.context = context
-        self.model = MediaKeysModel(volume: volume, brightness: brightness)
+        self.model = BrightnessModel(brightness: brightness)
         self.tap = tap
         self.permissionPollInterval = permissionPollInterval
     }
@@ -91,14 +91,20 @@ public final class MediaKeysPlugin: NotchPlugin {
 
     public var expandedTab: PluginTab? {
         PluginTab(title: Self.manifest.name, symbol: Self.manifest.symbol) { [model] in
-            MediaKeysView(model: model)
+            BrightnessView(model: model)
         }
     }
 
     public var tile: PluginTile? {
         PluginTile(supportedSizes: [.small, .wide]) { [model] size in
-            MediaKeysTile(model: model, size: size)
+            BrightnessTile(model: model, size: size)
         }
+    }
+
+    public var settingsView: AnyView? {
+        AnyView(BrightnessSettingsView(isTrusted: context.permissions.isAccessibilityTrusted) { [context] in
+            context.permissions.requestAccessibility()
+        })
     }
 
     /// What happens to one `NX_SYSDEFINED` event: true when the plugin handled it and the system must
@@ -113,11 +119,9 @@ public final class MediaKeysPlugin: NotchPlugin {
             let steps = fine ? Self.fineSteps : Self.steps
             if press.isRepeat {
                 guard handledKeys.contains(press.key) else { return false }
-                // Holding the mute key does not flip it back and forth, as with the system. A repeat
-                // the device refuses stays consumed: the system must not see a repeat without its press.
-                if press.key != .mute {
-                    _ = perform(press.key, steps: steps, consumed: true)
-                }
+                // A repeat the display refuses stays consumed: the system must not see a repeat
+                // without its press.
+                _ = perform(press.key, steps: steps, consumed: true)
                 return true
             }
             // A key-down whose release never came starts a new press all the same.
@@ -131,42 +135,19 @@ public final class MediaKeysPlugin: NotchPlugin {
         }
     }
 
-    /// Applies a key-down or an auto-repeat and shows the HUD: true when the device took the change.
-    /// A volume or mute change the device cannot make or refuses gets a HUD saying so with what the
-    /// device holds. A brightness change the display cannot make or refuses gets one only when the
-    /// event is `consumed` whatever the outcome (a repeat of a handled press); otherwise the key goes
-    /// to the system, which shows its own.
+    /// Applies a key-down or an auto-repeat and shows the HUD: true when the display took the change.
+    /// A change the display cannot make or refuses gets a HUD only when the event is `consumed`
+    /// whatever the outcome (a repeat of a handled press); otherwise the key goes to the system,
+    /// which shows its own.
     private func perform(_ key: MediaKey, steps: Int, consumed: Bool) -> Bool {
-        switch key {
-        case .soundUp, .soundDown:
-            return show(model.stepVolume(by: key == .soundUp ? 1 : -1, steps: steps), title: "볼륨")
-        case .mute:
-            return show(model.toggleMute(), title: "음소거")
-        case .brightnessUp, .brightnessDown:
-            guard let value = model.stepBrightness(by: key == .brightnessUp ? 1 : -1, steps: steps) else {
-                if consumed {
-                    showHUD(.unchangeableBrightness(model.brightness))
-                }
-                return false
+        guard let value = model.stepBrightness(by: key == .brightnessUp ? 1 : -1, steps: steps) else {
+            if consumed {
+                showHUD(.unchangeableBrightness(model.brightness))
             }
-            showHUD(.brightness(value))
-            return true
-        }
-    }
-
-    /// Shows what became of a volume or mute key under `title`: true when the device took the change.
-    private func show(_ adjustment: VolumeAdjustment, title: String) -> Bool {
-        switch adjustment {
-        case .changed(let state):
-            showHUD(.volume(state))
-            return true
-        case .refused(let actual):
-            showHUD(.unchangeable(title, actual))
-            return false
-        case .unavailable:
-            showHUD(.unchangeable(title, nil))
             return false
         }
+        showHUD(.brightness(value))
+        return true
     }
 
     /// The tap missed events for a while: a held key may have been released and pressed again, and
@@ -187,7 +168,7 @@ public final class MediaKeysPlugin: NotchPlugin {
         )
         if !installed {
             // Retrying would fail the same way until something changes; the next activation tries again.
-            context.log.error("The system refused the key event tap; the volume and brightness keys stay with the system.")
+            context.log.error("The system refused the key event tap; the brightness keys stay with the system.")
         }
     }
 
@@ -214,7 +195,7 @@ public final class MediaKeysPlugin: NotchPlugin {
     private func showAccessibilityGuidance() async {
         let response = await context.requestAttention(AttentionRequest(
             title: "손쉬운 사용 권한이 필요해요",
-            message: "볼륨·음소거·밝기 키를 노치에서 바로 처리하려면 시스템 설정에서 NotchTheRock의 손쉬운 사용 권한을 켜 주세요. 권한을 켜기 전까지는 키가 원래대로 동작해요.",
+            message: "밝기 키를 노치에서 바로 처리하려면 시스템 설정에서 NotchTheRock의 손쉬운 사용 권한을 켜 주세요. 권한을 켜기 전까지는 키가 원래대로 동작해요.",
             accent: .orange,
             buttons: [
                 AttentionButton(id: Self.openAccessibilityButtonID, title: "권한 열기", role: .primary),
@@ -229,23 +210,9 @@ public final class MediaKeysPlugin: NotchPlugin {
 }
 
 extension HUD {
-    static func volume(_ state: VolumeState) -> HUD {
-        if state.isMuted {
-            return HUD(symbol: state.symbol, title: "음소거", value: 0)
-        }
-        return HUD(symbol: state.symbol, title: "볼륨", value: state.level, detail: percentText(state.level))
-    }
-
+    /// The notch draws the symbol and the bar; VoiceOver reads the title and the detail.
     static func brightness(_ value: Double) -> HUD {
         HUD(symbol: "sun.max.fill", title: "밝기", value: value, detail: percentText(value))
-    }
-
-    /// A volume or mute key the device did not take, with the state the device holds when known.
-    static func unchangeable(_ title: String, _ state: VolumeState?) -> HUD {
-        guard let state else {
-            return HUD(symbol: "speaker.slash.fill", title: title, detail: "바꿀 수 없어요")
-        }
-        return HUD(symbol: state.symbol, title: title, value: state.isMuted ? 0 : state.level, detail: "바꿀 수 없어요")
     }
 
     /// A brightness key the display did not take, with the brightness it holds when known.
@@ -257,5 +224,5 @@ extension HUD {
 /// The C entry symbol the app resolves after loading the bundle. Keep one per plugin.
 @_cdecl("notchkit_plugin_entry")
 public func notchkitPluginEntry() -> UnsafeMutableRawPointer {
-    NotchPluginEntry.export(MediaKeysPlugin.self)
+    NotchPluginEntry.export(BrightnessPlugin.self)
 }
