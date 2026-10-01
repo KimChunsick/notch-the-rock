@@ -45,14 +45,70 @@ final class ClaudeHooksModel {
     }
 }
 
+/// The Codex connection shown in the settings page: off until the user connects, remembered across
+/// launches. The codex version is read once, when the page first shows it.
+@MainActor
+@Observable
+final class CodexModel {
+    static let enabledKey = "codexEnabled"
+
+    private(set) var enabled: Bool
+    let executable: URL?
+    /// Nil until the version check finished.
+    private(set) var install: CodexInstall?
+    var state: CodexLink.State = .off
+    @ObservationIgnored private let readVersion: (URL) async -> String?
+    @ObservationIgnored private var checking = false
+    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let start: () -> Void
+    @ObservationIgnored private let stop: () -> Void
+
+    init(
+        defaults: UserDefaults,
+        executable: URL?,
+        readVersion: @escaping (URL) async -> String? = { await CodexInstall.readVersion($0) },
+        start: @escaping () -> Void,
+        stop: @escaping () -> Void
+    ) {
+        self.defaults = defaults
+        self.executable = executable
+        self.readVersion = readVersion
+        self.start = start
+        self.stop = stop
+        enabled = defaults.bool(forKey: Self.enabledKey)
+    }
+
+    /// Reads the version of `executable` once; later calls return at once.
+    func checkVersion() async {
+        guard let executable, install == nil, !checking else { return }
+        checking = true
+        let version = await readVersion(executable)
+        install = CodexInstall(executable: executable, version: version)
+    }
+
+    func connect() {
+        defaults.set(true, forKey: Self.enabledKey)
+        enabled = true
+        start()
+    }
+
+    func disconnect() {
+        defaults.set(false, forKey: Self.enabledKey)
+        enabled = false
+        stop()
+    }
+}
+
 /// 연결 adds the plugin's hooks to `~/.claude/settings.json` after backing it up; 해제 takes them out.
 /// The wait applies to the next request.
 struct AgentsSettingsView: View {
     let model: ClaudeHooksModel
+    let codex: CodexModel
     @AppStorage private var wait: Int
 
-    init(model: ClaudeHooksModel, defaults: UserDefaults) {
+    init(model: ClaudeHooksModel, codex: CodexModel, defaults: UserDefaults) {
         self.model = model
+        self.codex = codex
         _wait = AppStorage(wrappedValue: ApprovalWait.defaultSeconds, ApprovalWait.defaultsKey, store: defaults)
     }
 
@@ -80,6 +136,7 @@ struct AgentsSettingsView: View {
             Text("연결하면 ~/.claude/settings.json을 같은 폴더에 백업한 뒤 NotchTheRock 훅을 더해요. 해제하면 더한 훅만 지우고, 그사이 파일이 바뀌지 않았다면 연결하기 전 파일로 그대로 되돌려요.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+            codexSection
             Picker(selection: $wait) {
                 ForEach(ApprovalWait.choices, id: \.self) { seconds in
                     Text(ApprovalWait.title(seconds)).tag(seconds)
@@ -90,6 +147,51 @@ struct AgentsSettingsView: View {
             }
         }
         .onAppear { model.refresh() }
+    }
+
+    @ViewBuilder
+    private var codexSection: some View {
+        LabeledContent {
+            HStack {
+                Button("연결") { codex.connect() }
+                    .disabled(codex.enabled || codex.executable == nil)
+                Button("해제") { codex.disconnect() }
+                    .disabled(!codex.enabled)
+            }
+        } label: {
+            Text("Codex")
+            Text(codexStatusText)
+        }
+        if let install = codex.install {
+            Text("codex 위치: \(install.executable.path) · 버전: \(install.version ?? "알 수 없음")")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            if let warning = install.warning {
+                Text(warning)
+                    .foregroundStyle(.orange)
+            }
+        } else if let executable = codex.executable {
+            Text("codex 위치: \(executable.path) · 버전을 확인하고 있어요.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .task { await codex.checkVersion() }
+        } else {
+            Text("codex를 찾지 못했어요. codex를 설치한 뒤 앱을 다시 열어 주세요.")
+                .foregroundStyle(.orange)
+        }
+        Text("연결하면 $CODEX_HOME/app-server-control/app-server-control.sock에 떠 있는 공유 app-server를 쓰고, 없으면 노치가 직접 띄워요. app-server가 뜨기 전에 시작한 codex 세션은 노치에 보이지 않아요. 해제하면 노치가 띄운 app-server만 멈춰요.")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+    }
+
+    private var codexStatusText: String {
+        switch codex.state {
+        case .off: "연결하지 않았어요. 연결하면 Codex가 작업을 마치거나 승인과 답을 기다릴 때 노치가 알려 줘요."
+        case .connecting: "app-server에 연결하고 있어요."
+        case .connected(.reused): "연결했어요. 이미 떠 있던 app-server를 함께 쓰고 있어요."
+        case .connected(.spawned): "연결했어요. 노치가 띄운 app-server를 쓰고 있어요."
+        case .retrying(let reason): "연결하지 못해서 잠시 뒤 다시 시도해요. \(reason)"
+        }
     }
 
     private var canInstall: Bool {

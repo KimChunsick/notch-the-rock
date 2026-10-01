@@ -1,0 +1,65 @@
+{
+  "codexVersion": "codex-cli 0.153.4",
+  "shapesFrom": "codex app-server generate-json-schema --experimental --out <dir> (codex-cli 0.153.4): ServerRequest.json, ServerNotification.json, v2/*Response.json, JSONRPCMessage.json",
+  "messages": {
+    "initializeResponse": {"id": 1, "result": {"userAgent": "notch-the-rock/0.153.4", "codexHome": "/tmp/codex-home", "platformFamily": "unix", "platformOs": "macos"}},
+    "loadedListPage1": {"id": 2, "result": {"data": ["019a0000-0000-7000-8000-000000000001"], "nextCursor": "c1"}},
+    "loadedListPage2": {"id": 3, "result": {"data": ["019a0000-0000-7000-8000-000000000002"], "nextCursor": null}},
+    "resumeResponse": {"id": 4, "result": {
+      "approvalPolicy": "on-request", "approvalsReviewer": "user", "cwd": "/Users/me/notch-the-rock", "model": "gpt-5.5", "modelProvider": "openai",
+      "sandbox": {"type": "workspaceWrite", "writableRoots": [], "networkAccess": false, "excludeTmpdirEnvVar": false, "excludeSlashTmp": false},
+      "thread": {"id": "019a0000-0000-7000-8000-000000000001", "cliVersion": "0.153.4", "createdAt": 1790000000, "updatedAt": 1790000100, "cwd": "/Users/me/notch-the-rock", "ephemeral": false, "modelProvider": "openai", "preview": "fix the build", "projectId": null, "sessionId": "019a0000-0000-7000-8000-000000000001", "source": "cli", "status": {"type": "idle"}, "turns": []}
+    }},
+    "threadStarted": {"method": "thread/started", "params": {"thread": {"id": "019a0000-0000-7000-8000-000000000003", "cliVersion": "0.153.4", "createdAt": 1790000200, "updatedAt": 1790000200, "cwd": "/Users/me/other-project", "ephemeral": false, "modelProvider": "openai", "preview": "", "projectId": null, "sessionId": "019a0000-0000-7000-8000-000000000003", "source": "cli", "status": {"type": "idle"}, "turns": []}}},
+    "commandApproval": {"id": 7, "method": "item/commandExecution/requestApproval", "params": {
+      "threadId": "019a0000-0000-7000-8000-000000000001", "turnId": "019a0000-0000-7000-8000-0000000000a1", "itemId": "call_1", "startedAtMs": 1790000300000,
+      "approvalId": null, "command": "swift build", "cwd": "/Users/me/notch-the-rock", "reason": null, "kind": "command",
+      "commandActions": [{"type": "unknown", "command": "swift build"}],
+      "availableDecisions": ["accept", "acceptForSession", "decline", "cancel"]
+    }},
+    "commandApprovalLong": {"id": "req-8", "method": "item/commandExecution/requestApproval", "params": {
+      "threadId": "019a0000-0000-7000-8000-000000000001", "turnId": "019a0000-0000-7000-8000-0000000000a1", "itemId": "call_2", "startedAtMs": 1790000310000,
+      "command": "find . -name '*.swift' -print0 | xargs -0 grep -l 'NotchContext' | while read -r file; do echo \"$file\"; sed -n '1,20p' \"$file\"; done | tee /tmp/notch-context-report.txt",
+      "cwd": "/Users/me/notch-the-rock", "reason": "검색 결과를 파일로 남겨요", "kind": "command",
+      "availableDecisions": ["accept", "decline"]
+    }},
+    "commandApprovalNetwork": {"id": 9, "method": "item/commandExecution/requestApproval", "params": {
+      "threadId": "019a0000-0000-7000-8000-000000000001", "turnId": "019a0000-0000-7000-8000-0000000000a1", "itemId": "call_3", "startedAtMs": 1790000320000,
+      "command": "curl -sI https://example.com", "cwd": "/Users/me/notch-the-rock", "kind": "command",
+      "networkApprovalContext": {"host": "example.com", "protocol": "https"}
+    }},
+    "fileChangeStarted": {"method": "item/started", "params": {
+      "threadId": "019a0000-0000-7000-8000-000000000001", "turnId": "019a0000-0000-7000-8000-0000000000a1", "startedAtMs": 1790000330000,
+      "item": {"type": "fileChange", "id": "call_4", "status": "inProgress", "changes": [
+        {"path": "/Users/me/notch-the-rock/README.md", "kind": {"type": "update", "move_path": null}, "diff": "@@ -1 +1 @@\n-# Notch\n+# NotchTheRock\n"}
+      ]}
+    }},
+    "fileChangeApproval": {"id": 10, "method": "item/fileChange/requestApproval", "params": {
+      "threadId": "019a0000-0000-7000-8000-000000000001", "turnId": "019a0000-0000-7000-8000-0000000000a1", "itemId": "call_4", "startedAtMs": 1790000331000,
+      "reason": null, "grantRoot": null
+    }},
+    "fileChangeApprovalUnseen": {"id": 11, "method": "item/fileChange/requestApproval", "params": {
+      "threadId": "019a0000-0000-7000-8000-000000000001", "turnId": "019a0000-0000-7000-8000-0000000000a1", "itemId": "call_unseen", "startedAtMs": 1790000332000
+    }},
+    "userInput": {"id": 12, "method": "item/tool/requestUserInput", "params": {
+      "threadId": "019a0000-0000-7000-8000-000000000001", "turnId": "019a0000-0000-7000-8000-0000000000a1", "itemId": "call_5", "isBlocking": true,
+      "questions": [{"id": "q_target", "header": "배포 대상", "question": "어디에 배포할까요?", "isOther": true, "isSecret": false, "options": [
+        {"label": "staging", "description": "테스트 서버"}, {"label": "production", "description": "실제 서버"}
+      ]}]
+    }},
+    "userInputTwo": {"id": 13, "method": "item/tool/requestUserInput", "params": {
+      "threadId": "019a0000-0000-7000-8000-000000000001", "turnId": "019a0000-0000-7000-8000-0000000000a1", "itemId": "call_6", "isBlocking": true,
+      "questions": [
+        {"id": "q_branch", "header": "브랜치", "question": "어느 브랜치에 올릴까요?", "options": [{"label": "main", "description": ""}, {"label": "develop", "description": ""}]},
+        {"id": "q_tag", "header": "태그", "question": "태그를 붙일까요?", "options": [{"label": "예", "description": ""}, {"label": "아니요", "description": ""}]}
+      ]
+    }},
+    "userInputSecret": {"id": 14, "method": "item/tool/requestUserInput", "params": {
+      "threadId": "019a0000-0000-7000-8000-000000000001", "turnId": "019a0000-0000-7000-8000-0000000000a1", "itemId": "call_7", "isBlocking": true,
+      "questions": [{"id": "q_token", "header": "토큰", "question": "API 토큰을 입력해 주세요", "isOther": false, "isSecret": true, "options": null}]
+    }},
+    "resolved": {"method": "serverRequest/resolved", "params": {"threadId": "019a0000-0000-7000-8000-000000000001", "requestId": 7}},
+    "turnCompleted": {"method": "turn/completed", "params": {"threadId": "019a0000-0000-7000-8000-000000000001", "turn": {"id": "019a0000-0000-7000-8000-0000000000a1", "items": [], "status": "completed", "error": null, "completedAt": 1790000400, "durationMs": 100000}}},
+    "turnInterrupted": {"method": "turn/completed", "params": {"threadId": "019a0000-0000-7000-8000-000000000001", "turn": {"id": "019a0000-0000-7000-8000-0000000000a2", "items": [], "status": "interrupted"}}}
+  }
+}

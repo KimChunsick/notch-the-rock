@@ -49,7 +49,11 @@ final class LivePlugin {
             context: context,
             socketPath: paths.socket,
             settingsURL: directory.appendingPathComponent("settings.json"),
-            activator: FakeActivator()
+            activator: FakeActivator(),
+            codexEndpoint: CodexEndpoint(home: directory),
+            codexExecutable: nil,
+            codexLauncher: FakeLauncher(socketPath: ""),
+            codexTerminal: { _ in nil }
         )
         plugin.activate()
     }

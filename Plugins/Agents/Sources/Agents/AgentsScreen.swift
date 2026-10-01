@@ -15,10 +15,14 @@ struct ScreenItem: Identifiable {
     let content: Content
     /// When the request goes back to the terminal.
     let expires: Date
+    /// The permission may also be allowed for the rest of the session (codex's `acceptForSession`).
+    var allowsSession = false
 }
 
 enum ScreenResponse: Equatable {
     case allow
+    /// 이번 세션 동안 허용; offered only for an item that `allowsSession`.
+    case allowForSession
     case deny(reason: String)
     /// Picked options and typed answers by question index.
     case answers(picked: [Int: [String]], typed: [Int: String])
@@ -39,7 +43,7 @@ final class AgentsScreenModel {
 
     /// Shows `content` until the user answers on the screen, the deadline passes or the calling task
     /// is cancelled (the hook went away); the item leaves the screen in every case.
-    func show(title: String, content: ScreenItem.Content, until deadline: ContinuousClock.Instant) async -> ScreenResponse {
+    func show(title: String, content: ScreenItem.Content, allowsSession: Bool = false, until deadline: ContinuousClock.Instant) async -> ScreenResponse {
         guard !Task.isCancelled else { return .cancelled }
         count += 1
         let id = count
@@ -53,7 +57,7 @@ final class AgentsScreenModel {
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 waiting[id] = continuation
-                items.append(ScreenItem(id: id, title: title, content: content, expires: expires))
+                items.append(ScreenItem(id: id, title: title, content: content, expires: expires, allowsSession: allowsSession))
             }
         } onCancel: {
             Task { @MainActor [weak self] in self?.respond(to: id, with: .cancelled) }
@@ -178,6 +182,10 @@ private struct ScreenItemView: View {
                 Spacer(minLength: 0)
                 Button("거부") { respond(.deny(reason: reason)) }
                     .tint(.red)
+                if item.allowsSession {
+                    Button("이번 세션 동안 허용") { respond(.allowForSession) }
+                        .tint(ClaudeBridge.accent)
+                }
                 Button("허용") { respond(.allow) }
                     .tint(ClaudeBridge.accent)
             }
@@ -203,11 +211,13 @@ private struct ScreenItemView: View {
                                 }
                                 .buttonStyle(.plain)
                             }
-                            TextField("직접 입력", text: Binding(
-                                get: { draft.typed[index] ?? "" },
-                                set: { draft.type($0, at: index) }
-                            ))
-                            .textFieldStyle(.roundedBorder)
+                            if question.takesText {
+                                TextField("직접 입력", text: Binding(
+                                    get: { draft.typed[index] ?? "" },
+                                    set: { draft.type($0, at: index) }
+                                ))
+                                .textFieldStyle(.roundedBorder)
+                            }
                         }
                     }
                 }
