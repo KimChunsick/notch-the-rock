@@ -16,7 +16,8 @@ func percentText(_ value: Double) -> String {
     "\(Int((value * 100).rounded()))%"
 }
 
-/// The expanded tab: a volume slider with a mute toggle and a brightness slider.
+/// The expanded tab: a volume slider with a mute toggle and a brightness slider, without a margin of
+/// its own (the host adds it).
 struct MediaKeysView: View {
     let model: MediaKeysModel
 
@@ -61,7 +62,6 @@ struct MediaKeysView: View {
                 }
             }
         }
-        .padding()
         .task { await model.keepRefreshed() }
     }
 

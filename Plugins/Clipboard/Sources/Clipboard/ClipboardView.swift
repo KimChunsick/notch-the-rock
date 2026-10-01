@@ -20,8 +20,8 @@ struct UnsavedNoticeTimeline<Content: View>: View {
 
 /// The expanded tab: a search field over the history, pinned entries first, newest first within
 /// each group. Clicking a row copies it back to the general pasteboard. It is `width` wide and the
-/// list `listHeight` tall, scrolling past that, so the tab has the same definite size however long
-/// the history is.
+/// list grows with the history up to `listHeight`, scrolling past that, so the tab has a definite
+/// size however long the history is. The host adds the margin around it.
 struct ClipboardView: View {
     static let width: CGFloat = 360
     static let listHeight: CGFloat = 180
@@ -52,7 +52,7 @@ struct ClipboardView: View {
             } else {
                 TimelineView(.periodic(from: .now, by: 30)) { timeline in
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 1) {
+                        LazyVStack(alignment: .leading, spacing: 2) {
                             let pinned = visible.filter(\.isPinned)
                             let recent = visible.filter { !$0.isPinned }
                             if !pinned.isEmpty {
@@ -64,7 +64,7 @@ struct ClipboardView: View {
                         }
                     }
                     .scrollIndicators(.never)
-                    .frame(height: Self.listHeight)
+                    .frame(maxHeight: Self.listHeight)
                 }
             }
         }
@@ -103,7 +103,7 @@ struct ClipboardView: View {
         Text(text)
             .font(.system(size: 12))
             .foregroundStyle(.secondary)
-            .frame(width: Self.width, height: Self.listHeight)
+            .frame(width: Self.width)
     }
 }
 
@@ -175,7 +175,7 @@ private struct ClipRow: View {
         .font(.system(size: 12))
         .padding(.horizontal, 8)
         .frame(height: 26)
-        .background(RoundedRectangle(cornerRadius: 6).fill(.white.opacity(isHovered ? 0.1 : 0)))
+        .background(RoundedRectangle(cornerRadius: 6).fill(.white.opacity(isHovered ? 0.16 : 0.08)))
         .onHover { isHovered = $0 }
         .contextMenu {
             Button("복사", action: copy)

@@ -85,7 +85,8 @@ enum NowPlayingWings {
     }
 }
 
-/// A transport button: an SF Symbol without a bezel.
+/// A transport button: an SF Symbol without a bezel, as tall as the symbol so the screen's last row
+/// ends where its ink does.
 struct TransportButton: View {
     let symbol: String
     let label: String
@@ -96,7 +97,7 @@ struct TransportButton: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: size, weight: .semibold))
-                .frame(width: size + 12, height: size + 8)
+                .frame(width: size + 12, height: size)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -119,7 +120,8 @@ extension TransportButton {
 }
 
 /// The expanded tab: the art, the title and artist, the progress with elapsed and total time, and
-/// previous, play/pause and next. 364 pt wide whatever plays.
+/// previous, play/pause and next. 332 pt wide while a track plays; without one the message is as wide
+/// as its text. The host adds the margin around it.
 struct NowPlayingView: View {
     let model: NowPlayingModel
     let send: (NowPlayingCommand) -> Void
@@ -130,19 +132,16 @@ struct NowPlayingView: View {
     var body: some View {
         HStack(spacing: 14) {
             AlbumArt(image: model.artwork, side: Self.artSide, cornerRadius: 10)
-            Group {
-                switch model.state {
-                case .track(let info):
-                    track(info)
-                case .nothing:
-                    message("재생 중인 음악이 없어요.")
-                case .unavailable:
-                    message("이 Mac에서 재생 정보를 읽을 수 없어요.")
-                }
+            switch model.state {
+            case .track(let info):
+                track(info)
+                    .frame(width: Self.columnWidth, alignment: .leading)
+            case .nothing:
+                message("재생 중인 음악이 없어요.")
+            case .unavailable:
+                message("이 Mac에서 재생 정보를 읽을 수 없어요.")
             }
-            .frame(width: Self.columnWidth, alignment: .leading)
         }
-        .padding()
     }
 
     private func message(_ text: String) -> some View {
