@@ -145,7 +145,9 @@ static void writeState(NSDictionary *info, BOOL playing, NSString *bundleIdentif
     if (bundleIdentifier) line[@"bundleID"] = bundleIdentifier;
 
     NSData *artwork = [info[KeyArtworkData] isKindOfClass:NSData.class] && [info[KeyArtworkData] length] > 0 ? info[KeyArtworkData] : nil;
-    BOOL artworkChanged = artwork == nil ? lastArtwork != nil : ![artwork isEqualToData:lastArtwork];
+    // The first info line, and the first after `none`, says what the image is even when there is none.
+    BOOL complete = ![lastLine[@"type"] isEqual:@"info"];
+    BOOL artworkChanged = complete || (artwork == nil ? lastArtwork != nil : ![artwork isEqualToData:lastArtwork]);
     if (!artworkChanged && [line isEqualToDictionary:lastLine]) return;
     lastLine = [line copy];
     if (artworkChanged) {
