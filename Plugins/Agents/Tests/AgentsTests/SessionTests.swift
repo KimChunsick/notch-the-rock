@@ -279,6 +279,83 @@ func share(of rect: CGRect, in view: NSView, where matches: (UInt8, UInt8, UInt8
         #expect(state == .working)
     }
 
+    @Test func R33__a_notification_keeps_a_request_handed_to_the_terminal_waiting() async throws {
+        // Each notice still shows the state it shows today.
+        let notices: [(fields: String, shows: AgentSessionState)] = [
+            (#","notification_type":"permission_prompt","message":"Claude needs your permission""#, .awaitingApproval),
+            (#","notification_type":"elicitation_dialog","message":"asks""#, .awaitingAnswer),
+            (#","notification_type":"agent_needs_input","message":"asks""#, .awaitingAnswer),
+            (#","notification_type":"idle_prompt","message":"waiting""#, .idle),
+            (#","message":"Claude needs your attention""#, .awaitingApproval),
+        ]
+        for notice in notices {
+            bridge.receive(try message(.userPromptSubmit, #","prompt":"build it""#))
+            host.responses = [.released]
+            #expect(await bridge.decide(try message(.permissionRequest, Self.bash)) == nil)
+            #expect(state == .awaitingApproval)
+            // The notice answers nothing: another tool's end still finds the request waiting.
+            bridge.receive(try message(.notification, notice.fields))
+            #expect(state == notice.shows, "\(notice.fields)")
+            bridge.receive(try message(.postToolUse, Self.read + #","tool_use_id":"toolu_2","tool_response":{}"#))
+            #expect(state == notice.shows, "\(notice.fields)")
+            bridge.receive(try message(.postToolUse, Self.bash + #","tool_use_id":"toolu_1","tool_response":{}"#))
+            #expect(state == .working, "\(notice.fields)")
+        }
+    }
+
+    @Test func R33__an_answered_call_never_ends_an_identical_request_that_still_waits() async throws {
+        bridge.receive(try message(.userPromptSubmit, #","prompt":"build it""#))
+        let request = try message(.permissionRequest, Self.bash)
+        func end(_ id: String) throws {
+            bridge.receive(try message(.postToolUse, Self.bash + #","tool_use_id":"\#(id)","tool_response":{}"#))
+        }
+        // A waits on the Agents screen, B in the notch: the same tool and input.
+        host.responses = [.answered(AttentionAnswer(buttonID: ClaudeBridge.detailsButtonID))]
+        let first = Task { await bridge.decide(request) }
+        #expect(await eventually { !bridge.screen.items.isEmpty })
+        host.waitsForCancellation = true
+        let second = Task { await bridge.decide(request) }
+        #expect(await eventually { host.requests.count == 2 })
+        bridge.screen.respond(to: try #require(bridge.screen.items.first).id, with: .allow)
+        #expect(await first.value == .allow)
+        #expect(state == .awaitingApproval)
+        // A's end carries nothing that tells it from B's, so it leaves B waiting; the next one is B's.
+        try end("toolu_a")
+        #expect(state == .awaitingApproval)
+        try end("toolu_b")
+        #expect(state == .working)
+        second.cancel()
+        _ = await second.value
+        #expect(state == .working)
+
+        // Answered in the terminal while the notch held it: the same.
+        let third = Task { await bridge.decide(request) }
+        #expect(await eventually { host.requests.count == 3 })
+        let fourth = Task { await bridge.decide(request) }
+        #expect(await eventually { host.requests.count == 4 })
+        third.cancel()
+        _ = await third.value
+        #expect(state == .awaitingApproval)
+        try end("toolu_c")
+        #expect(state == .awaitingApproval)
+        fourth.cancel()
+        _ = await fourth.value
+        try end("toolu_d")
+        #expect(state == .working)
+
+        // The finished turn clears answered calls: the next turn's request ends with its own end.
+        host.waitsForCancellation = false
+        host.responses = [.answered(AttentionAnswer(buttonID: ClaudeBridge.allowButtonID))]
+        #expect(await bridge.decide(request) == .allow)
+        bridge.receive(try message(.stop, #","stop_reason":"end_turn""#))
+        #expect(state == .idle)
+        host.responses = [.released]
+        #expect(await bridge.decide(request) == nil)
+        #expect(state == .awaitingApproval)
+        try end("toolu_e")
+        #expect(state == .working)
+    }
+
     @Test func R33__under_a_request_the_list_scrolls_to_its_last_row() async throws {
         let offer = CGSize(width: 390, height: 210)
         for index in 1...12 {

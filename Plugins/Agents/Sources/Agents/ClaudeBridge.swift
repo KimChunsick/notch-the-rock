@@ -12,6 +12,11 @@ struct SessionRecord: Hashable {
     var alertedPause = false
     /// The session's requests that wait for the user, oldest first.
     var waits: [OpenWait] = []
+    /// Requests answered while the notch held them whose call is known only by tool name and input,
+    /// oldest first. Each stays until its call ends, so that end never ends an identical request
+    /// that still waits; the session's stop, next prompt or end clears what is left (a denied call
+    /// never ends).
+    var answered: [OpenWait] = []
 }
 
 /// A request of a Claude Code session that waits for the user: held in the notch, or handed to the
@@ -133,8 +138,9 @@ final class ClaudeBridge {
             // Released or timed out, the terminal asks now, so the session still waits. Claude Code
             // fires no hook when the user answers there, so the time between that answer and the
             // tool's end cannot be observed: the wait ends with the tool's own PostToolUse or
-            // PostToolUseFailure, or with the session's next event of any other kind, and until then
-            // the row keeps its waiting state.
+            // PostToolUseFailure, or with the session's next request, prompt, start, stop or end, and
+            // until then the row keeps its waiting state. A Notification answers nothing, so it keeps
+            // the wait.
             sessions[sessionID]?.waits[index].released = true
         }
         return decision
@@ -338,16 +344,23 @@ final class ClaudeBridge {
         switch message.event {
         case .sessionEnd:
             sessions[sessionID]?.waits.removeAll()
+            sessions[sessionID]?.answered.removeAll()
             screen.sessions.remove(key)
             return nil
-        case .sessionStart, .stop:
+        case .sessionStart:
             endReleasedWaits(of: sessionID)
+            state = .idle
+        case .stop:
+            endReleasedWaits(of: sessionID)
+            sessions[sessionID]?.answered.removeAll()
             state = .idle
         case .userPromptSubmit:
             endReleasedWaits(of: sessionID)
+            sessions[sessionID]?.answered.removeAll()
             state = .working
         case .notification:
-            endReleasedWaits(of: sessionID)
+            // A notice (a permission prompt, a question, the idle reminder) answers no request, so
+            // every wait stays.
             state = Self.waitingState(payload: message.payload)
         case .postToolUse, .postToolUseFailure:
             state = toolEnded(sessionID, message.payload)
@@ -377,23 +390,33 @@ final class ClaudeBridge {
         return waitCount
     }
 
-    /// The request `id` of the session was answered. The session works again once no wait is left;
-    /// otherwise it shows the wait still open.
+    /// The request `id` of the session was answered. A call known only by tool name and input stays
+    /// answered until it ends. The session works again once no wait is left; otherwise it shows the
+    /// wait still open.
     private func endWait(_ id: Int, of sessionID: String) {
-        guard sessions[sessionID]?.waits.contains(where: { $0.id == id }) == true else { return }
-        sessions[sessionID]?.waits.removeAll { $0.id == id }
+        guard let index = sessions[sessionID]?.waits.firstIndex(where: { $0.id == id }),
+              let wait = sessions[sessionID]?.waits.remove(at: index) else { return }
+        if wait.toolUseID == nil {
+            sessions[sessionID]?.answered.append(wait)
+        }
         screen.sessions.answered(Key(agent: .claude, id: sessionID), waiting: sessions[sessionID]?.waits.last?.state)
     }
 
-    /// Any later event of the session but another tool's end means the terminal no longer asks what
-    /// was handed to it. Requests still held in the notch stay.
+    /// The session's next request, prompt, start or stop means the terminal no longer asks what was
+    /// handed to it. Requests still held in the notch stay.
     private func endReleasedWaits(of sessionID: String) {
         sessions[sessionID]?.waits.removeAll(where: \.released)
     }
 
-    /// A tool call of the session ended, done or failed: the request about that call ends. The
-    /// session works again once no wait is left; another call's end leaves a waiting session as it is.
+    /// A tool call of the session ended, done or failed: the request about that call ends. A call
+    /// already answered takes the end first, so an end that may belong to it or to an identical
+    /// request still waiting keeps the session waiting. The session works again once no wait is left;
+    /// another call's end leaves a waiting session as it is.
     private func toolEnded(_ sessionID: String, _ payload: JSONValue) -> AgentSessionState? {
+        if let index = sessions[sessionID]?.answered.firstIndex(where: { $0.isCall(payload) }) {
+            sessions[sessionID]?.answered.remove(at: index)
+            return sessions[sessionID]?.waits.isEmpty == false ? nil : .working
+        }
         guard var waits = sessions[sessionID]?.waits, !waits.isEmpty else { return .working }
         guard let index = waits.firstIndex(where: { $0.isCall(payload) }) else { return nil }
         waits.remove(at: index)
