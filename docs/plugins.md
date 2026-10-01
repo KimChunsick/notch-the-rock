@@ -330,13 +330,32 @@ public var tile: PluginTile? {
   화면에서나 같은 여백(16pt)을 둬요. 그래서 `expandedTab` 뷰의 가장 바깥에는 `padding()`을 붙이지 않고,
   그려지는 내용보다 큰 고정 크기(`frame(width:height:)`)도 주지 않아요. 이런 뷰가 있으면 그 화면만
   여백이 넓어 보여요.
-- `.frame(maxWidth: .infinity)`나 `.frame(maxHeight: .infinity)`로 남는 공간을 채우지 않아요. 이런 뷰는
-  앱이 내준 공간만큼 늘어나서, 노치 크기가 내용과 맞지 않게 돼요.
+- `.frame(maxHeight: .infinity)`로 남는 높이를 채우지 않아요. 이런 뷰는 앱이 내준 높이만큼 늘어나서,
+  노치 크기가 내용과 맞지 않게 돼요. 너비는 아래처럼 넓게 받을 수 있어요.
 - `Color`나 `Rectangle`만 있는 뷰는 자기 크기가 없으니 `frame(width:height:)`로 크기를 정해 줘요.
 
 앱은 뷰가 스스로 알려 주는 크기를 재서 써요. 잰 크기가 노치 모양보다 작으면 노치 모양 크기를 쓰고, 홈
 격자 8칸 너비보다 넓으면 그 너비까지만 써요. 직접 확인하려면 `NSHostingView(rootView:).fittingSize`를
 보면 돼요. 너비와 높이가 0보다 크고 유한해야 해요.
+
+플러그인 화면에서는 위쪽 띠의 카메라 왼쪽에 뒤로 가기와 플러그인 이름이 놓여요. 이름이 길면 이 띠
+때문에 노치가 화면보다 넓어지고, 그때 앱은 `expandedTab` 뷰에 노치 양쪽 여백 사이의 너비를 모두
+내줘요. 뷰가 그 너비를 채우면 왼쪽, 오른쪽, 아래 여백이 같아져요. 자기 너비만 쓰는 뷰는 카메라 아래
+가운데에 놓이고 오른쪽 여백이 넓게 남아요. 그러니 자기 크기는 지금처럼 정해 두고, 더 받은 너비는
+`maxWidth: .infinity`와 `Spacer`가 받게 만들어요. 높이는 넓게 받을 때도 자기 높이 그대로예요.
+
+```swift
+VStack(alignment: .leading, spacing: 8) {
+    HStack(spacing: 0) {
+        Image(systemName: "sparkles")
+        Spacer(minLength: 12)   // 자기 크기에서는 12pt, 넓게 받으면 양 끝으로 벌어져요
+        Text("72%")
+    }
+    ProgressView(value: 0.72)
+        // 고정 너비 대신 써요: 자기 크기는 200pt이고, 넓게 받으면 그만큼 늘어나요
+        .frame(minWidth: 200, idealWidth: 200, maxWidth: .infinity)
+}
+```
 
 ## 7. 진입 함수
 

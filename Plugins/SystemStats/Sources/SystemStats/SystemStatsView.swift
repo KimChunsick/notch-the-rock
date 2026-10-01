@@ -97,7 +97,7 @@ struct SystemStatsView: View {
             ceiling: 100,
             compact: compact
         ) {
-            CoreBars(cores: cpu?.cores ?? [], width: CardSize.detailWidth)
+            CoreBars(cores: cpu?.cores ?? [])
         }
     }
 
@@ -174,17 +174,16 @@ struct SystemStatsView: View {
     }
 }
 
-/// The fixed widths of a stat card.
+/// The widths of a stat card: a full card is at least `width` wide and stretches across what it is
+/// offered beyond that (under a wider band); a compact one is fixed.
 private enum CardSize {
     static let width: CGFloat = 188
     static let padding: CGFloat = 6
-    /// The width inside a full card's padding.
-    static let detailWidth = width - 2 * padding
     static let compactWidth: CGFloat = 84
     static let compactPadding: CGFloat = 4
 }
 
-/// A titled card of a fixed width: the main value, a sparkline and one line of small detail text.
+/// A titled card, `CardSize.width` wide or wider when offered more: the main value, a sparkline and one line of small detail text.
 /// A compact card stacks the title over the value and leaves the detail out.
 private struct StatCard<Detail: View>: View {
     let title: String
@@ -232,7 +231,7 @@ private struct StatCard<Detail: View>: View {
                         .frame(height: 13, alignment: .leading)
                 }
                 .padding(CardSize.padding)
-                .frame(width: CardSize.width, alignment: .topLeading)
+                .frame(minWidth: CardSize.width, idealWidth: CardSize.width, maxWidth: .infinity, alignment: .topLeading)
             }
         }
         .lineLimit(1)
@@ -258,23 +257,24 @@ private struct RatePair: View {
     }
 }
 
-/// One small bar per core, filled to its usage, the bars sharing `width` between them.
+/// One small bar per core, filled to its usage, the bars sharing the width they are given.
 private struct CoreBars: View {
     let cores: [Double]
-    let width: CGFloat
     private static let spacing: CGFloat = 2
 
     var body: some View {
-        let barWidth = cores.isEmpty ? 0 : max(1, (width - Self.spacing * CGFloat(cores.count - 1)) / CGFloat(cores.count))
-        HStack(alignment: .bottom, spacing: Self.spacing) {
-            ForEach(Array(cores.enumerated()), id: \.offset) { _, usage in
-                ZStack(alignment: .bottom) {
-                    RoundedRectangle(cornerRadius: 1).fill(.white.opacity(0.12))
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(Color.green)
-                        .frame(height: max(1, 12 * min(max(usage, 0), 100) / 100))
+        GeometryReader { area in
+            let barWidth = cores.isEmpty ? 0 : max(1, (area.size.width - Self.spacing * CGFloat(cores.count - 1)) / CGFloat(cores.count))
+            HStack(alignment: .bottom, spacing: Self.spacing) {
+                ForEach(Array(cores.enumerated()), id: \.offset) { _, usage in
+                    ZStack(alignment: .bottom) {
+                        RoundedRectangle(cornerRadius: 1).fill(.white.opacity(0.12))
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(Color.green)
+                            .frame(height: max(1, 12 * min(max(usage, 0), 100) / 100))
+                    }
+                    .frame(width: barWidth)
                 }
-                .frame(width: barWidth)
             }
         }
         .frame(height: 12)

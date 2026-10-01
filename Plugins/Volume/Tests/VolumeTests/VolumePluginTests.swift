@@ -741,3 +741,43 @@ private func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom
         "speaker.wave.1.fill 볼륨 0.3125 31%",
     ])
 }
+
+/// Offered more width than its own, as the host does when the band beside the camera makes the
+/// notch wider than the screen, the slider stretches and the volume stays at the right end; at its own width it keeps today's size.
+@MainActor
+@Test func R15__volume_screen_fills_a_wider_offer() throws {
+    let h = try Harness()
+    h.plugin.model.refresh()
+    // Today's size.
+    let cases: [(String, AnyView, CGSize)] = [("controls", try #require(h.plugin.expandedTab).content, CGSize(width: 288, height: 22))]
+    for (name, view, today) in cases {
+        let ideal = NSHostingView(rootView: view).fittingSize
+        print("R15 volume \(name) ideal \(ideal)")
+        #expect(abs(ideal.width - today.width) <= 0.5 && abs(ideal.height - today.height) <= 0.5, "\(name): the screen's own size changed: \(ideal)")
+        let offered = ideal.width + 80
+        let wide = NSHostingView(rootView: view.frame(width: offered)).fittingSize
+        #expect(abs(wide.height - ideal.height) <= 1, "\(name): wrapped or cut at \(offered) pt: \(wide) vs \(ideal)")
+        let insets = try inkInsets(view.frame(width: offered))
+        print("R15 volume \(name) offered \(offered) pt: ink insets left \(insets.left) right \(insets.right)")
+        #expect(insets.left <= 2 && insets.right <= 2, "\(name): the screen does not reach both edges of a \(offered) pt offer: \(insets)")
+    }
+}
+
+/// When the output device has no volume the app can set, a dimmed speaker and the message sit at
+/// either end, so the screen reaches both edges of a wider offer.
+@MainActor
+@Test func R15__volume_screen_without_a_volume_fills_a_wider_offer() throws {
+    let h = try Harness(volume: nil)
+    h.plugin.model.refresh()
+    let view = try #require(h.plugin.expandedTab).content
+    let ideal = NSHostingView(rootView: view).fittingSize
+    print("R15 volume without a volume ideal \(ideal)")
+    // Its own size: the message row is as tall as the message alone was.
+    #expect(abs(ideal.width - 218) <= 0.5 && abs(ideal.height - 16) <= 0.5, "the screen's own size changed: \(ideal)")
+    let offered = ideal.width + 80
+    let wide = NSHostingView(rootView: view.frame(width: offered)).fittingSize
+    #expect(abs(wide.height - ideal.height) <= 1, "wrapped or cut at \(offered) pt: \(wide) vs \(ideal)")
+    let insets = try inkInsets(view.frame(width: offered))
+    print("R15 volume without a volume offered \(offered) pt: ink insets left \(insets.left) right \(insets.right)")
+    #expect(insets.left <= 2 && insets.right <= 2, "the screen does not reach both edges of a \(offered) pt offer: \(insets)")
+}

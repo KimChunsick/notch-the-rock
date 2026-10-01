@@ -27,15 +27,22 @@ struct VolumeView: View {
                 HStack(spacing: 10) {
                     MuteToggle(model: model, volume: volume)
                         .frame(width: 28)
+                    // 200 pt, or as wide as the screen is offered beyond that (under a wider band).
                     VolumeSlider(model: model, volume: volume)
-                        .frame(width: 200)
+                        .frame(minWidth: 200, idealWidth: 200, maxWidth: .infinity)
                     Text(percentText(volume.level))
                         .monospacedDigit()
                         .frame(width: 40, alignment: .trailing)
                 }
             } else {
-                Text("이 출력 기기는 볼륨을 바꿀 수 없어요.")
-                    .foregroundStyle(.secondary)
+                // A dimmed speaker and the message at either end of what the screen is offered.
+                HStack(spacing: 0) {
+                    Image(systemName: "speaker.slash.fill")
+                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 10)
+                    Text("이 출력 기기는 볼륨을 바꿀 수 없어요.")
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .task { await model.keepRefreshed() }

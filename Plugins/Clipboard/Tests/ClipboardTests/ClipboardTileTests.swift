@@ -172,3 +172,31 @@ private func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom
         expectNoOuterSpace(try inkInsets(ClipboardView(history: history)), name)
     }
 }
+
+/// Offered more width than its own, as the host does when the band beside the camera makes the
+/// notch wider than the screen, the search field and the card row run across it, so more cards show; at its own width it keeps today's size.
+@MainActor
+@Test func R15__clipboard_screen_fills_a_wider_offer() throws {
+    let empty = makeHistory(directory: try makeDirectory(), key: makeKey())
+    let long = makeHistory(directory: try makeDirectory(), key: makeKey())
+    for index in 1...12 {
+        long.record(.text("기록 \(index)"))
+    }
+    // Today's sizes. The cards keep their width, so the row may end a card spacing short of the
+    // edge; the search field above it spans the offer.
+    let cases: [(String, ClipboardView, CGSize)] = [
+        ("empty", ClipboardView(history: empty), CGSize(width: 360, height: 45)),
+        ("long", ClipboardView(history: long), CGSize(width: 360, height: 117)),
+    ]
+    for (name, view, today) in cases {
+        let ideal = NSHostingView(rootView: view).fittingSize
+        print("R15 clipboard \(name) ideal \(ideal)")
+        #expect(abs(ideal.width - today.width) <= 0.5 && abs(ideal.height - today.height) <= 0.5, "\(name): the screen's own size changed: \(ideal)")
+        let offered = ideal.width + 80
+        let wide = NSHostingView(rootView: view.frame(width: offered)).fittingSize
+        #expect(abs(wide.height - ideal.height) <= 1, "\(name): wrapped or cut at \(offered) pt: \(wide) vs \(ideal)")
+        let insets = try inkInsets(view.frame(width: offered))
+        print("R15 clipboard \(name) offered \(offered) pt: ink insets left \(insets.left) right \(insets.right)")
+        #expect(insets.left <= 2 && insets.right <= 2, "\(name): the screen does not reach both edges of a \(offered) pt offer: \(insets)")
+    }
+}

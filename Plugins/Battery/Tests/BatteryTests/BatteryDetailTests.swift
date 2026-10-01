@@ -613,3 +613,54 @@ func R28__live_screen_peripherals_match_ioreg_and_system_profiler() async throws
     }
     Issue.record("the screen's peripherals did not match ioreg and system_profiler: \(failures.joined(separator: " | "))")
 }
+
+// MARK: - A wider offer
+
+/// Offered more width than its own, as the host does when the band beside the camera makes the
+/// notch wider than the screen, the screen spreads to both edges of the offer without wrapping; at
+/// its own width it keeps today's size.
+@MainActor
+@Test func R15__battery_screen_fills_a_wider_offer() throws {
+    // Today's sizes: the battery alone, and with both lists.
+    let cases: [(String, [AppEnergy], [PeripheralBattery], CGSize)] = [
+        ("none", [], [], CGSize(width: 165, height: 76)),
+        ("both", injectedApps, injectedPeripherals, CGSize(width: 335, height: 277)),
+    ]
+    for (name, apps, peripherals, today) in cases {
+        let view = screen(apps: apps, peripherals: peripherals)
+        let ideal = NSHostingView(rootView: view).fittingSize
+        #expect(abs(ideal.width - today.width) <= 0.5 && abs(ideal.height - today.height) <= 0.5, "\(name): the screen's own size changed: \(ideal)")
+        let offered = ideal.width + 80
+        let wide = NSHostingView(rootView: view.frame(width: offered)).fittingSize
+        #expect(abs(wide.height - ideal.height) <= 1, "\(name): wrapped or cut at \(offered) pt: \(wide) vs \(ideal)")
+        var insets = try inkInsets(view.frame(width: offered))
+        insets.left -= try inkInsets(Image(systemName: onBattery.glyph).font(.system(size: 44))).left
+        print("R15 battery \(name) ideal \(ideal), offered \(offered) pt: ink insets left \(insets.left) right \(insets.right)")
+        #expect(insets.left <= 2 && insets.right <= 2, "\(name): the screen does not reach both edges of a \(offered) pt offer: \(insets)")
+    }
+}
+
+/// Without a battery reading a small dimmed battery and the message sit at either end, so the screen
+/// reaches both edges of a wider offer, alone and above the app list.
+@MainActor
+@Test func R15__battery_screen_without_a_reading_fills_a_wider_offer() throws {
+    // Its own sizes: the message row is as tall as the message alone was.
+    let cases: [(String, [AppEnergy], CGSize)] = [
+        ("none", [], CGSize(width: 223, height: 16)),
+        ("apps", injectedApps, CGSize(width: 223, height: 122)),
+    ]
+    for (name, apps, own) in cases {
+        let model = BatteryModel(sampler: nil)
+        model.detail = BatteryDetail(apps: apps, peripherals: [])
+        let view = BatteryView(model: model)
+        let ideal = NSHostingView(rootView: view).fittingSize
+        print("R15 battery without a reading \(name) ideal \(ideal)")
+        #expect(abs(ideal.width - own.width) <= 0.5 && abs(ideal.height - own.height) <= 0.5, "\(name): the screen's own size changed: \(ideal)")
+        let offered = ideal.width + 80
+        let wide = NSHostingView(rootView: view.frame(width: offered)).fittingSize
+        #expect(abs(wide.height - ideal.height) <= 1, "\(name): wrapped or cut at \(offered) pt: \(wide) vs \(ideal)")
+        let insets = try inkInsets(view.frame(width: offered))
+        print("R15 battery without a reading \(name) offered \(offered) pt: ink insets left \(insets.left) right \(insets.right)")
+        #expect(insets.left <= 2 && insets.right <= 2, "\(name): the screen does not reach both edges of a \(offered) pt offer: \(insets)")
+    }
+}

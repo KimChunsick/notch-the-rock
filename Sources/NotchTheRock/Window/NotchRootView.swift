@@ -7,7 +7,9 @@ import SwiftUI
 ///
 /// Every presentation but the collapsed notch and the HUD is measured at its own size and the shape
 /// grows to it with the same padding on every side (`NotchSizing`); a change of size springs like
-/// opening does, also between the home and a plugin's screen. The HUD widens the collapsed notch
+/// opening does, also between the home and a plugin's screen. A plugin's screen narrower than its
+/// band is offered the width between the shape's paddings, never more, so the shape keeps the band's
+/// width whatever the screen measures. The HUD widens the collapsed notch
 /// sideways by wings measured like a live activity's.
 struct NotchRootView: View {
     let host: NotchHostModel
@@ -56,7 +58,7 @@ struct NotchRootView: View {
         )
         let glow = state == .attention ? host.attention?.request.accent : nil
         NotchSurface(metrics: metrics, glow: glow) {
-            content(for: state)
+            content(for: state, screenWidth: detail == nil ? 0 : NotchSizing.contentWidth(filling: bandWidth))
         } band: {
             if state == .expanded {
                 if let detail {
@@ -84,8 +86,10 @@ struct NotchRootView: View {
         .onChange(of: host.home.draggedTile != nil) { _, dragging in dragChanged(dragging) }
     }
 
+    /// - Parameter screenWidth: the width a plugin's screen is offered when it is narrower, from the
+    ///   band's width and never from the measured content, so measuring cannot widen the shape.
     @ViewBuilder
-    private func content(for state: NotchState) -> some View {
+    private func content(for state: NotchState, screenWidth: CGFloat) -> some View {
         switch state {
         case .collapsed:
             if let posted = host.liveActivity {
@@ -117,7 +121,7 @@ struct NotchRootView: View {
             }
         case .expanded:
             if let plugin = shownPlugin, let tab = plugin.tab {
-                measured(tab.content)
+                measured(tab.content, minWidth: screenWidth)
                     .id(plugin.pluginID)
                     .transition(Self.contentTransition)
             } else {
@@ -146,9 +150,10 @@ struct NotchRootView: View {
         return plugin
     }
 
-    /// `content` at its own size, which becomes the size the shape grows to.
-    private func measured<Content: View>(_ content: Content) -> some View {
-        IntrinsicSizeLayout(maxSize: NotchSizing.maxContentSize) { content }
+    /// `content` at its own size, or `minWidth` wide when it fills that, which becomes the size the
+    /// shape grows to.
+    private func measured<Content: View>(_ content: Content, minWidth: CGFloat = 0) -> some View {
+        IntrinsicSizeLayout(maxSize: NotchSizing.maxContentSize, minWidth: minWidth) { content }
             .onGeometryChange(for: CGSize.self) { $0.size } action: { contentSize = $0 }
     }
 

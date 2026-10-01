@@ -35,6 +35,18 @@ private final class FakePermissions {
         try body(OnboardingRecord(defaults: defaults))
     }
 
+    /// Waits until `condition` holds, giving the model's poll and pause tasks main-actor turns in
+    /// between. The bound counts turns, not wall time: the suites share the one main actor, and a
+    /// render test elsewhere can hold it for seconds, which a clock deadline would count against
+    /// the model.
+    private func waitUntil(_ condition: () -> Bool) async {
+        var turns = 0
+        while !condition(), turns < 300 {
+            try? await Task.sleep(for: .milliseconds(10))
+            turns += 1
+        }
+    }
+
     @Test func R13__first_launch_shows_onboarding_and_a_completed_mark_hides_it() {
         withRecord { record in
             #expect(record.showsAtLaunch(arguments: []))
@@ -90,10 +102,7 @@ private final class FakePermissions {
         #expect(granted == 0)
 
         fake.trusted = true
-        let deadline = ContinuousClock.now + .seconds(2)
-        while model.accessibilityState != .on, ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(10))
-        }
+        await waitUntil { model.accessibilityState == .on }
         #expect(model.accessibilityState == .on)
         #expect(granted == 1)
         try? await Task.sleep(for: .milliseconds(50))
@@ -102,9 +111,7 @@ private final class FakePermissions {
         model.enableLaunchAtLogin()
         #expect(model.loginItemState == .on)
         #expect(granted == 2)
-        while model.step == .permissions, ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(10))
-        }
+        await waitUntil { model.step != .permissions }
         #expect(model.step == .usage)
         model.finish()
     }
@@ -124,26 +131,19 @@ private final class FakePermissions {
         model.start()
         model.advance()
         fake.trusted = true
-        let deadline = ContinuousClock.now + .seconds(3)
-        while model.accessibilityState != .on, ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(10))
-        }
+        await waitUntil { model.accessibilityState == .on }
         #expect(model.accessibilityState == .on)
 
         model.enableLaunchAtLogin()
         fake.trusted = false
-        while model.accessibilityState != .off, ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(10))
-        }
+        await waitUntil { model.accessibilityState == .off }
         try? await Task.sleep(for: .milliseconds(300))
         #expect(model.step == .permissions, "Accessibility was turned off during the pause")
         #expect(model.accessibilityState == .off)
         #expect(model.loginItemState == .on)
 
         fake.trusted = true
-        while model.step == .permissions, ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(10))
-        }
+        await waitUntil { model.step != .permissions }
         #expect(model.step == .usage)
         model.finish()
     }
@@ -168,17 +168,12 @@ private final class FakePermissions {
         #expect(model.loginItemState == .on)
         // Turned off before the first poll: only the read at the end of the pause can see it.
         fake.trusted = false
-        let deadline = ContinuousClock.now + .seconds(3)
-        while model.accessibilityState != .off, ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(5))
-        }
+        await waitUntil { model.accessibilityState == .off }
         #expect(model.accessibilityState == .off)
         #expect(model.step == .permissions)
 
         fake.trusted = true
-        while model.step == .permissions, ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(10))
-        }
+        await waitUntil { model.step != .permissions }
         #expect(model.step == .usage)
         model.finish()
     }
@@ -374,10 +369,7 @@ private final class FakePermissions {
         #expect(fake.calls == ["login items settings"])
 
         fake.status = .enabled
-        let deadline = ContinuousClock.now + .seconds(2)
-        while model.step == .permissions, ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(10))
-        }
+        await waitUntil { model.step != .permissions }
         #expect(granted == 1, "allowed in System Settings")
         #expect(model.step == .usage)
         model.finish()

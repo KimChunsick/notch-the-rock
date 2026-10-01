@@ -5,7 +5,9 @@ import SwiftUI
 /// side walls, which sit a shoulder radius in from the frame, the bottom, and the notch band at the
 /// top. The shape is never narrower than the notch with its shoulders and never wider than the
 /// home grid with its padding; content beyond that is offered `maxContentSize` and lays itself out
-/// inside it.
+/// inside it. A plugin's screen under a band that makes the shape wider than the screen is offered
+/// the width between the shape's paddings (`contentWidth(filling:)`), so a screen that fills it keeps
+/// the same padding on every side; one that keeps its own width stays centred.
 enum NotchSizing {
     static let padding: CGFloat = 16
     static let maxContentSize = CGSize(width: HomeGrid.size.width, height: 400)
@@ -35,16 +37,24 @@ enum NotchSizing {
         )
     }
 
+    /// The content's width when it fills a shape `minWidth` wide (at most the widest shape): the
+    /// width `frame(content:notch:minWidth:)` leaves between the shoulders and the padding.
+    static func contentWidth(filling minWidth: CGFloat, shoulder: CGFloat = NotchLayout.openShoulder) -> CGFloat {
+        max(0, min(minWidth, maxWidth) - 2 * (shoulder + padding))
+    }
+
     private static func clamped(_ size: CGSize) -> CGSize {
         CGSize(width: max(0, min(size.width, maxContentSize.width)), height: max(0, min(size.height, maxContentSize.height)))
     }
 }
 
-/// Lays its one subview out at its own size: the ideal size, re-measured at the maximum width when
-/// it is wider, and offered the maximum height when it is taller. The parent's proposal is ignored,
-/// so the size measured here is the content's and not the shape's that holds it.
+/// Lays its one subview out at its own size: the ideal size, re-measured at `minWidth` when it is
+/// narrower (a view that fills the offer takes it, one of a fixed width keeps its own), at the
+/// maximum width when it is wider, and offered the maximum height when it is taller. The parent's
+/// proposal is ignored, so the size measured here is the content's and not the shape's that holds it.
 struct IntrinsicSizeLayout: Layout {
     var maxSize: CGSize
+    var minWidth: CGFloat = 0
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         measure(subviews).size
@@ -60,6 +70,10 @@ struct IntrinsicSizeLayout: Layout {
         guard let subview = subviews.first else { return (.zero, nil) }
         var offer: ProposedViewSize?
         var size = subview.sizeThatFits(.unspecified)
+        if size.width < minWidth {
+            offer = ProposedViewSize(width: minWidth, height: nil)
+            size = subview.sizeThatFits(offer!)
+        }
         if size.width > maxSize.width {
             offer = ProposedViewSize(width: maxSize.width, height: nil)
             size = subview.sizeThatFits(offer!)

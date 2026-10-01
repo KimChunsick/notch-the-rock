@@ -15,15 +15,22 @@ struct BrightnessView: View {
             if let brightness = model.brightness {
                 HStack(spacing: 10) {
                     Image(systemName: "sun.max.fill")
+                    // 200 pt, or as wide as the screen is offered beyond that (under a wider band).
                     BrightnessSlider(model: model, brightness: brightness)
-                        .frame(width: 200)
+                        .frame(minWidth: 200, idealWidth: 200, maxWidth: .infinity)
                     Text(percentText(brightness))
                         .monospacedDigit()
                         .frame(width: 40, alignment: .trailing)
                 }
             } else {
-                Text("내장 화면의 밝기를 바꿀 수 없어요.")
-                    .foregroundStyle(.secondary)
+                // A dimmed sun and the message at either end of what the screen is offered.
+                HStack(spacing: 0) {
+                    Image(systemName: "sun.max.fill")
+                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 10)
+                    Text("내장 화면의 밝기를 바꿀 수 없어요.")
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .task { await model.keepRefreshed() }

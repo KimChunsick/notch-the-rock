@@ -109,10 +109,15 @@ struct AgentsScreen: View {
                 ScreenItemView(item: item, others: model.items.count - 1) { model.respond(to: item.id, with: $0) }
                     .id(item.id)
             } else {
-                Text("기다리는 요청이 없어요.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
+                // A dimmed terminal and the message at either end of what the screen is offered.
+                HStack(spacing: 0) {
+                    Image(systemName: "terminal.fill")
+                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 10)
+                    Text("기다리는 요청이 없어요.")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.system(size: 13))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)

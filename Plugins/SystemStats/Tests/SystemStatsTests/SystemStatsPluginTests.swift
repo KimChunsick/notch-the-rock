@@ -360,3 +360,24 @@ private func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom
         expectNoOuterSpace(try inkInsets(SystemStatsView(model: model)), name)
     }
 }
+
+/// Offered more width than its own, as the host does when the band beside the camera makes the
+/// notch wider than the screen, the cards spread to both edges of the offer without wrapping; at its
+/// own width the screen keeps today's size.
+@MainActor
+@Test func R15__stats_screen_fills_a_wider_offer() throws {
+    let busy = SystemStatsModel()
+    busy.record(busySnapshot)
+    busy.record(busySnapshot)
+    let view = SystemStatsView(model: busy)
+    let ideal = NSHostingView(rootView: view).fittingSize
+    print("R15 stats ideal \(ideal)")
+    // Today's size.
+    #expect(abs(ideal.width - 382) <= 0.5 && abs(ideal.height - 210) <= 0.5, "the screen's own size changed: \(ideal)")
+    let offered = ideal.width + 80
+    let wide = NSHostingView(rootView: view.frame(width: offered)).fittingSize
+    #expect(abs(wide.height - ideal.height) <= 1, "wrapped or cut at \(offered) pt: \(wide) vs \(ideal)")
+    let insets = try inkInsets(view.frame(width: offered))
+    print("R15 stats offered \(offered) pt: ink insets left \(insets.left) right \(insets.right)")
+    #expect(insets.left <= 2 && insets.right <= 2, "the screen does not reach both edges of a \(offered) pt offer: \(insets)")
+}

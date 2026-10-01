@@ -272,3 +272,40 @@ private func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom
         try png.write(to: directory.appendingPathComponent("R24-render-tile-\(size == .wide ? "wide" : "small")-T83.png"))
     }
 }
+
+/// Offered more width than its own, as the host does when the band beside the camera makes the
+/// notch wider than the screen, a playing track's column spreads to the offer's right edge next to
+/// the art without wrapping; at its own width the screen keeps today's size.
+@MainActor
+@Test func R15__now_playing_screen_fills_a_wider_offer() throws {
+    let models = Dictionary(uniqueKeysWithValues: try models())
+    let view = NowPlayingView(model: try #require(models["playing"])) { _ in }
+    let ideal = NSHostingView(rootView: view).fittingSize
+    print("R15 now playing ideal \(ideal)")
+    // Today's size.
+    #expect(abs(ideal.width - 332) <= 0.5 && abs(ideal.height - 88) <= 0.5, "the screen's own size changed: \(ideal)")
+    let offered = ideal.width + 80
+    let wide = NSHostingView(rootView: view.frame(width: offered)).fittingSize
+    #expect(abs(wide.height - ideal.height) <= 1, "wrapped or cut at \(offered) pt: \(wide) vs \(ideal)")
+    let insets = try inkInsets(view.frame(width: offered))
+    print("R15 now playing offered \(offered) pt: ink insets left \(insets.left) right \(insets.right)")
+    #expect(insets.left <= 2 && insets.right <= 2, "the screen does not reach both edges of a \(offered) pt offer: \(insets)")
+}
+
+/// With nothing playing, or when playback cannot be read, the screen keeps the track's skeleton:
+/// offered more width than its own, its visible parts still reach both edges of the offer without
+/// wrapping, so the host's margins stay equal on every side.
+@MainActor
+@Test func R15__now_playing_message_states_fill_a_wider_offer() throws {
+    let models = Dictionary(uniqueKeysWithValues: try models())
+    for name in ["nothing", "unavailable"] {
+        let view = NowPlayingView(model: try #require(models[name])) { _ in }
+        let ideal = NSHostingView(rootView: view).fittingSize
+        let offered = ideal.width + 80
+        let wide = NSHostingView(rootView: view.frame(width: offered)).fittingSize
+        #expect(abs(wide.height - ideal.height) <= 1, "\(name) wrapped or cut at \(offered) pt: \(wide) vs \(ideal)")
+        let insets = try inkInsets(view.frame(width: offered))
+        print("R15 now playing \(name) ideal \(ideal), offered \(offered) pt: ink insets left \(insets.left) right \(insets.right) bottom \(insets.bottom)")
+        #expect(insets.left <= 2 && insets.right <= 2, "\(name) does not reach both edges of a \(offered) pt offer: \(insets)")
+    }
+}
