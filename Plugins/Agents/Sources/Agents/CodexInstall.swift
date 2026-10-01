@@ -25,11 +25,10 @@ struct CodexInstall: Equatable {
         return String(output[range].dropFirst("codex-cli ".count))
     }
 
-    /// The first executable among `candidates`, with the version it reports.
-    static func detect(candidates: [String]) -> CodexInstall? {
-        guard let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return nil }
-        let executable = URL(fileURLWithPath: path)
-        return CodexInstall(executable: executable, version: readVersion(executable))
+    /// The first executable among `candidates`. Only looks at the files: the version is read later,
+    /// off the main actor, when the settings page shows it.
+    static func find(candidates: [String]) -> URL? {
+        candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }).map { URL(fileURLWithPath: $0) }
     }
 
     /// `PATH`, then where Homebrew and the standalone installer put codex (an app opened from the
@@ -41,7 +40,9 @@ struct CodexInstall: Equatable {
         return folders.filter { !$0.isEmpty && seen.insert($0).inserted }.map { $0 + "/codex" }
     }
 
-    private static func readVersion(_ executable: URL) -> String? {
+    /// What `<executable> --version` reports, or nil when it fails or does not finish within
+    /// `timeout`; then codex is killed. Never blocks the caller's thread.
+    static func readVersion(_ executable: URL, timeout: Duration = .seconds(3)) async -> String? {
         let process = Process()
         process.executableURL = executable
         process.arguments = ["--version"]
@@ -49,10 +50,55 @@ struct CodexInstall: Equatable {
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return nil }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return parseVersion(String(decoding: data, as: UTF8.self))
+        let reading = output.fileHandleForReading
+        let once = Once()
+        return await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+            process.terminationHandler = { _ in
+                guard once.claim() else { return }
+                continuation.resume(returning: parseVersion(String(decoding: drain(reading.fileDescriptor), as: UTF8.self)))
+            }
+            do {
+                try process.run()
+            } catch {
+                if once.claim() { continuation.resume(returning: nil) }
+                return
+            }
+            let pid = process.processIdentifier
+            let parts = timeout.components
+            let seconds = Double(parts.seconds) + Double(parts.attoseconds) / 1e18
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
+                guard once.claim() else { return }
+                kill(pid, SIGKILL)
+                continuation.resume(returning: nil)
+            }
+        }
+    }
+
+    /// What the exited process wrote, without waiting for an end of file that a child it left behind
+    /// could hold back.
+    private static func drain(_ fd: Int32) -> Data {
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+        var data = Data()
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        while data.count < 65_536 {
+            let count = read(fd, &chunk, chunk.count)
+            guard count > 0 else { break }
+            data.append(contentsOf: chunk.prefix(count))
+        }
+        return data
+    }
+}
+
+/// True for the first caller only.
+private final class Once: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+
+    func claim() -> Bool {
+        lock.withLock {
+            defer { done = true }
+            return !done
+        }
     }
 }
 

@@ -39,6 +39,8 @@ final class CodexBridge {
 
     // One connection's state; `close()` clears it.
     private var send: (@MainActor (JSONValue) -> Void)?
+    /// Counts connections, so an answer never goes out on a later connection than its request's.
+    private var connection = 0
     private var callCount = 0
     private var calls: [Int: Call] = [:]
     private var resumed: Set<String> = []
@@ -73,6 +75,7 @@ final class CodexBridge {
     /// A new connection: `send` writes one message to it. Starts with `initialize`.
     func open(send: @escaping @MainActor (JSONValue) -> Void) {
         close()
+        connection += 1
         self.send = send
         call(.initialize, "initialize", .object([
             "clientInfo": Self.clientInfo,
@@ -112,15 +115,25 @@ final class CodexBridge {
             }
             return notification(method, params)
         }
-        if case .number(let number) = message["id"], let call = calls.removeValue(forKey: Int(number)) {
-            if let error = message["error"] {
-                context.log.error("codex app-server refused a request: \(Self.encode(error))")
-                if case .resume(let thread) = call { resumed.remove(thread) }
-                return nil
-            }
-            response(call, message["result"] ?? .null)
+        guard let id = message["id"] else { return nil }
+        guard let number = Self.callNumber(id), let call = calls.removeValue(forKey: number) else {
+            context.log.error("Ignored a codex app-server response to no pending call: id \(Self.encode(id))")
+            return nil
         }
+        if let error = message["error"] {
+            context.log.error("codex app-server refused a request: \(Self.encode(error))")
+            if case .resume(let thread) = call { resumed.remove(thread) }
+            return nil
+        }
+        response(call, message["result"] ?? .null)
         return nil
+    }
+
+    /// The call a response answers: only an integer id our calls use, exactly as sent. A fraction,
+    /// a number beyond `Int` or a string never matches.
+    static func callNumber(_ id: JSONValue) -> Int? {
+        guard case .number(let value) = id else { return nil }
+        return Int(exactly: value)
     }
 
     static func encode(_ message: JSONValue) -> String {
@@ -218,11 +231,19 @@ final class CodexBridge {
             // Requests meant for the client that started the thread stay with it.
             return nil
         }
+        // A reused id: the server no longer means the older request, which leaves the notch.
+        if let older = pending.removeValue(forKey: id) {
+            older.task.cancel()
+            context.log.error("codex app-server reused the request id \(Self.encode(id)); the older request was withdrawn")
+        }
         pendingCount += 1
         let number = pendingCount
+        let connection = connection
         let task = Task {
             let result = await ask()
-            if !Task.isCancelled, let result {
+            // Only the request still waiting under this id, on the connection it came from, answers.
+            let current = !Task.isCancelled && self.connection == connection && self.pending[id]?.number == number
+            if current, let result {
                 self.send?(.object(["id": id, "result": result]))
             }
             if self.pending[id]?.number == number {
@@ -234,26 +255,28 @@ final class CodexBridge {
     }
 
     private func decideCommand(_ params: JSONValue) async -> String? {
-        let detail = Self.commandDetail(params)
+        let detail = Self.commandDetail(params, threadFolder: threadFolder(params))
         let title = "\(projectName(params)) · \(params["kind"]?.string == "writeStdin" ? "터미널 입력" : "명령 실행")"
         let available = params["availableDecisions"]?.array?.compactMap(\.string)
+        let allowsSession = available?.contains("acceptForSession") ?? true
         var buttons = [AttentionButton(id: Self.denyButtonID, title: "거부", role: .destructive)]
         if detail.notchText != nil {
-            if available?.contains("acceptForSession") ?? true {
+            if allowsSession {
                 buttons.append(AttentionButton(id: Self.allowForSessionButtonID, title: "이번 세션 동안 허용"))
             }
             buttons.append(AttentionButton(id: Self.allowButtonID, title: "허용", role: .primary))
         } else if !detail.sections.isEmpty {
             buttons.append(AttentionButton(id: Self.detailsButtonID, title: "자세히 보기", role: .primary))
         }
-        return await decide(title: title, detail: detail, buttons: buttons, params: params)
+        return await decide(title: title, detail: detail, buttons: buttons, allowsSession: allowsSession, params: params)
     }
 
     private func decideFileChange(_ params: JSONValue) async -> String? {
         let title = "\(projectName(params)) · 파일 수정"
         var buttons = [AttentionButton(id: Self.denyButtonID, title: "거부", role: .destructive)]
         let detail: OperationDetail
-        if let id = params["itemId"]?.string, let changes = fileChanges[id], case let changed = Self.sections(changes), !changed.isEmpty {
+        let changes = params["itemId"]?.string.flatMap { fileChanges[$0] }
+        if let changes, let changed = Self.sections(changes) {
             var sections = changed
             if let root = params["grantRoot"]?.string { sections.append(.init(label: "이번 세션 동안 쓰기를 허용할 폴더", body: root)) }
             if let reason = params["reason"]?.string { sections.append(.init(label: "이유", body: reason)) }
@@ -266,14 +289,17 @@ final class CodexBridge {
         } else {
             detail = OperationDetail(
                 tool: "파일 수정", sections: [], notchText: nil,
-                headline: "바뀌는 내용을 알 수 없어서 노치에서는 허용할 수 없어요. 터미널에서 확인해 주세요."
+                headline: changes == nil
+                    ? "바뀌는 내용을 알 수 없어서 노치에서는 허용할 수 없어요. 터미널에서 확인해 주세요."
+                    : "바뀌는 내용 중 읽지 못한 부분이 있어서 노치에서는 허용할 수 없어요. 터미널에서 확인해 주세요."
             )
         }
-        return await decide(title: title, detail: detail, buttons: buttons, params: params)
+        // codex lets every file change be allowed for the session.
+        return await decide(title: title, detail: detail, buttons: buttons, allowsSession: true, params: params)
     }
 
     /// Asks in the notch and, for 자세히 보기, on the Agents screen. Nil leaves the request to the TUI.
-    private func decide(title: String, detail: OperationDetail, buttons: [AttentionButton], params: JSONValue) async -> String? {
+    private func decide(title: String, detail: OperationDetail, buttons: [AttentionButton], allowsSession: Bool, params: JSONValue) async -> String? {
         let wait = wait()
         let deadline = ContinuousClock.now + wait
         let response = await context.requestAttention(AttentionRequest(
@@ -295,8 +321,9 @@ final class CodexBridge {
         case Self.allowForSessionButtonID? where offered.contains(Self.allowForSessionButtonID):
             return "acceptForSession"
         case Self.detailsButtonID? where offered.contains(Self.detailsButtonID):
-            switch await showOnScreen(title, .permission(detail), until: deadline) {
+            switch await showOnScreen(title, .permission(detail), allowsSession: allowsSession, until: deadline) {
             case .allow: return "accept"
+            case .allowForSession where allowsSession: return "acceptForSession"
             case .deny: return "decline"
             default: return nil
             }
@@ -340,10 +367,10 @@ final class CodexBridge {
         return CodexQuestion.answers(questions, picked: screenPicked, typed: screenTyped)
     }
 
-    private func showOnScreen(_ title: String, _ content: ScreenItem.Content, until deadline: ContinuousClock.Instant) async -> ScreenResponse {
+    private func showOnScreen(_ title: String, _ content: ScreenItem.Content, allowsSession: Bool = false, until deadline: ContinuousClock.Instant) async -> ScreenResponse {
         guard deadline > .now else { return .timedOut }
         context.expand()
-        return await screen.show(title: title, content: content, until: deadline)
+        return await screen.show(title: title, content: content, allowsSession: allowsSession, until: deadline)
     }
 
     // MARK: Notices and the terminal
@@ -386,25 +413,33 @@ final class CodexBridge {
         terminal(folder(params)).flatMap(ClaudeBridge.appIcon)
     }
 
-    private func folder(_ params: JSONValue) -> String? {
-        params["threadId"]?.string.flatMap { threads[$0] } ?? params["cwd"]?.string
+    private func threadFolder(_ params: JSONValue) -> String? {
+        params["threadId"]?.string.flatMap { threads[$0] }
     }
 
-    /// The last folder name of the thread's working folder.
+    /// Where the thread's TUI works, which finds its terminal.
+    private func folder(_ params: JSONValue) -> String? {
+        threadFolder(params) ?? params["cwd"]?.string
+    }
+
+    /// The last folder name of where the request acts: a command's own folder, otherwise the
+    /// thread's working folder.
     private func projectName(_ params: JSONValue) -> String {
-        guard let folder = folder(params), !folder.isEmpty else { return "Codex" }
+        guard let folder = params["cwd"]?.string ?? threadFolder(params), !folder.isEmpty else { return "Codex" }
         return URL(fileURLWithPath: folder).lastPathComponent
     }
 
     // MARK: What a request asks
 
     /// The command with everything else that changes what it may do. The notch offers 허용 only for a
-    /// short command that asks for nothing more.
-    static func commandDetail(_ params: JSONValue) -> OperationDetail {
+    /// short command that asks for nothing more; a command run outside the thread's folder shows its
+    /// folder there too, and goes to the full detail when both do not fit.
+    static func commandDetail(_ params: JSONValue, threadFolder: String?) -> OperationDetail {
         var sections: [OperationDetail.Section] = []
         let command = params["command"]?.string
+        let cwd = params["cwd"]?.string
         if let command { sections.append(.init(label: "명령", body: command)) }
-        if let cwd = params["cwd"]?.string { sections.append(.init(label: "폴더", body: cwd)) }
+        if let cwd { sections.append(.init(label: "폴더", body: cwd)) }
         if let reason = params["reason"]?.string { sections.append(.init(label: "이유", body: reason)) }
         var extra = false
         if let network = params["networkApprovalContext"], network != .null {
@@ -415,32 +450,44 @@ final class CodexBridge {
             sections.append(.init(label: "추가 권한", body: Self.encode(permissions)))
             extra = true
         }
-        guard command != nil else {
+        guard let command else {
             return OperationDetail(tool: "명령", sections: [], notchText: nil, headline: "실행할 명령을 알 수 없어서 노치에서는 허용할 수 없어요. 터미널에서 확인해 주세요.")
         }
-        let fits = command.map(OperationDetail.fitsNotch) ?? false
+        let elsewhere = cwd.flatMap { $0 == threadFolder ? nil : $0 }
+        let text = command + (elsewhere.map { "\n폴더: \($0)" } ?? "")
+        let headline = if extra {
+            "명령이 다른 권한도 함께 요청해요. 자세히 보기에서 전체 내용을 확인해 주세요."
+        } else if OperationDetail.fitsNotch(command) {
+            "명령을 실행할 폴더까지는 노치에 다 보이지 않아요. 자세히 보기에서 전체 내용을 확인해 주세요."
+        } else {
+            "명령이 길어서 노치에 다 보이지 않아요. 자세히 보기에서 전체 명령을 확인해 주세요."
+        }
         return OperationDetail(
             tool: "명령",
             sections: sections,
-            notchText: fits && !extra ? command : nil,
-            headline: extra
-                ? "명령이 다른 권한도 함께 요청해요. 자세히 보기에서 전체 내용을 확인해 주세요."
-                : "명령이 길어서 노치에 다 보이지 않아요. 자세히 보기에서 전체 명령을 확인해 주세요."
+            notchText: OperationDetail.fitsNotch(text) && !extra ? text : nil,
+            headline: headline
         )
     }
 
-    /// One section per changed file: its path and kind, then its diff.
-    static func sections(_ changes: [JSONValue]) -> [OperationDetail.Section] {
-        changes.compactMap { change in
-            guard let path = change["path"]?.string else { return nil }
+    /// One section per changed file: its path and kind, then its diff. Nil unless every change has a
+    /// path, a kind codex 0.153.4 sends and its diff, so an approval never covers a change the user
+    /// could not read.
+    static func sections(_ changes: [JSONValue]) -> [OperationDetail.Section]? {
+        guard !changes.isEmpty else { return nil }
+        var sections: [OperationDetail.Section] = []
+        for change in changes {
+            guard let path = change["path"]?.string, !path.isEmpty, let diff = change["diff"]?.string else { return nil }
             let kind: String
             switch change["kind"]?["type"]?.string {
             case "add": kind = "새 파일"
             case "delete": kind = "삭제"
-            default: kind = change["kind"]?["move_path"]?.string.map { "\($0)(으)로 이동" } ?? "수정"
+            case "update": kind = change["kind"]?["move_path"]?.string.map { "\($0)(으)로 이동" } ?? "수정"
+            default: return nil
             }
-            return .init(label: "\(path) (\(kind))", body: change["diff"]?.string ?? "")
+            sections.append(.init(label: "\(path) (\(kind))", body: diff))
         }
+        return sections
     }
 }
 

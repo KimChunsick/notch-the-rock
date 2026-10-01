@@ -115,7 +115,7 @@ import Testing
             settingsURL: directory.appendingPathComponent("settings.json"),
             activator: activator,
             codexEndpoint: CodexEndpoint(home: directory),
-            codexInstall: nil,
+            codexExecutable: nil,
             codexLauncher: FakeLauncher(socketPath: ""),
             codexTerminal: { _ in nil }
         )
@@ -164,7 +164,7 @@ import Testing
     let renderDefaults = UserDefaults(suiteName: isolatedDefaultsSuite(in: try! makeDirectory("agents-render")))!
 
     func settingsPage(_ model: ClaudeHooksModel) -> some View {
-        Form { AgentsSettingsView(model: model, codex: CodexModel(defaults: renderDefaults, install: nil, start: {}, stop: {}), defaults: renderDefaults) }
+        Form { AgentsSettingsView(model: model, codex: CodexModel(defaults: renderDefaults, executable: nil, start: {}, stop: {}), defaults: renderDefaults) }
             .formStyle(.grouped)
             .frame(width: 560, height: 360)
     }

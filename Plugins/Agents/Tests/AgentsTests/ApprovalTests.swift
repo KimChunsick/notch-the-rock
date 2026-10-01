@@ -51,7 +51,7 @@ final class LivePlugin {
             settingsURL: directory.appendingPathComponent("settings.json"),
             activator: FakeActivator(),
             codexEndpoint: CodexEndpoint(home: directory),
-            codexInstall: nil,
+            codexExecutable: nil,
             codexLauncher: FakeLauncher(socketPath: ""),
             codexTerminal: { _ in nil }
         )

@@ -4,6 +4,17 @@ import Foundation
 
 struct WebSocketError: Error, CustomStringConvertible {
     let description: String
+    /// The close code (RFC 6455 §7.4.1) the client sends when the server broke the protocol; nil for
+    /// a socket error.
+    var closeCode: UInt16? = nil
+
+    static func protocolError(_ description: String) -> WebSocketError {
+        WebSocketError(description: description, closeCode: 1002)
+    }
+
+    static func tooBig(_ description: String) -> WebSocketError {
+        WebSocketError(description: description, closeCode: 1009)
+    }
 }
 
 /// One WebSocket frame (RFC 6455 §5.2).
@@ -51,10 +62,15 @@ struct WebSocketFrame: Equatable {
     }
 
     /// The first frame in `buffer` and the bytes it used, or nil while it is incomplete. Unmasks a
-    /// masked payload. Unknown opcodes decode as nil too; the caller treats a stalled buffer as an error.
-    static func decode(_ buffer: Data) -> (WebSocketFrame, Int)? {
+    /// masked payload. Throws as soon as the header shows a frame that may not be read: an unknown
+    /// opcode, reserved bits, a payload above `maxPayload` (or with the top bit of the 64-bit length
+    /// set), or a control frame that is fragmented or longer than 125 bytes.
+    static func decode(_ buffer: Data, maxPayload: Int = WebSocket.maxMessage) throws -> (WebSocketFrame, Int)? {
         let bytes = [UInt8](buffer.prefix(14))
-        guard bytes.count >= 2, let opcode = Opcode(rawValue: bytes[0] & 0x0F) else { return nil }
+        guard bytes.count >= 2 else { return nil }
+        guard let opcode = Opcode(rawValue: bytes[0] & 0x0F) else { throw WebSocketError.protocolError("Unknown frame opcode") }
+        guard bytes[0] & 0x70 == 0 else { throw WebSocketError.protocolError("A frame uses reserved bits") }
+        let fin = bytes[0] & 0x80 != 0
         let masked = bytes[1] & 0x80 != 0
         var length = Int(bytes[1] & 0x7F)
         var offset = 2
@@ -65,9 +81,13 @@ struct WebSocketFrame: Equatable {
         } else if length == 127 {
             guard bytes.count >= 10 else { return nil }
             let value = bytes[2..<10].reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
-            guard value <= UInt64(Int32.max) else { return nil }
+            guard value <= UInt64(maxPayload) else { throw WebSocketError.tooBig("A frame of \(value) bytes is over the limit") }
             length = Int(value)
             offset = 10
+        }
+        guard length <= maxPayload else { throw WebSocketError.tooBig("A frame of \(length) bytes is over the limit") }
+        if opcode.rawValue >= 0x8 {
+            guard fin, length <= 125 else { throw WebSocketError.protocolError("A control frame is fragmented or too long") }
         }
         let mask = masked ? Array(bytes.dropFirst(offset).prefix(4)) : []
         offset += mask.count
@@ -77,30 +97,40 @@ struct WebSocketFrame: Equatable {
         if masked {
             payload = Data(payload.enumerated().map { $0.element ^ mask[$0.offset % 4] })
         }
-        return (WebSocketFrame(fin: bytes[0] & 0x80 != 0, opcode: opcode, payload: payload, masked: masked), offset + length)
+        return (WebSocketFrame(fin: fin, opcode: opcode, payload: payload, masked: masked), offset + length)
     }
 }
 
 /// A WebSocket client over a connected stream socket, as codex's app-server speaks it on its Unix
 /// socket: an HTTP Upgrade, then text frames that each carry one JSON-RPC message. `receive()` is
-/// called from one thread at a time and blocks; `send(text:)` may be called from any thread.
-final class WebSocket: @unchecked Sendable {
+/// called from one thread at a time and blocks. `send(text:)` never blocks: a serial writer delivers
+/// the frames in order, and a failed write closes the connection. `close()` works from any thread,
+/// at any time, and ends a blocked handshake, receive or write; the descriptor itself is closed when
+/// the last user lets go of the socket, so it is never reused under a thread still using it.
+final class WebSocket: CodexConnection, @unchecked Sendable {
+    /// The largest message (and frame) the client reads, and the most it queues for writing.
+    static let maxMessage = 16 << 20
+
     private let fd: Int32
-    private let writeLock = NSLock()
+    private let maxMessage: Int
     /// Bytes read but not yet used; touched only by the reading thread.
     private var buffer = Data()
-    private let closed = NSLock()
+    private let writer = DispatchQueue(label: "com.notchtherock.agents.websocket-writer")
+    private let lock = NSLock()
     private var isClosed = false
+    /// Bytes handed to the writer and not written yet.
+    private var queued = 0
 
-    /// Takes over `fd`; `close()` closes it.
-    init(fd: Int32) {
+    /// Takes over `fd`.
+    init(fd: Int32, maxMessage: Int = WebSocket.maxMessage) {
         self.fd = fd
+        self.maxMessage = maxMessage
         var on: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
     }
 
-    /// Connects to the Unix socket at `unixPath` and completes the handshake.
-    static func connect(unixPath: String) throws -> WebSocket {
+    /// Connects to the Unix socket at `unixPath`, without the handshake.
+    convenience init(unixPath: String) throws {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw WebSocketError(description: "socket: \(String(cString: strerror(errno)))") }
         var address = sockaddr_un()
@@ -123,9 +153,18 @@ final class WebSocket: @unchecked Sendable {
             Darwin.close(fd)
             throw WebSocketError(description: "connect \(unixPath): \(message)")
         }
-        let socket = WebSocket(fd: fd)
+        self.init(fd: fd)
+    }
+
+    deinit {
+        Darwin.close(fd)
+    }
+
+    /// Connects to the Unix socket at `unixPath` and completes the handshake within `timeout`.
+    static func connect(unixPath: String, timeout: Duration = .seconds(5)) throws -> WebSocket {
+        let socket = try WebSocket(unixPath: unixPath)
         do {
-            try socket.handshake()
+            try socket.handshake(timeout: timeout)
         } catch {
             socket.close()
             throw error
@@ -139,13 +178,26 @@ final class WebSocket: @unchecked Sendable {
         return Data(digest).base64EncodedString()
     }
 
-    /// Sends the HTTP Upgrade request and checks the server's 101 answer and accept key.
-    func handshake() throws {
+    /// Sends the HTTP Upgrade request and checks the server's 101 answer and accept key, all within
+    /// `timeout`; a server that answers slowly or not at all fails it.
+    func handshake(timeout: Duration = .seconds(5)) throws {
+        let deadline = ContinuousClock.now + timeout
+        defer {
+            setTimeout(SO_SNDTIMEO, nil)
+            setTimeout(SO_RCVTIMEO, nil)
+        }
+        func untilDeadline(_ option: Int32) throws {
+            let left = deadline - .now
+            guard left > .zero else { throw WebSocketError(description: "The server did not answer the upgrade in time") }
+            setTimeout(option, left)
+        }
         let key = Data((0..<16).map { _ in UInt8.random(in: .min ... .max) }).base64EncodedString()
+        try untilDeadline(SO_SNDTIMEO)
         try write(Data("GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: \(key)\r\nSec-WebSocket-Version: 13\r\n\r\n".utf8))
         let separator = Data("\r\n\r\n".utf8)
         while buffer.range(of: separator) == nil {
             guard buffer.count < 16_384 else { throw WebSocketError(description: "The upgrade answer is too long") }
+            try untilDeadline(SO_RCVTIMEO)
             try fill()
         }
         let end = buffer.range(of: separator)!.upperBound
@@ -162,61 +214,98 @@ final class WebSocket: @unchecked Sendable {
         }
     }
 
-    func send(text: String) throws {
-        try send(WebSocketFrame(fin: true, opcode: .text, payload: Data(text.utf8)))
+    func send(text: String) {
+        enqueue(WebSocketFrame(fin: true, opcode: .text, payload: Data(text.utf8)))
     }
 
     /// The next text message, put together from its fragments, or nil once the server closed the
-    /// connection. Answers pings and the server's close on the way.
+    /// connection. Answers pings and the server's close on the way; control frames between fragments
+    /// leave the message alone. A frame or message over the limit, or a broken frame, is answered
+    /// with a close frame and thrown.
     func receive() throws -> String? {
         var message = Data()
         var inMessage = false
         while true {
-            let frame = try nextFrame()
+            let frame: WebSocketFrame
+            do {
+                frame = try nextFrame()
+            } catch let error as WebSocketError where error.closeCode != nil {
+                try refuse(error)
+            }
             switch frame.opcode {
             case .ping:
-                try send(WebSocketFrame(fin: true, opcode: .pong, payload: frame.payload))
+                enqueue(WebSocketFrame(fin: true, opcode: .pong, payload: frame.payload))
+                continue
             case .pong:
                 continue
             case .close:
-                try? send(WebSocketFrame(fin: true, opcode: .close, payload: frame.payload.prefix(2)))
+                enqueue(WebSocketFrame(fin: true, opcode: .close, payload: frame.payload.prefix(2)))
                 return nil
             case .text, .binary:
-                guard !inMessage else { throw WebSocketError(description: "A new message began inside a fragmented one") }
+                guard !inMessage else { try refuse(.protocolError("A new message began inside a fragmented one")) }
                 message = frame.payload
                 inMessage = true
             case .continuation:
-                guard inMessage else { throw WebSocketError(description: "A continuation arrived outside a message") }
+                guard inMessage else { try refuse(.protocolError("A continuation arrived outside a message")) }
+                guard message.count + frame.payload.count <= maxMessage else {
+                    try refuse(.tooBig("A message grew over \(maxMessage) bytes"))
+                }
                 message.append(frame.payload)
             }
-            if inMessage, frame.fin {
+            if frame.fin {
                 return String(decoding: message, as: UTF8.self)
             }
         }
     }
 
-    /// Closes the socket; a `receive()` blocked on another thread returns with an error.
+    /// Shuts the socket down; a handshake, `receive()` or write blocked on another thread returns
+    /// with an error, and queued frames are dropped.
     func close() {
-        closed.lock()
-        defer { closed.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         guard !isClosed else { return }
         isClosed = true
         shutdown(fd, SHUT_RDWR)
-        Darwin.close(fd)
     }
 
-    private func send(_ frame: WebSocketFrame) throws {
-        try write(frame.encoded(mask: (0..<4).map { _ in UInt8.random(in: .min ... .max) }))
+    /// Tells the server why the client stops reading (a close frame with the error's code), then
+    /// throws `error`.
+    private func refuse(_ error: WebSocketError) throws -> Never {
+        if let code = error.closeCode {
+            enqueue(WebSocketFrame(fin: true, opcode: .close, payload: Data([UInt8(code >> 8), UInt8(code & 0xFF)])))
+        }
+        throw error
+    }
+
+    /// Hands `frame` to the writer. More than `maxMessage` bytes waiting means the server stopped
+    /// reading: the connection closes.
+    private func enqueue(_ frame: WebSocketFrame) {
+        let data = frame.encoded(mask: (0..<4).map { _ in UInt8.random(in: .min ... .max) })
+        let accepted = lock.withLock {
+            guard !isClosed, queued + data.count <= maxMessage else { return false }
+            queued += data.count
+            return true
+        }
+        guard accepted else {
+            close()
+            return
+        }
+        writer.async { [self] in
+            defer { lock.withLock { queued -= data.count } }
+            guard !lock.withLock({ isClosed }) else { return }
+            do {
+                try write(data)
+            } catch {
+                close()
+            }
+        }
     }
 
     private func nextFrame() throws -> WebSocketFrame {
         while true {
-            if let (frame, used) = WebSocketFrame.decode(buffer) {
+            if let (frame, used) = try WebSocketFrame.decode(buffer, maxPayload: maxMessage) {
                 buffer.removeFirst(used)
                 return frame
-            }
-            if buffer.count >= 2, WebSocketFrame.Opcode(rawValue: buffer[buffer.startIndex] & 0x0F) == nil {
-                throw WebSocketError(description: "Unknown frame opcode")
             }
             try fill()
         }
@@ -226,14 +315,17 @@ final class WebSocket: @unchecked Sendable {
         var chunk = [UInt8](repeating: 0, count: 65_536)
         let count = read(fd, &chunk, chunk.count)
         guard count > 0 else {
-            throw WebSocketError(description: count == 0 ? "The server closed the socket" : "read: \(String(cString: strerror(errno)))")
+            let code = errno
+            guard count < 0 else { throw WebSocketError(description: "The server closed the socket") }
+            // Only the handshake sets a receive timeout.
+            guard code != EAGAIN, code != EWOULDBLOCK else { throw WebSocketError(description: "The server did not answer the upgrade in time") }
+            throw WebSocketError(description: "read: \(String(cString: strerror(code)))")
         }
         buffer.append(contentsOf: chunk.prefix(count))
     }
 
+    /// Writes all of `data`; only the handshake and the writer call it, never at the same time.
     private func write(_ data: Data) throws {
-        writeLock.lock()
-        defer { writeLock.unlock() }
         try data.withUnsafeBytes { raw in
             var offset = 0
             while offset < raw.count {
@@ -245,5 +337,13 @@ final class WebSocket: @unchecked Sendable {
                 offset += written
             }
         }
+    }
+
+    /// Sets a send or receive timeout; nil clears it.
+    private func setTimeout(_ option: Int32, _ duration: Duration?) {
+        let parts = duration?.components ?? (seconds: 0, attoseconds: 0)
+        var value = timeval(tv_sec: Int(parts.seconds), tv_usec: Int32(parts.attoseconds / 1_000_000_000_000))
+        if duration != nil, value.tv_sec == 0, value.tv_usec == 0 { value.tv_usec = 1 }
+        setsockopt(fd, SOL_SOCKET, option, &value, socklen_t(MemoryLayout<timeval>.size))
     }
 }

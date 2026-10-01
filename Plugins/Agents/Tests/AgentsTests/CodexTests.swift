@@ -271,6 +271,86 @@ final class Outbox {
         #expect(host.expansions == 1)
     }
 
+    // MARK: Untrusted messages
+
+    @Test func R07__only_an_exact_integer_id_answers_a_call() throws {
+        // The bridge's first call is `initialize`, id 1.
+        for id in ["1.9", #""1""#, "-0", "1.0000001"] {
+            bridge.receive(try jsonValue(#"{"id":\#(id),"result":{}}"#))
+        }
+        #expect(outbox.messages.count == 1)
+        #expect(host.logs.count == 4)
+        bridge.receive(try jsonValue(#"{"id":1,"result":{}}"#))
+        #expect(outbox.messages.dropFirst().first == (try jsonValue(#"{"method":"initialized"}"#)))
+    }
+
+    @Test func R07__a_huge_numeric_id_is_ignored() throws {
+        bridge.receive(try jsonValue(#"{"id":1e100,"result":{}}"#))
+        bridge.receive(try jsonValue(#"{"id":-1e300,"result":{}}"#))
+        #expect(outbox.messages.count == 1)
+        #expect(host.logs.count == 2)
+    }
+
+    @Test func R07__a_reused_request_id_withdraws_the_older_request() async throws {
+        try connect()
+        host.responses = [Self.answer(CodexBridge.detailsButtonID), .dismissed]
+        // The first request waits on the Agents screen when the server sends another with its id.
+        let first = bridge.receive(try codexFixture("commandApprovalLong"))
+        let item = try await screenItem()
+        guard case .object(var reused) = try codexFixture("commandApproval") else { return }
+        reused["id"] = .string("req-8")
+        await bridge.receive(.object(reused))?.value
+        for _ in 0..<100 where !bridge.screen.items.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(bridge.screen.items.isEmpty, "the older request still waits")
+        // Answering the withdrawn request afterwards reaches neither connection.
+        let later = Outbox()
+        bridge.open { [later] in later.messages.append($0) }
+        bridge.screen.respond(to: item.id, with: .allow)
+        await first?.value
+        #expect(outbox.messages.isEmpty)
+        #expect(later.messages.map { $0["method"] } == [.string("initialize")])
+    }
+
+    @Test(arguments: [
+        // No patch.
+        #"[{"path":"/Users/me/notch-the-rock/a.txt","kind":{"type":"update","move_path":null}}]"#,
+        // The second change has no path.
+        #"[{"path":"/Users/me/notch-the-rock/a.txt","kind":{"type":"add"},"diff":"+a\n"},{"kind":{"type":"delete"},"diff":"-b\n"}]"#,
+        // A kind codex 0.153.4 does not send.
+        #"[{"path":"/Users/me/notch-the-rock/a.txt","kind":{"type":"chmod"},"diff":""}]"#,
+        "[]",
+    ])
+    func R07__a_change_that_is_not_fully_readable_can_only_be_declined(changes: String) async throws {
+        try connect()
+        bridge.receive(try jsonValue(#"{"method":"item/started","params":{"threadId":"019a0000-0000-7000-8000-000000000001","turnId":"t","startedAtMs":1,"item":{"type":"fileChange","id":"call_4","status":"inProgress","changes":\#(changes)}}}"#))
+        host.responses = [Self.answer(CodexBridge.denyButtonID)]
+        await bridge.receive(try codexFixture("fileChangeApproval"))?.value
+        let request = try #require(host.requests.first)
+        #expect(request.buttons.map(\.id) == [CodexBridge.denyButtonID])
+        #expect(request.message.contains("읽지 못한"))
+        #expect(outbox.messages == [try jsonValue(#"{"id":10,"result":{"decision":"decline"}}"#)])
+    }
+
+    @Test func R07__a_command_run_in_another_folder_shows_that_folder() async throws {
+        try connect()
+        host.responses = [Self.answer(CodexBridge.allowButtonID), .dismissed]
+        func approval(_ id: Int, cwd: String) throws -> JSONValue {
+            try jsonValue(#"{"id":\#(id),"method":"item/commandExecution/requestApproval","params":{"threadId":"019a0000-0000-7000-8000-000000000001","turnId":"t","itemId":"c\#(id)","startedAtMs":1,"command":"rm -rf ./build","cwd":"\#(cwd)","kind":"command","availableDecisions":["accept","decline"]}}"#)
+        }
+        await bridge.receive(try approval(21, cwd: "/Users/me/elsewhere/app"))?.value
+        let request = try #require(host.requests.first)
+        #expect(request.title == "app · 명령 실행")
+        #expect(request.message == "rm -rf ./build\n폴더: /Users/me/elsewhere/app")
+        #expect(request.buttons.map(\.id) == [CodexBridge.denyButtonID, CodexBridge.allowButtonID])
+        #expect(outbox.messages == [try jsonValue(#"{"id":21,"result":{"decision":"accept"}}"#)])
+        // A folder too long to show with the command sends the request to the full detail.
+        let deep = "/Users/me/" + String(repeating: "deep/", count: 30) + "app"
+        await bridge.receive(try approval(22, cwd: deep))?.value
+        #expect(host.requests.last?.buttons.map(\.id) == [CodexBridge.denyButtonID, CodexBridge.detailsButtonID])
+    }
+
     @Test func R07__render_approval_question_and_settings() async throws {
         try connect()
         host.responses = [.released, .released]
@@ -281,8 +361,8 @@ final class Outbox {
 
         let directory = try makeDirectory()
         let defaults = try #require(UserDefaults(suiteName: isolatedDefaultsSuite(in: directory)))
-        let install = CodexInstall(executable: URL(fileURLWithPath: "/opt/homebrew/bin/codex"), version: "0.150.0")
-        let codex = CodexModel(defaults: defaults, install: install, start: {}, stop: {})
+        let codex = CodexModel(defaults: defaults, executable: URL(fileURLWithPath: "/opt/homebrew/bin/codex"), readVersion: { _ in "0.150.0" }, start: {}, stop: {})
+        await codex.checkVersion()
         let hooks = ClaudeHooksModel(installer: HookInstaller(
             settingsURL: directory.appendingPathComponent("settings.json"),
             recordURL: directory.appendingPathComponent("record.json"),
@@ -297,7 +377,7 @@ final class Outbox {
 /// Reads from `fd` until `buffer` holds a whole frame, and returns it.
 func readFrame(_ fd: Int32, _ buffer: inout Data) throws -> WebSocketFrame {
     while true {
-        if let (frame, used) = WebSocketFrame.decode(buffer) {
+        if let (frame, used) = try WebSocketFrame.decode(buffer) {
             buffer.removeFirst(used)
             return frame
         }
@@ -306,6 +386,31 @@ func readFrame(_ fd: Int32, _ buffer: inout Data) throws -> WebSocketFrame {
         try #require(count > 0, "the socket closed")
         buffer.append(contentsOf: chunk.prefix(count))
     }
+}
+
+/// The next frame within `seconds`, or nil when none arrives in time or the socket closes.
+func readFrame(_ fd: Int32, _ buffer: inout Data, within seconds: Int) throws -> WebSocketFrame? {
+    var limit = timeval(tv_sec: seconds, tv_usec: 0)
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &limit, socklen_t(MemoryLayout<timeval>.size))
+    while true {
+        if let (frame, used) = try WebSocketFrame.decode(buffer) {
+            buffer.removeFirst(used)
+            return frame
+        }
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        let count = read(fd, &chunk, chunk.count)
+        guard count > 0 else { return nil }
+        buffer.append(contentsOf: chunk.prefix(count))
+    }
+}
+
+/// A flag set on one thread and read on another.
+final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    func set() { lock.withLock { value = true } }
+    var isSet: Bool { lock.withLock { value } }
 }
 
 /// Reads the client's HTTP request up to its blank line.
@@ -327,6 +432,9 @@ func writeAll(_ fd: Int32, _ data: Data) {
     func socketPair() throws -> (client: Int32, server: Int32) {
         var fds: [Int32] = [0, 0]
         try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+        // The client may close while the test still writes.
+        var on: Int32 = 1
+        setsockopt(fds[1], SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
         return (fds[0], fds[1])
     }
 
@@ -349,7 +457,7 @@ func writeAll(_ fd: Int32, _ data: Data) {
         let socket = WebSocket(fd: clientFD)
         let client = Task.detached { () throws -> [String?] in
             try socket.handshake()
-            try socket.send(text: #"{"method":"initialized"}"#)
+            socket.send(text: #"{"method":"initialized"}"#)
             return [try socket.receive(), try socket.receive()]
         }
         try accept(server)
@@ -378,12 +486,12 @@ func writeAll(_ fd: Int32, _ data: Data) {
         let payload = Data(repeating: 0x41, count: 70_000)
         let encoded = WebSocketFrame(fin: true, opcode: .text, payload: payload).encoded(mask: [1, 2, 3, 4])
         #expect(encoded[1] == 0x80 | 127)
-        let (decoded, used) = try #require(WebSocketFrame.decode(encoded))
+        let (decoded, used) = try #require(try WebSocketFrame.decode(encoded))
         #expect(used == encoded.count)
         #expect(decoded.payload == payload)
         let medium = WebSocketFrame(fin: true, opcode: .text, payload: Data(repeating: 0x42, count: 300)).encoded(mask: nil)
         #expect(medium[1] == 126)
-        #expect(WebSocketFrame.decode(medium.prefix(100)) == nil)
+        #expect(try WebSocketFrame.decode(medium.prefix(100)) == nil)
     }
 
     @Test func R07__a_refused_upgrade_fails_the_handshake() async throws {
@@ -397,6 +505,73 @@ func writeAll(_ fd: Int32, _ data: Data) {
         writeAll(server, Data("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n".utf8))
         #expect(await client.value == false)
         socket.close()
+    }
+
+    @Test func R07__a_ping_between_fragments_does_not_end_the_message() async throws {
+        let (clientFD, server) = try socketPair()
+        defer { close(server) }
+        let socket = WebSocket(fd: clientFD)
+        defer { socket.close() }
+        let client = Task.detached { () throws -> String? in
+            try socket.handshake()
+            return try socket.receive()
+        }
+        try accept(server)
+        writeAll(server, WebSocketFrame(fin: false, opcode: .text, payload: Data(#"{"id":"#.utf8)).encoded(mask: nil))
+        writeAll(server, WebSocketFrame(fin: true, opcode: .ping, payload: Data("p".utf8)).encoded(mask: nil))
+        writeAll(server, WebSocketFrame(fin: true, opcode: .continuation, payload: Data("1}".utf8)).encoded(mask: nil))
+        var buffer = Data()
+        #expect(try readFrame(server, &buffer, within: 2)?.opcode == .pong)
+        #expect(try await client.value == #"{"id":1}"#)
+    }
+
+    @Test(arguments: [
+        // The top bit of the 64-bit length.
+        [0x81, 127, 0x80, 0, 0, 0, 0, 0, 0, 0] as [UInt8],
+        // 16 MiB + 1.
+        [0x81, 127, 0, 0, 0, 0, 0x01, 0, 0, 0x01],
+    ])
+    func R07__an_oversized_frame_is_refused_at_once(header: [UInt8]) async throws {
+        let (clientFD, server) = try socketPair()
+        defer { close(server) }
+        let socket = WebSocket(fd: clientFD)
+        defer { socket.close() }
+        let client = Task.detached { () -> Bool in
+            do {
+                try socket.handshake()
+                _ = try socket.receive()
+                return false
+            } catch {
+                return true
+            }
+        }
+        try accept(server)
+        writeAll(server, Data(header))
+        var buffer = Data()
+        let closing = try readFrame(server, &buffer, within: 2)
+        #expect(closing?.opcode == .close)
+        #expect(closing?.payload == Data([0x03, 0xF1]))
+        // Ends a client still waiting for the payload.
+        shutdown(server, SHUT_RDWR)
+        #expect(await client.value)
+    }
+
+    @Test func R07__sending_never_waits_for_a_peer_that_stopped_reading() async throws {
+        let (clientFD, server) = try socketPair()
+        defer { close(server) }
+        let socket = WebSocket(fd: clientFD)
+        let big = String(repeating: "a", count: 8 << 20)
+        let returned = Flag()
+        let sending = Task.detached {
+            socket.send(text: big)
+            returned.set()
+        }
+        try await Task.sleep(for: .seconds(1))
+        #expect(returned.isSet, "send waited for the peer")
+        // Disconnect still works while the write is stuck.
+        socket.close()
+        await sending.value
+        #expect(throws: (any Error).self) { try socket.receive() }
     }
 }
 
@@ -549,14 +724,14 @@ func listen(at path: String, folderMode: mode_t = 0o700) throws -> Int32 {
         #expect(CodexInstall.parseVersion("garbage") == nil)
     }
 
-    @Test func R07__detect_finds_the_first_executable_and_reads_its_version() throws {
+    @Test func R07__find_takes_the_first_executable_and_its_version_is_read_later() async throws {
         let directory = try makeDirectory()
         let script = directory.appendingPathComponent("codex")
         try "#!/bin/sh\necho 'codex-cli 0.150.0'\n".write(to: script, atomically: true, encoding: .utf8)
         chmod(script.path, 0o755)
-        let found = try #require(CodexInstall.detect(candidates: [directory.appendingPathComponent("missing").path, script.path]))
-        #expect(found == CodexInstall(executable: script, version: "0.150.0"))
-        #expect(CodexInstall.detect(candidates: [directory.appendingPathComponent("missing").path]) == nil)
+        #expect(CodexInstall.find(candidates: [directory.appendingPathComponent("missing").path, script.path]) == script)
+        #expect(CodexInstall.find(candidates: [directory.appendingPathComponent("missing").path]) == nil)
+        #expect(await CodexInstall.readVersion(script) == "0.150.0")
     }
 }
 
@@ -597,7 +772,7 @@ func listen(at path: String, folderMode: mode_t = 0o700) throws -> Int32 {
         transcript += "handshake: 101 Switching Protocols, Sec-WebSocket-Accept verified\n"
         func call(_ text: String) throws {
             transcript += "→ \(text)\n"
-            try socket.send(text: text)
+            socket.send(text: text)
         }
         func reply() throws -> JSONValue {
             let text = try #require(try socket.receive())

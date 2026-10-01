@@ -37,7 +37,7 @@ public final class AgentsPlugin: NotchPlugin {
             settingsURL: home.appendingPathComponent(".claude/settings.json"),
             activator: SystemTerminalActivator(log: { [log = context.log] in log.error($0) }),
             codexEndpoint: .current(home: home),
-            codexInstall: CodexInstall.detect(candidates: CodexInstall.candidates(home: home)),
+            codexExecutable: CodexInstall.find(candidates: CodexInstall.candidates(home: home)),
             codexLauncher: SystemCodexLauncher(),
             codexTerminal: CodexTerminals.systemTerminal(forCwd:)
         )
@@ -49,7 +49,7 @@ public final class AgentsPlugin: NotchPlugin {
         settingsURL: URL,
         activator: any TerminalActivating,
         codexEndpoint: CodexEndpoint,
-        codexInstall: CodexInstall?,
+        codexExecutable: URL?,
         codexLauncher: any CodexLaunching,
         codexTerminal: @escaping @MainActor (String?) -> TerminalLocation?
     ) {
@@ -68,11 +68,11 @@ public final class AgentsPlugin: NotchPlugin {
             .seconds(ApprovalWait.seconds(in: defaults))
         }
         let link = CodexLink(
-            supervisor: CodexSupervisor(endpoint: codexEndpoint, executable: codexInstall?.executable, launcher: codexLauncher),
+            supervisor: CodexSupervisor(endpoint: codexEndpoint, executable: codexExecutable, launcher: codexLauncher),
             bridge: codexBridge,
             log: { [log = context.log] in log.error($0) }
         )
-        let codex = CodexModel(defaults: defaults, install: codexInstall, start: { link.start() }, stop: { link.stop() })
+        let codex = CodexModel(defaults: defaults, executable: codexExecutable, start: { link.start() }, stop: { link.stop() })
         link.onState = { codex.state = $0 }
         self.codexBridge = codexBridge
         codexLink = link

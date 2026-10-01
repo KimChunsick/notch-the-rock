@@ -180,9 +180,23 @@ final class CodexSupervisor {
     }
 }
 
+/// One connection to the app-server as `CodexLink` uses it: `WebSocket` on this Mac, fakes in tests.
+protocol CodexConnection: AnyObject, Sendable {
+    /// Completes the connection (the HTTP Upgrade) within `timeout`; blocks.
+    func handshake(timeout: Duration) throws
+    /// Queues one message; never blocks.
+    func send(text: String)
+    /// The next message, or nil once the server closed the connection; blocks.
+    func receive() throws -> String?
+    /// Ends the connection; a handshake or `receive()` blocked on another thread returns.
+    func close()
+}
+
 /// Keeps the plugin connected while Codex is 연결: makes sure the server runs, connects over
 /// WebSocket, hands messages to the bridge, and when the socket closes (or the attempt fails) tries
-/// again after `CodexSupervisor.backoff`.
+/// again after `CodexSupervisor.backoff`. Only the current connection reaches the bridge: one that
+/// 해제 replaced may still be unwinding on its own thread, and it neither delivers messages nor
+/// closes the bridge.
 @MainActor
 final class CodexLink {
     enum State: Equatable {
@@ -201,19 +215,26 @@ final class CodexLink {
     private let bridge: CodexBridge
     private let sleep: @MainActor (Duration) async -> Void
     private let log: @MainActor (String) -> Void
+    private let connect: @Sendable (String) throws -> any CodexConnection
+    private let handshakeTimeout: Duration
     private var loop: Task<Void, Never>?
-    private var socket: WebSocket?
+    /// The connection from the moment it exists, so 해제 can close it even during the handshake.
+    private var connection: (any CodexConnection)?
 
     init(
         supervisor: CodexSupervisor,
         bridge: CodexBridge,
         log: @escaping @MainActor (String) -> Void,
-        sleep: @escaping @MainActor (Duration) async -> Void = { try? await Task.sleep(for: $0) }
+        sleep: @escaping @MainActor (Duration) async -> Void = { try? await Task.sleep(for: $0) },
+        connect: @escaping @Sendable (String) throws -> any CodexConnection = { try WebSocket(unixPath: $0) },
+        handshakeTimeout: Duration = .seconds(5)
     ) {
         self.supervisor = supervisor
         self.bridge = bridge
         self.log = log
         self.sleep = sleep
+        self.connect = connect
+        self.handshakeTimeout = handshakeTimeout
     }
 
     func start() {
@@ -225,8 +246,8 @@ final class CodexLink {
     func stop() {
         loop?.cancel()
         loop = nil
-        socket?.close()
-        socket = nil
+        connection?.close()
+        connection = nil
         bridge.close()
         supervisor.stop()
         state = .off
@@ -239,20 +260,32 @@ final class CodexLink {
             do {
                 let ownership = try await supervisor.ensure()
                 let path = supervisor.endpoint.socketPath
-                let socket = try await Task.detached { try WebSocket.connect(unixPath: path) }.value
+                let connect = connect
+                let connection = try await Task.detached { try connect(path) }.value
                 guard !Task.isCancelled else {
-                    socket.close()
+                    connection.close()
                     return
                 }
-                self.socket = socket
+                self.connection = connection
+                let timeout = handshakeTimeout
+                do {
+                    try await Task.detached { try connection.handshake(timeout: timeout) }.value
+                } catch {
+                    connection.close()
+                    if self.connection === connection { self.connection = nil }
+                    throw error
+                }
+                // 해제 during the handshake closed the connection already.
+                guard !Task.isCancelled, self.connection === connection else { return }
                 state = .connected(ownership)
                 let started = ContinuousClock.now
-                await session(socket)
-                self.socket = nil
+                await session(connection)
+                // A connection 해제 replaced is not this loop's to clean up.
+                guard !Task.isCancelled, self.connection === connection else { return }
+                self.connection = nil
                 bridge.close()
                 // A connection that lasted resets the backoff; one that drops at once does not.
                 if ContinuousClock.now - started > .seconds(30) { attempt = 0 }
-                guard !Task.isCancelled else { return }
                 state = .retrying("app-server와 연결이 끊겼어요.")
             } catch let error as CodexServerError {
                 guard !Task.isCancelled else { return }
@@ -267,21 +300,24 @@ final class CodexLink {
         }
     }
 
-    /// Reads on its own thread until the socket closes; messages reach the bridge in order.
-    private func session(_ socket: WebSocket) async {
+    /// Reads on its own thread until the connection closes; messages reach the bridge in order while
+    /// it is still the current connection.
+    private func session(_ connection: any CodexConnection) async {
         bridge.open { message in
-            try? socket.send(text: CodexBridge.encode(message))
+            connection.send(text: CodexBridge.encode(message))
         }
-        let bridge = bridge
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
-            Thread.detachNewThread {
-                while let text = try? socket.receive() {
+            Thread.detachNewThread { [weak self] in
+                while let text = try? connection.receive() {
                     guard let message = try? JSONDecoder().decode(JSONValue.self, from: Data(text.utf8)) else { continue }
                     DispatchQueue.main.async {
-                        MainActor.assumeIsolated { _ = bridge.receive(message) }
+                        MainActor.assumeIsolated {
+                            guard let self, self.connection === connection else { return }
+                            _ = self.bridge.receive(message)
+                        }
                     }
                 }
-                socket.close()
+                connection.close()
                 DispatchQueue.main.async { done.resume() }
             }
         }

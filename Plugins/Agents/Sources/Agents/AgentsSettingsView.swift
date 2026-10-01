@@ -46,25 +46,44 @@ final class ClaudeHooksModel {
 }
 
 /// The Codex connection shown in the settings page: off until the user connects, remembered across
-/// launches.
+/// launches. The codex version is read once, when the page first shows it.
 @MainActor
 @Observable
 final class CodexModel {
     static let enabledKey = "codexEnabled"
 
     private(set) var enabled: Bool
-    let install: CodexInstall?
+    let executable: URL?
+    /// Nil until the version check finished.
+    private(set) var install: CodexInstall?
     var state: CodexLink.State = .off
+    @ObservationIgnored private let readVersion: (URL) async -> String?
+    @ObservationIgnored private var checking = false
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let start: () -> Void
     @ObservationIgnored private let stop: () -> Void
 
-    init(defaults: UserDefaults, install: CodexInstall?, start: @escaping () -> Void, stop: @escaping () -> Void) {
+    init(
+        defaults: UserDefaults,
+        executable: URL?,
+        readVersion: @escaping (URL) async -> String? = { await CodexInstall.readVersion($0) },
+        start: @escaping () -> Void,
+        stop: @escaping () -> Void
+    ) {
         self.defaults = defaults
-        self.install = install
+        self.executable = executable
+        self.readVersion = readVersion
         self.start = start
         self.stop = stop
         enabled = defaults.bool(forKey: Self.enabledKey)
+    }
+
+    /// Reads the version of `executable` once; later calls return at once.
+    func checkVersion() async {
+        guard let executable, install == nil, !checking else { return }
+        checking = true
+        let version = await readVersion(executable)
+        install = CodexInstall(executable: executable, version: version)
     }
 
     func connect() {
@@ -135,7 +154,7 @@ struct AgentsSettingsView: View {
         LabeledContent {
             HStack {
                 Button("연결") { codex.connect() }
-                    .disabled(codex.enabled || codex.install == nil)
+                    .disabled(codex.enabled || codex.executable == nil)
                 Button("해제") { codex.disconnect() }
                     .disabled(!codex.enabled)
             }
@@ -151,6 +170,11 @@ struct AgentsSettingsView: View {
                 Text(warning)
                     .foregroundStyle(.orange)
             }
+        } else if let executable = codex.executable {
+            Text("codex 위치: \(executable.path) · 버전을 확인하고 있어요.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .task { await codex.checkVersion() }
         } else {
             Text("codex를 찾지 못했어요. codex를 설치한 뒤 앱을 다시 열어 주세요.")
                 .foregroundStyle(.orange)
