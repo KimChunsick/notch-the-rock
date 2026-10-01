@@ -8,6 +8,9 @@ struct HelloLettering: Shape {
     static let canvas = CGRect(x: 0, y: 0, width: 160, height: 92)
     /// Pen width in canvas units. The stroke keeps at least this much room to every canvas edge.
     static let strokeWidth: CGFloat = 5
+    /// Height of the canvas in points. Until R19 the word filled the takeover, which drew the canvas
+    /// 162 pt tall under a 32 pt notch; the greeting is now half that.
+    static let displayHeight: CGFloat = 81
 
     /// Baseline at y 80, x-height at y 55, loop tops at y 12; the letters lean forward slightly.
     static let stroke: Path = {
@@ -38,17 +41,11 @@ struct HelloLettering: Shape {
 
     /// Scale from canvas units to `rect` when the canvas is fitted into it.
     static func scale(toFit rect: CGRect) -> CGFloat {
-        min(rect.width / canvas.width, rect.height / canvas.height)
+        HelloArtwork.hello.scale(toFit: rect)
     }
 
     /// The stroke with its canvas fitted and centered in `rect`.
     func path(in rect: CGRect) -> Path {
-        let scale = Self.scale(toFit: rect)
-        let transform = CGAffineTransform(
-            a: scale, b: 0, c: 0, d: scale,
-            tx: rect.midX - Self.canvas.midX * scale,
-            ty: rect.midY - Self.canvas.midY * scale
-        )
-        return Self.stroke.applying(transform)
+        HelloArtwork.hello.path(in: rect)
     }
 }
