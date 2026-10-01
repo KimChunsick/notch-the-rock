@@ -36,7 +36,7 @@ import Testing
 
     /// Draws the root view collapsed with `leading` and `trailing` posted as a live activity, until
     /// two captures in a row are the same (the shape springs to the measured wings), and measures
-    /// the ink. Writes `R22-render-<name>-T87.png` (the top of the canvas) when NOTCH_RENDER_DIR is set.
+    /// the ink. Writes `R22-render-<name>-T88.png` (the top of the canvas) when NOTCH_RENDER_DIR is set.
     func measure(_ name: String, notchHeight: CGFloat, leading: some View, trailing: some View) async throws -> Insets {
         let notch = CGSize(width: Self.notchWidth, height: notchHeight)
         let host = NotchHostModel()
@@ -47,7 +47,7 @@ import Testing
         let top = try #require(image.cropping(to: CGRect(x: 0, y: 0, width: image.width, height: Int((notchHeight + 12) * scale))))
         if let directory = ProcessInfo.processInfo.environment["NOTCH_RENDER_DIR"] {
             let data = try #require(NSBitmapImageRep(cgImage: top).representation(using: .png, properties: [:]))
-            try data.write(to: URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent("R22-render-\(name)-T87.png"))
+            try data.write(to: URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent("R22-render-\(name)-T88.png"))
         }
         let insets = try #require(await Task.detached { Self.insets(top, scale: scale, notch: notch) }.value, "no ink in \(name)")
         print("R22 \(name) (notch \(notchHeight) pt): \(insets)")
@@ -186,35 +186,32 @@ import Testing
     }
 
     /// A view 200 x 14 pt at its own size whose 20 pt blank sides shrink with it, as a stretched
-    /// image's do. It is wider than a wing can show, so it is squeezed and placed by its layout box:
-    /// what it draws starts inside the shape, at the box's inset plus its squeezed blank side, and
-    /// the measured blank side of its own size never pulls it out past the shape's edge.
-    @Test func R22__squeezed_wing_is_placed_by_its_layout_box() async throws {
+    /// image's do. It is wider than a wing can show, so it is squeezed, and its ink is measured at
+    /// the size it is placed at: what it draws sits as far from the shape's side edge as from its
+    /// bottom, inside the shape.
+    @Test func R22__squeezed_wing_keeps_side_and_bottom_insets_equal() async throws {
         let notchHeight: CGFloat = 32
         let wide = Color.white.scaleEffect(x: 0.8, y: 1).frame(idealWidth: 200, idealHeight: 14)
         let insets = try await measure("squeezed-\(Int(notchHeight))", notchHeight: notchHeight, leading: wide, trailing: wide)
+        expectEven(insets, "squeezed at \(notchHeight) pt")
         let inset = NotchLayout.activityInset(contentHeight: 14, notchHeight: notchHeight)
-        let side = inset + 20 * (NotchLayout.maxActivityWing - 2 * inset) / 200
-        #expect(abs(insets.leftSide - side) <= 1, "\(insets)")
-        #expect(abs(insets.rightSide - side) <= 1, "\(insets)")
         #expect(abs(insets.leftBottom - inset) <= 1, "\(insets)")
         #expect(abs(insets.rightBottom - inset) <= 1, "\(insets)")
-        #expect(abs(insets.leftHalf - insets.rightHalf) <= 1, "\(insets)")
     }
 
-    /// A view larger than a wing can show (wider than the cap, taller than the notch) is never drawn
-    /// offscreen to measure its ink; one that fits is drawn once. Synchronous on the main actor, so
-    /// no other test's measuring runs between the two counts.
-    @Test(arguments: [
-        (CGSize(width: 4000, height: 4000), false),
-        (CGSize(width: NotchLayout.maxActivityWing + 1, height: 14), false),
-        (CGSize(width: 22, height: 33), false),
-        (CGSize(width: 22, height: 22), true),
-    ])
-    func R22__oversized_wing_is_not_drawn_to_measure(size: CGSize, drawn: Bool) {
-        let before = ActivityInk.drawn
-        let ink = ActivityInk.measure(AnyView(Color.white.frame(width: size.width, height: size.height)), scale: 2, notchHeight: 32)
-        #expect(ActivityInk.drawn - before == (drawn ? 1 : 0), "\(size)")
-        #expect((ink != nil) == drawn, "\(size)")
+    /// A view 4000 x 4000 pt at its own size whose blank border scales with it is drawn only at the
+    /// sizes its wing places it at, never at its own: no taller than the notch, no wider than the
+    /// wing with the blank sides it hangs past the wing's edges. Its ink then keeps equal insets.
+    @Test func R22__oversized_wing_is_drawn_only_at_its_placed_size() async throws {
+        let notchHeight: CGFloat = 32
+        let huge = Color.white.scaleEffect(0.8).frame(idealWidth: 4000, idealHeight: 4000)
+        // Synchronous on the main actor, so no other test's measuring runs before the sizes are read.
+        let ink = try #require(ActivityInk.measure(AnyView(huge), scale: 2, notchHeight: notchHeight))
+        let drawn = ActivityInk.drawn
+        #expect((1...2).contains(drawn.count) && drawn.last == ink.size, "drawn \(drawn), ink \(ink)")
+        #expect(drawn.allSatisfy { $0.height <= notchHeight && $0.width <= 2 * NotchLayout.maxActivityWing }, "drawn \(drawn)")
+        print("R22 oversized: ideal \(ink.ideal), drawn at \(drawn), margins \(ink.margins)")
+        let insets = try await measure("oversized-\(Int(notchHeight))", notchHeight: notchHeight, leading: huge, trailing: huge)
+        expectEven(insets, "oversized at \(notchHeight) pt")
     }
 }

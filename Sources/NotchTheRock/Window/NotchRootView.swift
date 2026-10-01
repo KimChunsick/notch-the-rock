@@ -198,13 +198,13 @@ private struct AttentionGlow: View {
 /// wider one needs, so the shape stays centred on the camera. Each view's layout box is centred
 /// vertically, as before; its ink (`ActivityInk`) moves the inset by the blank space the box keeps
 /// beside and below what it draws: a text's side bearings and the room under its baseline. A view
-/// squeezed below its own size is placed by its layout box instead, as its blank space shrinks with
-/// it. Its size is always its own, the camera and both wings without the shoulders, whatever it is
-/// offered: the root measures it for the shape's width.
+/// squeezed below its own size keeps the size its ink was measured at, so the blank space counted
+/// is what it keeps there. Its size is always its own, the camera and both wings without the
+/// shoulders, whatever it is offered: the root measures it for the shape's width.
 private struct ActivityWings: Layout {
     let notch: CGSize
-    /// The leading and trailing views' ink, as measured at their own size; nil or missing counts
-    /// the whole box as drawn.
+    /// The leading and trailing views' ink, as measured at the size each is placed at; nil or
+    /// missing counts the whole box as drawn.
     var ink: [ActivityInk?] = []
 
     /// Where a view goes in its wing: its size, the visible inset beside and below it, and the
@@ -233,26 +233,34 @@ private struct ActivityWings: Layout {
         }
     }
 
-    /// A view's own size, no taller than the notch and no wider than the widest wing leaves room
-    /// for, and its inset. Its ink counts only when the view is placed at the very size it was
-    /// measured at; squeezed, its blank space would not be what was measured, so its box counts.
+    /// A view's place and inset: at the size its ink was measured at, when that ink was measured
+    /// from the view's own size as it is now; otherwise its box counts as drawn.
     private func fit(_ subview: LayoutSubview, at index: Int) -> Fit {
         let ideal = subview.sizeThatFits(.unspecified)
-        let box = fit(ideal, margins: EdgeInsets(), at: index)
-        guard index < ink.count, let measured = ink[index] else { return box }
-        let drawn = fit(ideal, margins: measured.margins, at: index)
-        let same = abs(drawn.size.width - measured.size.width) <= 0.5 && abs(drawn.size.height - measured.size.height) <= 0.5
-        return same ? drawn : box
+        guard index < ink.count, let measured = ink[index],
+              abs(measured.ideal.width - ideal.width) <= 0.5, abs(measured.ideal.height - ideal.height) <= 0.5
+        else { return fit(Self.placedSize(ideal: ideal, margins: EdgeInsets(), notchHeight: notch.height), margins: EdgeInsets(), at: index) }
+        return fit(measured.size, margins: measured.margins, at: index)
     }
 
-    /// `fit` with the blank space `margins` keeps around the ink.
-    private func fit(_ ideal: CGSize, margins: EdgeInsets, at index: Int) -> Fit {
-        let height = min(ideal.height, notch.height)
-        let outer = index == 0 ? margins.leading : margins.trailing
-        let inner = index == 0 ? margins.trailing : margins.leading
-        let inset = NotchLayout.activityInset(contentHeight: height, notchHeight: notch.height) + margins.bottom
-        let room = NotchLayout.maxActivityWing - 2 * inset + outer + inner
-        return Fit(size: CGSize(width: min(ideal.width, room), height: height), inset: inset, outer: outer, inner: inner)
+    /// A view placed at `size` whose box keeps `margins` blank around its ink.
+    private func fit(_ size: CGSize, margins: EdgeInsets, at index: Int) -> Fit {
+        Fit(
+            size: size,
+            inset: NotchLayout.activityInset(contentHeight: size.height, notchHeight: notch.height) + margins.bottom,
+            outer: index == 0 ? margins.leading : margins.trailing,
+            inner: index == 0 ? margins.trailing : margins.leading
+        )
+    }
+
+    /// The size a view whose own size is `ideal` is placed at when its box keeps `margins` blank
+    /// around its ink: no taller than the notch and no wider than the widest wing leaves room for.
+    /// The blank sides may hang past the wing's edges, so the box can be wider than the wing.
+    static func placedSize(ideal: CGSize, margins: EdgeInsets, notchHeight: CGFloat) -> CGSize {
+        let height = min(ideal.height, notchHeight)
+        let inset = NotchLayout.activityInset(contentHeight: height, notchHeight: notchHeight) + margins.bottom
+        let room = NotchLayout.maxActivityWing - 2 * inset + margins.leading + margins.trailing
+        return CGSize(width: min(ideal.width, room), height: height)
     }
 }
 
@@ -269,33 +277,54 @@ private struct ActivityStyle: ViewModifier {
 /// The blank space a live activity view's layout box keeps around what it draws, beside and
 /// below: text and SF Symbols carry side bearings and the room under the baseline inside their
 /// boxes, and a view's alignment guides do not tell them (a symbol's text baseline also reaches
-/// the art it sits in). The view is drawn once offscreen at its own size and the margins are read
-/// off its pixels; any pixel at least 5 % opaque counts, so a faint fill does too. A view larger
-/// than a wing can show is squeezed anyway, so it is never drawn: its size is laid out first.
+/// the art it sits in). The view is drawn offscreen at the size its wing places it at, never at its
+/// own when that is larger, and the margins are read off its pixels; any pixel at least 5 % opaque
+/// counts, so a faint fill does too.
 struct ActivityInk: Equatable {
-    /// The view's own size, as laid out, that it was drawn at.
+    /// The view's own size, laid out without drawing it, that its placed size comes from.
+    var ideal: CGSize
+    /// The size it is placed at and was drawn at.
     var size: CGSize
-    /// Leading, trailing and bottom blank space; the top is not used, so it stays 0.
+    /// Leading, trailing and bottom blank space at `size`; the top is not used, so it stays 0.
     var margins: EdgeInsets
 
-    /// The most pixels a view is drawn with, 256 KB of RGBA. A wing's 78 pt by a notch's height
-    /// stays far below it even at 3x; it bounds a display scale out of the ordinary.
+    /// The most pixels a view is drawn with, 256 KB of RGBA. A placed box is at most twice a wing's
+    /// 78 pt by a notch's height, which stays below it even at 3x; it bounds a display scale out of
+    /// the ordinary.
     static let pixelBudget: CGFloat = 65_536
-    /// How many views were drawn to measure them, so tests can tell an oversized one was skipped.
-    @MainActor static private(set) var drawn = 0
+    /// The sizes the last measuring drew its view at, so tests can tell none was its own size.
+    @MainActor static private(set) var drawn: [CGSize] = []
 
-    /// Nil when the view is wider than a wing can show, taller than the notch or beyond the pixel
-    /// budget, checked before anything is drawn, or when the renderer sees nothing (an AppKit-backed
-    /// view, say): the box counts as drawn.
+    /// The view's ink at the size its wing places it at. Its blank space decides that size, so it is
+    /// drawn first at the size its box alone leaves room for and, when the blank space found there
+    /// moves the size, once more at the new size; that second measuring is the one kept, as the
+    /// size it gives moves far less. Nil when the view draws nothing (an AppKit-backed view the
+    /// renderer cannot see, say) or its box is beyond the pixel budget: the box counts as drawn.
     @MainActor static func measure(_ view: AnyView, scale: CGFloat, notchHeight: CGFloat) -> ActivityInk? {
-        let renderer = ImageRenderer(content: view.modifier(ActivityStyle()))
+        let styled = view.modifier(ActivityStyle())
+        drawn = []
+        // Lays the view out without drawing it, at the display's scale as the wing does (a symbol's
+        // size snaps to its pixels): the closure is handed the size and never draws.
+        let layout = ImageRenderer(content: styled)
+        layout.scale = scale
+        var ideal = CGSize.zero
+        layout.render { laidOut, _ in ideal = laidOut }
+        var size = ActivityWings.placedSize(ideal: ideal, margins: EdgeInsets(), notchHeight: notchHeight)
+        guard var margins = blankSpace(of: styled, at: size, scale: scale) else { return nil }
+        let placed = ActivityWings.placedSize(ideal: ideal, margins: margins, notchHeight: notchHeight)
+        if abs(placed.width - size.width) > 0.5, let again = blankSpace(of: styled, at: placed, scale: scale) {
+            (size, margins) = (placed, again)
+        }
+        return ActivityInk(ideal: ideal, size: size, margins: margins)
+    }
+
+    /// The blank space around what `view` draws when its wing places it at `size`: offered that
+    /// size and put at its top-leading corner, so anything it draws past the box is cut off.
+    @MainActor private static func blankSpace(of view: some View, at size: CGSize, scale: CGFloat) -> EdgeInsets? {
+        guard size.width * size.height * scale * scale <= pixelBudget else { return nil }
+        let renderer = ImageRenderer(content: view.frame(width: size.width, height: size.height, alignment: .topLeading))
         renderer.scale = scale
-        // Lays the view out without drawing it: the closure is handed the size and never draws.
-        var size = CGSize.zero
-        renderer.render { laidOut, _ in size = laidOut }
-        guard size.width <= NotchLayout.maxActivityWing, size.height <= notchHeight,
-              size.width * size.height * scale * scale <= pixelBudget else { return nil }
-        drawn += 1
+        drawn.append(size)
         guard let image = renderer.cgImage else { return nil }
         let width = image.width, height = image.height
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
@@ -313,14 +342,11 @@ struct ActivityInk: Equatable {
             }
         }
         guard maxX >= 0 else { return nil }
-        return ActivityInk(
-            size: size,
-            margins: EdgeInsets(
-                top: 0,
-                leading: CGFloat(minX) / scale,
-                bottom: CGFloat(height - 1 - maxY) / scale,
-                trailing: CGFloat(width - 1 - maxX) / scale
-            )
+        return EdgeInsets(
+            top: 0,
+            leading: CGFloat(minX) / scale,
+            bottom: CGFloat(height - 1 - maxY) / scale,
+            trailing: CGFloat(width - 1 - maxX) / scale
         )
     }
 }
