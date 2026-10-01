@@ -18,6 +18,8 @@ import Testing
     /// Blue like the menu bar around the shape, so its edges stand out from the black.
     static let backdrop = Color(red: 0, green: 0.2, blue: 1)
     static let margin: CGFloat = 20
+    /// The margin the host keeps between a screen and the shape's left, right and bottom edges (D-47).
+    nonisolated static let edgePadding: CGFloat = 20
 
     struct Gaps: CustomStringConvertible {
         var content: CGSize
@@ -139,7 +141,7 @@ import Testing
 
     func expectEqualPadding(_ gaps: Gaps, _ name: String) {
         for (side, gap) in [("left", gaps.left), ("right", gaps.right), ("bottom", gaps.bottom)] {
-            #expect(abs(gap - NotchSizing.padding) <= 2, "\(name) \(side) gap \(gap) pt: \(gaps)")
+            #expect(abs(gap - Self.edgePadding) <= 2, "\(name) \(side) gap \(gap) pt: \(gaps)")
         }
     }
 
@@ -165,8 +167,8 @@ import Testing
     /// camera: the back control keeps the padding on the left, the view keeps it at the bottom, and
     /// the view sits in the middle of the shape within 2 pt.
     func expectCentredScreen(_ gaps: Gaps, _ name: String) {
-        #expect(abs(gaps.left - NotchSizing.padding) <= 2, "\(name) left gap \(gaps.left) pt: \(gaps)")
-        #expect(abs(gaps.bottom - NotchSizing.padding) <= 2, "\(name) bottom gap \(gaps.bottom) pt: \(gaps)")
+        #expect(abs(gaps.left - Self.edgePadding) <= 2, "\(name) left gap \(gaps.left) pt: \(gaps)")
+        #expect(abs(gaps.bottom - Self.edgePadding) <= 2, "\(name) bottom gap \(gaps.bottom) pt: \(gaps)")
         let centred = (gaps.shape.width - gaps.content.width) / 2 - NotchLayout.openShoulder
         #expect(abs(gaps.right - centred) <= 2, "\(name) not centred under the camera: right gap \(gaps.right) pt, centred \(centred) pt: \(gaps)")
     }
@@ -248,7 +250,7 @@ import Testing
         let gaps = try await measureScreen("fixed", "고정된 화면이에요", hasSettings: false, Color.white.frame(width: 160, height: 60))
         expectCentredScreen(gaps, "fixed")
         #expect(abs(gaps.content.width - 160) <= 0.5, "the fixed view took the offer: \(gaps)")
-        #expect(gaps.right > NotchSizing.padding + 2, "the band is not wider than the fixed view: \(gaps)")
+        #expect(gaps.right > Self.edgePadding + 2, "the band is not wider than the fixed view: \(gaps)")
     }
 
     /// Under the band with a narrow view that fills what it is offered, the shape is exactly as wide

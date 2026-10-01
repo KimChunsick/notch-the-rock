@@ -9,7 +9,7 @@ import SwiftUI
 /// the width between the shape's paddings (`contentWidth(filling:)`), so a screen that fills it keeps
 /// the same padding on every side; one that keeps its own width stays centred.
 enum NotchSizing {
-    static let padding: CGFloat = 16
+    static let padding: CGFloat = 20
     static let maxContentSize = CGSize(width: HomeGrid.size.width, height: 400)
     static var maxWidth: CGFloat { maxContentSize.width + 2 * (NotchLayout.openShoulder + padding) }
 
