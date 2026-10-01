@@ -79,7 +79,7 @@ struct NotchRootView: View {
                 .onGeometryChange(for: CGFloat.self) { ($0.size.width - notchSize.width) / 2 } action: { activityWing = $0 }
                 // Each post (Battery's next percentage, say) is drawn once offscreen to find its ink.
                 .onChange(of: posted.order, initial: true) {
-                    activityInk = [posted.activity.leading, posted.activity.trailing].map { ActivityInk.measure($0, scale: displayScale) }
+                    activityInk = [posted.activity.leading, posted.activity.trailing].map { ActivityInk.measure($0, scale: displayScale, notchHeight: notchSize.height) }
                 }
                 // Centred on the camera while the shape springs to the measured wings around it.
                 .frame(maxWidth: .infinity)
@@ -197,9 +197,10 @@ private struct AttentionGlow: View {
 /// side edge as from its bottom, and at least as far from the camera; both wings are as wide as the
 /// wider one needs, so the shape stays centred on the camera. Each view's layout box is centred
 /// vertically, as before; its ink (`ActivityInk`) moves the inset by the blank space the box keeps
-/// beside and below what it draws: a text's side bearings and the room under its baseline. Its size
-/// is always its own, the camera and both wings without the shoulders, whatever it is offered: the
-/// root measures it for the shape's width.
+/// beside and below what it draws: a text's side bearings and the room under its baseline. A view
+/// squeezed below its own size is placed by its layout box instead, as its blank space shrinks with
+/// it. Its size is always its own, the camera and both wings without the shoulders, whatever it is
+/// offered: the root measures it for the shape's width.
 private struct ActivityWings: Layout {
     let notch: CGSize
     /// The leading and trailing views' ink, as measured at their own size; nil or missing counts
@@ -233,15 +234,20 @@ private struct ActivityWings: Layout {
     }
 
     /// A view's own size, no taller than the notch and no wider than the widest wing leaves room
-    /// for, and its inset. Its ink counts only when it was measured at that very size.
+    /// for, and its inset. Its ink counts only when the view is placed at the very size it was
+    /// measured at; squeezed, its blank space would not be what was measured, so its box counts.
     private func fit(_ subview: LayoutSubview, at index: Int) -> Fit {
         let ideal = subview.sizeThatFits(.unspecified)
+        let box = fit(ideal, margins: EdgeInsets(), at: index)
+        guard index < ink.count, let measured = ink[index] else { return box }
+        let drawn = fit(ideal, margins: measured.margins, at: index)
+        let same = abs(drawn.size.width - measured.size.width) <= 0.5 && abs(drawn.size.height - measured.size.height) <= 0.5
+        return same ? drawn : box
+    }
+
+    /// `fit` with the blank space `margins` keeps around the ink.
+    private func fit(_ ideal: CGSize, margins: EdgeInsets, at index: Int) -> Fit {
         let height = min(ideal.height, notch.height)
-        var margins = EdgeInsets()
-        if index < ink.count, let measured = ink[index], height == ideal.height,
-           abs(measured.size.width - ideal.width) <= 1, abs(measured.size.height - ideal.height) <= 1 {
-            margins = measured.margins
-        }
         let outer = index == 0 ? margins.leading : margins.trailing
         let inner = index == 0 ? margins.trailing : margins.leading
         let inset = NotchLayout.activityInset(contentHeight: height, notchHeight: notch.height) + margins.bottom
@@ -264,17 +270,32 @@ private struct ActivityStyle: ViewModifier {
 /// below: text and SF Symbols carry side bearings and the room under the baseline inside their
 /// boxes, and a view's alignment guides do not tell them (a symbol's text baseline also reaches
 /// the art it sits in). The view is drawn once offscreen at its own size and the margins are read
-/// off its pixels; any pixel at least 5 % opaque counts, so a faint fill does too.
-private struct ActivityInk: Equatable {
-    /// The view's own size it was drawn at.
+/// off its pixels; any pixel at least 5 % opaque counts, so a faint fill does too. A view larger
+/// than a wing can show is squeezed anyway, so it is never drawn: its size is laid out first.
+struct ActivityInk: Equatable {
+    /// The view's own size, as laid out, that it was drawn at.
     var size: CGSize
     /// Leading, trailing and bottom blank space; the top is not used, so it stays 0.
     var margins: EdgeInsets
 
-    /// Nil when the renderer sees nothing (an AppKit-backed view, say): the box counts as drawn.
-    @MainActor static func measure(_ view: AnyView, scale: CGFloat) -> ActivityInk? {
+    /// The most pixels a view is drawn with, 256 KB of RGBA. A wing's 78 pt by a notch's height
+    /// stays far below it even at 3x; it bounds a display scale out of the ordinary.
+    static let pixelBudget: CGFloat = 65_536
+    /// How many views were drawn to measure them, so tests can tell an oversized one was skipped.
+    @MainActor static private(set) var drawn = 0
+
+    /// Nil when the view is wider than a wing can show, taller than the notch or beyond the pixel
+    /// budget, checked before anything is drawn, or when the renderer sees nothing (an AppKit-backed
+    /// view, say): the box counts as drawn.
+    @MainActor static func measure(_ view: AnyView, scale: CGFloat, notchHeight: CGFloat) -> ActivityInk? {
         let renderer = ImageRenderer(content: view.modifier(ActivityStyle()))
         renderer.scale = scale
+        // Lays the view out without drawing it: the closure is handed the size and never draws.
+        var size = CGSize.zero
+        renderer.render { laidOut, _ in size = laidOut }
+        guard size.width <= NotchLayout.maxActivityWing, size.height <= notchHeight,
+              size.width * size.height * scale * scale <= pixelBudget else { return nil }
+        drawn += 1
         guard let image = renderer.cgImage else { return nil }
         let width = image.width, height = image.height
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
@@ -293,7 +314,7 @@ private struct ActivityInk: Equatable {
         }
         guard maxX >= 0 else { return nil }
         return ActivityInk(
-            size: CGSize(width: CGFloat(width) / scale, height: CGFloat(height) / scale),
+            size: size,
             margins: EdgeInsets(
                 top: 0,
                 leading: CGFloat(minX) / scale,
