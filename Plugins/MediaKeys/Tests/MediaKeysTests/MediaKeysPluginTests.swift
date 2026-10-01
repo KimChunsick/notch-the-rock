@@ -103,14 +103,19 @@ private final class FakeBrightness: BrightnessControl {
 private final class FakeTap: KeyEventTap {
     var refuses = false
     private(set) var handler: (@MainActor (SystemDefinedEvent) -> Bool)?
+    private var interrupted: (@MainActor () -> Void)?
     private(set) var installs = 0
     private(set) var removals = 0
     var isInstalled: Bool { handler != nil }
 
-    func install(handler: @escaping @MainActor (SystemDefinedEvent) -> Bool) -> Bool {
+    func install(
+        handler: @escaping @MainActor (SystemDefinedEvent) -> Bool,
+        interrupted: @escaping @MainActor () -> Void
+    ) -> Bool {
         installs += 1
         guard !refuses else { return false }
         self.handler = handler
+        self.interrupted = interrupted
         return true
     }
 
@@ -118,6 +123,13 @@ private final class FakeTap: KeyEventTap {
         guard handler != nil else { return }
         removals += 1
         handler = nil
+        interrupted = nil
+    }
+
+    /// The system turned the tap off for a while and on again: whatever happened meanwhile went to
+    /// the system.
+    func interrupt() {
+        interrupted?()
     }
 }
 
@@ -530,6 +542,96 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     #expect(consumed == [true, false, false, false, true, false, false, false, false, true, true, true])
     #expect(h.volume.writes == ["level 0.5625", "level 0.625", "mute true", "mute false"])
     #expect(h.brightness.writes == ["brightness 0.5625", "brightness 0.5625", "brightness 0.625"])
+}
+
+@MainActor
+@Test func R12__a_press_made_while_the_tap_was_off_stays_with_the_system() throws {
+    let cases: [(key: Int, volumeWrites: [String], brightnessWrites: [String], huds: [String])] = [
+        (0, ["level 0.5625", "level 0.625", "level 0.6875"], [], [
+            "speaker.wave.2.fill 볼륨 0.5625 56%",
+            "speaker.wave.2.fill 볼륨 0.625 63%",
+            "speaker.wave.3.fill 볼륨 0.6875 69%",
+        ]),
+        (7, ["mute true", "mute false"], [], [
+            "speaker.slash.fill 음소거 0.0 -",
+            "speaker.wave.2.fill 볼륨 0.5 50%",
+        ]),
+        (2, [], ["brightness 0.5625", "brightness 0.625", "brightness 0.6875"], [
+            "sun.max.fill 밝기 0.5625 56%",
+            "sun.max.fill 밝기 0.625 63%",
+            "sun.max.fill 밝기 0.6875 69%",
+        ]),
+    ]
+    for c in cases {
+        let h = try Harness()
+        h.plugin.activate()
+
+        var consumed = [h.send(c.key, down)]
+        // The tap is off while the key is released and pressed again: both reach the system.
+        h.tap.interrupt()
+        // Back on, the repeats and the release of that second press.
+        consumed += [h.send(c.key, down, repeat: true), h.send(c.key, down, repeat: true), h.send(c.key, up)]
+        // The press after it is the plugin's.
+        consumed += [h.send(c.key, down), h.send(c.key, down, repeat: true), h.send(c.key, up)]
+
+        #expect(consumed == [true, false, false, false, true, true, true], "key \(c.key)")
+        #expect(h.volume.writes == c.volumeWrites, "key \(c.key)")
+        #expect(h.brightness.writes == c.brightnessWrites, "key \(c.key)")
+        #expect(h.host.huds == c.huds, "key \(c.key)")
+    }
+}
+
+@MainActor
+@Test func R12__an_interruption_hands_every_open_press_to_the_system() throws {
+    let h = try Harness()
+    h.plugin.activate()
+
+    // Volume up and brightness down held together, then mute pressed: three open presses.
+    var consumed = [
+        h.send(0, down), h.send(3, down),
+        h.send(0, down, repeat: true), h.send(3, down, repeat: true),
+        h.send(7, down),
+    ]
+    h.tap.interrupt()
+    // The rest of all three presses goes to the system untouched.
+    consumed += [
+        h.send(0, down, repeat: true), h.send(3, down, repeat: true), h.send(7, down, repeat: true),
+        h.send(0, up), h.send(3, up), h.send(7, up),
+    ]
+    // A new key-down starts a press of the plugin's.
+    consumed += [h.send(0, down), h.send(0, down, repeat: true), h.send(0, up)]
+
+    #expect(consumed == [true, true, true, true, true, false, false, false, false, false, false, true, true, true])
+    #expect(h.volume.writes == ["level 0.5625", "level 0.625", "mute true", "mute false", "level 0.6875", "level 0.75"])
+    #expect(h.brightness.writes == ["brightness 0.4375", "brightness 0.375"])
+    #expect(h.host.huds == [
+        "speaker.wave.2.fill 볼륨 0.5625 56%",
+        "sun.max.fill 밝기 0.4375 44%",
+        "speaker.wave.2.fill 볼륨 0.625 63%",
+        "sun.max.fill 밝기 0.375 38%",
+        "speaker.slash.fill 음소거 0.0 -",
+        "speaker.wave.3.fill 볼륨 0.6875 69%",
+        "speaker.wave.3.fill 볼륨 0.75 75%",
+    ])
+}
+
+@MainActor
+@Test func R12__a_press_open_across_deactivate_and_activate_stays_with_the_system() throws {
+    let h = try Harness()
+    h.plugin.activate()
+
+    var consumed = [h.send(0, down), h.send(7, down), h.send(2, down)]
+    h.plugin.deactivate()
+    h.plugin.activate()
+    consumed += [
+        h.send(0, down, repeat: true), h.send(7, down, repeat: true), h.send(2, down, repeat: true),
+        h.send(0, up), h.send(7, up), h.send(2, up),
+    ]
+    consumed += [h.send(1, down), h.send(1, down, repeat: true), h.send(1, up)]
+
+    #expect(consumed == [true, true, true, false, false, false, false, false, false, true, true, true])
+    #expect(h.volume.writes == ["level 0.5625", "mute true", "level 0.5", "level 0.4375"])
+    #expect(h.brightness.writes == ["brightness 0.5625"])
 }
 
 /// The labels of every slider under `element`, in order.

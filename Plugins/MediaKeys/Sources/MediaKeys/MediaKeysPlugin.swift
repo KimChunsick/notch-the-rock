@@ -7,8 +7,10 @@ import SwiftUI
 ///
 /// A key press is decided once, at its key-down: when the plugin handles it, its auto-repeats and
 /// its release are the plugin's as well; when the key-down goes to the system, the rest of that
-/// press goes there untouched, so the system never sees a release without its press or the other
-/// way round.
+/// press goes there untouched, so while the tap sees every event the system never gets a release
+/// without its press or the other way round. When the plugin loses sight of the keys (it is
+/// deactivated, or the system turns the tap off for a while), the rest of every open press goes to
+/// the system: the plugin can no longer tell which side a key-down made meanwhile went to.
 ///
 /// The key tap needs the Accessibility permission. Without it the keys stay with the system, the
 /// notch shows the guidance once per activation, and the plugin checks every
@@ -38,7 +40,8 @@ public final class MediaKeysPlugin: NotchPlugin {
     private var permissionTask: Task<Void, Never>?
     /// Keys held down in a press whose key-down the plugin handled: their repeats and release are
     /// consumed too. A repeat or release of any other press (its key-down went to the system, or came
-    /// before the tap) goes to the system untouched.
+    /// before the tap) goes to the system untouched. Emptied whenever the tap stops delivering
+    /// events, so a new or resumed tap starts with no open press.
     private var handledKeys: Set<MediaKey> = []
 
     public convenience init(context: NotchContext) {
@@ -166,14 +169,22 @@ public final class MediaKeysPlugin: NotchPlugin {
         }
     }
 
+    /// The tap missed events for a while: a held key may have been released and pressed again, and
+    /// that key-down went to the system. No open press is surely the plugin's any more, so their
+    /// repeats and releases go to the system; the next key-down starts a press as usual.
+    private func deliveryInterrupted() {
+        handledKeys.removeAll()
+    }
+
     private func showHUD(_ hud: HUD) {
         context.showHUD(hud, duration: Self.hudDuration)
     }
 
     private func installTap() {
-        let installed = tap.install { [weak self] event in
-            self?.handle(event) ?? false
-        }
+        let installed = tap.install(
+            handler: { [weak self] event in self?.handle(event) ?? false },
+            interrupted: { [weak self] in self?.deliveryInterrupted() }
+        )
         if !installed {
             // Retrying would fail the same way until something changes; the next activation tries again.
             context.log.error("The system refused the key event tap; the volume and brightness keys stay with the system.")

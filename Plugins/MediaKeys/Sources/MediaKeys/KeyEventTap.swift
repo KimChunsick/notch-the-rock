@@ -7,7 +7,12 @@ import CoreGraphics
 protocol KeyEventTap: AnyObject {
     /// Starts delivering events to `handler`, which returns true for an event it consumed. Returns
     /// false when the system refused the tap (the app lacks the Accessibility permission).
-    func install(handler: @escaping @MainActor (SystemDefinedEvent) -> Bool) -> Bool
+    /// `interrupted` runs when the system stopped delivering events for a while, before delivery
+    /// resumes: key events of that gap reached the system without passing `handler`.
+    func install(
+        handler: @escaping @MainActor (SystemDefinedEvent) -> Bool,
+        interrupted: @escaping @MainActor () -> Void
+    ) -> Bool
     /// Stops delivering events. Does nothing when no tap is installed.
     func remove()
 }
@@ -19,8 +24,12 @@ final class SystemDefinedEventTap: KeyEventTap {
     private var port: CFMachPort?
     private var source: CFRunLoopSource?
     private var handler: (@MainActor (SystemDefinedEvent) -> Bool)?
+    private var interrupted: (@MainActor () -> Void)?
 
-    func install(handler: @escaping @MainActor (SystemDefinedEvent) -> Bool) -> Bool {
+    func install(
+        handler: @escaping @MainActor (SystemDefinedEvent) -> Bool,
+        interrupted: @escaping @MainActor () -> Void
+    ) -> Bool {
         remove()
         let callback: CGEventTapCallBack = { _, type, event, userInfo in
             guard let userInfo else { return Unmanaged.passUnretained(event) }
@@ -44,6 +53,7 @@ final class SystemDefinedEventTap: KeyEventTap {
         self.port = port
         self.source = source
         self.handler = handler
+        self.interrupted = interrupted
         return true
     }
 
@@ -58,12 +68,14 @@ final class SystemDefinedEventTap: KeyEventTap {
         port = nil
         source = nil
         handler = nil
+        interrupted = nil
     }
 
     /// Whether to drop the event. The system disables a tap whose callback took too long or on
-    /// some user input; it is enabled again right away.
+    /// some user input; the plugin hears of the gap first, then the tap is enabled again right away.
     private func receive(_ type: CGEventType, _ event: CGEvent) -> Bool {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            interrupted?()
             if let port { CGEvent.tapEnable(tap: port, enable: true) }
             return false
         }
