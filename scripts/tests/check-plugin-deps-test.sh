@@ -5,7 +5,8 @@
 # backticks, several statements on a line), the `#if` condition that enables it (canImport, a target
 # define, the language mode, a debug or a release build) or the text around it. Text that only looks
 # like an import, in comments and in string or regex literals, is none, and a plugin that does not
-# build fails. The repository's Plugins/ pass, and the check leaves them untouched.
+# build fails. A plugin reaches no module that another plugin built. The repository's Plugins/ pass,
+# and the check leaves them untouched.
 #
 # Every checker run builds NotchKit in release and in debug, so all fixtures sit in one plugins folder
 # that the checker reads once. A fixture reaches a fake NotchTheRock (standing for the app) or Other
@@ -242,6 +243,13 @@ write_fixture CanImportFlags "" "" $'#if canImport(NotchKit)\nimport NotchTheRoc
 write_fixture HostBridge "" "" $'#if HOST_BRIDGE\nimport NotchTheRock\n#endif' \
     ", swiftSettings: [.define(\"HOST_BRIDGE\"), .unsafeFlags([\"-I\", \"$FAKE\"])]"
 write_fixture SwiftFive "" "" $'#if swift(<6)\nimport NotchTheRock\n#endif' "$REACH_FAKE" $',\n    swiftLanguageModes: [.v5]'
+# Review round 030: Earlier builds the module Earlier. Later, checked after it, imports Earlier in its
+# library and declares an unbuilt test target of that name (the fifth argument closes target Later
+# and adds the test target), but depends on nothing that builds it.
+write_fixture Earlier "" "" ""
+write_fixture Later "" "" 'import Earlier' '), .testTarget(name: "Earlier"'
+mkdir -p "$PLUGINS/Later/Tests/Earlier"
+printf 'let unused = 1\n' >"$PLUGINS/Later/Tests/Earlier/Earlier.swift"
 
 OUTPUT=$("$ROOT/scripts/check-plugin-deps.sh" "$PLUGINS" 2>&1)
 STATUS=$?
@@ -261,7 +269,7 @@ R03__check_plugin_deps_accepts_clean_plugins() {
     for plugin in Good Quoted Clean; do
         ! reported "$plugin" "" || fail "the clean plugin $plugin was reported"
     done
-    contains "$OUTPUT" "플러그인 14개 중 11개가 검사를 통과하지 못했어요" || fail "not exactly the 11 failing fixtures failed"
+    contains "$OUTPUT" "플러그인 16개 중 12개가 검사를 통과하지 못했어요" || fail "not exactly the 12 failing fixtures failed"
 }
 
 R03__check_plugin_deps_rejects_app_and_plugin_dependencies() {
@@ -323,6 +331,17 @@ R03__check_plugin_deps_sees_imports_the_build_settings_enable() {
     loads SwiftFive SwiftFive "release, debug" NotchTheRock || fail "the import behind swift(<6) in Swift 5 mode is not in the trace"
 }
 
+# Review round 030: every plugin builds in a scratch folder that holds only NotchKit and its own build.
+# In the folder the plugins once shared, Later found the module Earlier that the Earlier plugin had
+# built there and passed, because the declared test target made the name its own. In its own folder
+# the import of Earlier does not build, so Later fails as a build failure.
+R03__check_plugin_deps_builds_each_plugin_on_its_own() {
+    current=${FUNCNAME[0]}
+    ! reported Earlier "" || fail "the clean plugin Earlier was reported"
+    reported Later "release 빌드에 실패해서" || fail "Later passed with the module that the Earlier plugin built"
+    contains "$OUTPUT" "no such module 'Earlier'" || fail "the build error of Later does not name the module Earlier"
+}
+
 R03__check_plugin_deps_accepts_clean_plugins
 R03__check_plugin_deps_rejects_app_and_plugin_dependencies
 R03__check_plugin_deps_ignores_imports_in_comments_and_strings
@@ -330,6 +349,7 @@ R03__check_plugin_deps_rejects_every_import_form
 R03__check_plugin_deps_ignores_imports_in_regex_literals
 R03__check_plugin_deps_fails_on_a_file_the_compiler_cannot_parse
 R03__check_plugin_deps_sees_imports_the_build_settings_enable
+R03__check_plugin_deps_builds_each_plugin_on_its_own
 
 if [ "$failures" -ne 0 ]; then
     printf '%d check(s) failed\n' "$failures"
