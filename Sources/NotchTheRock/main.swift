@@ -64,7 +64,7 @@ MainActor.assumeIsolated {
     let host = NotchHostModel(pinnedExpansion: pinnedExpansion)
     let catalog = PluginCatalog(host: host, locations: .standard)
     let settings = SettingsWindowController(catalog: catalog)
-    let window = NotchWindowController(host: host, openSettings: { settings.show() })
+    let window = NotchWindowController(host: host, openSettings: { settings.show(pluginID: $0) })
     let links = LinkRouter(target: host)
     let delegate = AppDelegate(showSettings: { settings.show() }, links: links)
     let application = NSApplication.shared

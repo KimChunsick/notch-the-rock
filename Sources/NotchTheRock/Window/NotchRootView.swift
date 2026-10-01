@@ -12,7 +12,8 @@ import SwiftUI
 struct NotchRootView: View {
     let host: NotchHostModel
     let notchSize: CGSize
-    let openSettings: @MainActor () -> Void
+    /// Opens the Settings window: on the plugin's page for a plugin's id, as it was for nil.
+    let openSettings: @MainActor (_ pluginID: String?) -> Void
     /// Told the metrics the shape is heading to whenever they change, so pointer tracking follows it.
     var metricsChanged: @MainActor (NotchLayout.Metrics) -> Void = { _ in }
     /// Told the shape as drawn, every frame while it springs toward new metrics.
@@ -38,26 +39,39 @@ struct NotchRootView: View {
 
     var body: some View {
         let state = host.state
-        let showsHomeBand = state == .expanded && host.screen == .home
+        let detail = state == .expanded ? shownPlugin : nil
+        let bandWidth: CGFloat = if state != .expanded {
+            0
+        } else if let detail {
+            PluginBand.minimumWidth(notch: notchSize, plugin: detail)
+        } else {
+            BandLayout.minimumWidth(notch: notchSize, leading: HomeChrome.editWidth, trailing: HomeChrome.gearWidth)
+        }
         let metrics = NotchLayout.metrics(
             for: state,
             notch: notchSize,
             activityWing: state == .hud ? hudWing : host.liveActivity == nil ? 0 : activityWing,
             content: contentSize,
-            minWidth: showsHomeBand ? BandLayout.minimumWidth(notch: notchSize, leading: HomeChrome.editWidth, trailing: HomeChrome.gearWidth) : 0
+            minWidth: bandWidth
         )
         let glow = state == .attention ? host.attention?.request.accent : nil
         NotchSurface(metrics: metrics, glow: glow) {
             content(for: state)
         } band: {
-            if showsHomeBand {
-                HomeBand(home: host.home, notchSize: notchSize, width: metrics.size.width, openSettings: openSettings)
-                    .transition(Self.contentTransition)
+            if state == .expanded {
+                if let detail {
+                    PluginBand(host: host, plugin: detail, notchSize: notchSize, width: metrics.size.width, openSettings: openSettings)
+                        .id(detail.pluginID)
+                        .transition(Self.contentTransition)
+                } else {
+                    HomeBand(home: host.home, notchSize: notchSize, width: metrics.size.width, openSettings: openSettings)
+                        .transition(Self.contentTransition)
+                }
             }
         }
         .contentShape(metrics.shape)
         .contextMenu {
-            Button("설정…") { openSettings() }
+            Button("설정…") { openSettings(nil) }
             Button("종료") { NSApplication.shared.terminate(nil) }
         }
         .frame(width: NotchLayout.canvasSize.width, height: NotchLayout.canvasSize.height, alignment: .top)
@@ -102,9 +116,9 @@ struct NotchRootView: View {
                     .transition(Self.contentTransition)
             }
         case .expanded:
-            if case .detail(let pluginID) = host.screen, let plugin = host.home.plugin(pluginID), let tab = plugin.tab {
-                measured(PluginScreenView(host: host, plugin: plugin, tab: tab))
-                    .id(pluginID)
+            if let plugin = shownPlugin, let tab = plugin.tab {
+                measured(tab.content)
+                    .id(plugin.pluginID)
                     .transition(Self.contentTransition)
             } else {
                 measured(HomeView(host: host))
@@ -124,6 +138,12 @@ struct NotchRootView: View {
                     .transition(Self.contentTransition)
             }
         }
+    }
+
+    /// The plugin whose screen the expanded notch shows; nil on the home.
+    private var shownPlugin: HomePlugin? {
+        guard case .detail(let pluginID) = host.screen, let plugin = host.home.plugin(pluginID), plugin.tab != nil else { return nil }
+        return plugin
     }
 
     /// `content` at its own size, which becomes the size the shape grows to.

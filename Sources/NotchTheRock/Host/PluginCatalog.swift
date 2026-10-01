@@ -224,6 +224,13 @@ final class PluginCatalog {
         }
     }
 
+    /// The record of the bundle running as `pluginID`, matched as the host keys plugins
+    /// (`PluginKey`); nil when none is on. An earlier bundle refused with the same identifier is
+    /// listed too but does not own it (`evaluate`).
+    func runningRecord(for pluginID: String) -> PluginRecord.ID? {
+        records.first { $0.key == PluginKey(pluginID) && $0.state == .on }?.id
+    }
+
     /// The plugin's own Settings page while it is on.
     func settingsView(for id: PluginRecord.ID) -> AnyView? {
         guard let running = running[id], running.isEnabled else { return nil }
@@ -376,7 +383,8 @@ final class PluginCatalog {
                 name: entry.manifest.name,
                 symbol: entry.manifest.symbol,
                 tab: entry.tab,
-                tile: entry.tile
+                tile: entry.tile,
+                hasSettings: entry.plugin.settingsView != nil
             )
         }
     }

@@ -2,34 +2,42 @@ import AppKit
 import SwiftUI
 
 /// 플러그인: every discovered bundle with its state, an on/off switch, consent for user bundles and
-/// the plugin's own settings page while it is on.
+/// the plugin's own settings page while it is on. Scrolls to the page of the record running the
+/// plugin whose gear was pressed (`revealed`).
 struct PluginSettingsPane: View {
     let catalog: PluginCatalog
+    var revealed: SettingsSelection.Reveal?
     @State private var consentFailures: [PluginRecord.ID: String] = [:]
     @State private var folderFailure: String?
 
     var body: some View {
         VStack(spacing: 0) {
-            Form {
-                if catalog.records.isEmpty {
-                    Text("찾은 플러그인이 없어요.")
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(catalog.records) { record in
-                    Section {
-                        PluginRow(
-                            record: record,
-                            consentFailure: consentFailures[record.id],
-                            setEnabled: { catalog.setEnabled($0, for: record.id) },
-                            consent: { consent(to: record.id) }
-                        )
-                        if let settings = catalog.settingsView(for: record.id) {
-                            settings
+            ScrollViewReader { proxy in
+                Form {
+                    if catalog.records.isEmpty {
+                        Text("찾은 플러그인이 없어요.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(catalog.records) { record in
+                        Section {
+                            PluginRow(
+                                record: record,
+                                consentFailure: consentFailures[record.id],
+                                setEnabled: { catalog.setEnabled($0, for: record.id) },
+                                consent: { consent(to: record.id) }
+                            )
+                            if let settings = catalog.settingsView(for: record.id) {
+                                settings
+                            }
                         }
+                        .id(record.id)
                     }
                 }
+                .formStyle(.grouped)
+                .onChange(of: revealed, initial: true) { _, revealed in
+                    if let revealed { proxy.scrollTo(revealed.record, anchor: .top) }
+                }
             }
-            .formStyle(.grouped)
 
             HStack {
                 if let folderFailure {

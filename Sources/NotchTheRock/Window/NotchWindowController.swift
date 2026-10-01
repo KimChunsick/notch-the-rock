@@ -51,7 +51,7 @@ final class NotchWindowController {
     private static let closeDelay: Duration = .milliseconds(200)
 
     private let host: NotchHostModel
-    private let openSettings: @MainActor () -> Void
+    private let openSettings: @MainActor (_ pluginID: String?) -> Void
     private let panel = NotchPanel()
     private let hostingView: NotchHostingView
     /// Set once the window is placed over a notch.
@@ -64,8 +64,9 @@ final class NotchWindowController {
     /// app was in front.
     private weak var previousWindow: NSWindow?
 
-    /// - Parameter openSettings: called by the gear button and the 설정… menu item.
-    init(host: NotchHostModel, openSettings: @escaping @MainActor () -> Void) {
+    /// - Parameter openSettings: called by the gear buttons and the 설정… menu item, with the plugin's
+    ///   id from the gear on a plugin's screen and nil otherwise.
+    init(host: NotchHostModel, openSettings: @escaping @MainActor (_ pluginID: String?) -> Void) {
         self.host = host
         self.openSettings = openSettings
         hostingView = NotchHostingView(rootView: NotchRootView(host: host, notchSize: .zero, openSettings: openSettings))

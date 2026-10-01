@@ -58,7 +58,7 @@ import Testing
         host.showHUD(hud, duration: .seconds(60), from: "com.example.hud")
         #expect(host.state == .hud)
         let canvas = NotchLayout.canvasSize
-        let image = try await NotchActivityRenderTests().settledCapture(NotchRootView(host: host, notchSize: notch, openSettings: {}), size: canvas)
+        let image = try await NotchActivityRenderTests().settledCapture(NotchRootView(host: host, notchSize: notch, openSettings: { _ in }), size: canvas)
         let scale = CGFloat(image.width) / canvas.width
         let top = try #require(image.cropping(to: CGRect(x: 0, y: 0, width: image.width, height: Int((notchHeight + 40) * scale))))
         if let directory = ProcessInfo.processInfo.environment["NOTCH_RENDER_DIR"] {
