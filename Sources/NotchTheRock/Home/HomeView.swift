@@ -77,7 +77,8 @@ private struct TileView: View {
         let frame = HomeGrid.frame(of: placement)
         let shape = RoundedRectangle(cornerRadius: HomeGrid.cornerRadius, style: .continuous)
         ZStack {
-            shape.fill(.white.opacity(editing ? 0.14 : 0.1))
+            // Opaque, so the free slots drawn in edit mode do not show through.
+            shape.fill(Color(white: editing ? 0.15 : 0.11))
             tile.plugin.tile?.content(placement.size)
                 .frame(width: frame.width, height: frame.height)
                 .clipShape(shape)
