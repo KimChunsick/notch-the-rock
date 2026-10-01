@@ -6,7 +6,6 @@ import SwiftUI
 /// `NotchHostModel.handleKey(_:)`; typing goes to the field, so Korean is composed as usual.
 struct QuickSearchView: View {
     let host: NotchHostModel
-    @FocusState private var fieldFocused: Bool
 
     private static let visibleRows = 6
 
@@ -16,13 +15,7 @@ struct QuickSearchView: View {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.white.opacity(0.6))
-                TextField("플러그인 이름", text: Binding(
-                    get: { host.keyboard.query ?? "" },
-                    // The field may report its text once more while the search closes.
-                    set: { text in if host.keyboard.query != nil { host.keyboard.query = text } }
-                ))
-                .textFieldStyle(.plain)
-                .focused($fieldFocused)
+                QuickSearchField(keyboard: host.keyboard)
             }
             .font(.system(size: 14, weight: .medium))
             .padding(.horizontal, 10)
@@ -48,11 +41,6 @@ struct QuickSearchView: View {
             }
         }
         .foregroundStyle(.white)
-        .onAppear { fieldFocused = true }
-        // Becoming first responder selects the text typed so far; the next letter must add to it.
-        .onChange(of: fieldFocused) { _, focused in
-            if focused { Task { @MainActor in Self.moveCaretToEnd() } }
-        }
     }
 
     private func rows(_ results: [HomeEntry]) -> some View {
@@ -81,11 +69,81 @@ struct QuickSearchView: View {
             }
         }
     }
+}
 
-    private static func moveCaretToEnd() {
-        let window = NSApp.keyWindow ?? NSApp.windows.first { $0.isKeyWindow }
-        guard let editor = window?.firstResponder as? NSTextView else { return }
+/// The search text field, in AppKit so that it takes the focus and the opening key press in the
+/// same turn as it appears, before the next key press arrives.
+private struct QuickSearchField: NSViewRepresentable {
+    let keyboard: HomeKeyboard
+
+    func makeNSView(context: Context) -> QuickSearchTextField {
+        let field = QuickSearchTextField()
+        field.keyboard = keyboard
+        field.stringValue = keyboard.query ?? ""
+        field.placeholderString = "플러그인 이름"
+        field.font = .systemFont(ofSize: 14, weight: .medium)
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.lineBreakMode = .byClipping
+        field.cell?.isScrollable = true
+        // White text and caret on the notch's black.
+        field.appearance = NSAppearance(named: .darkAqua)
+        return field
+    }
+
+    func updateNSView(_ field: QuickSearchTextField, context: Context) {
+        field.keyboard = keyboard
+        // While the field is edited its text is the query; set from outside only otherwise.
+        if field.currentEditor() == nil, let query = keyboard.query, field.stringValue != query {
+            field.stringValue = query
+        }
+    }
+}
+
+/// Takes the focus with the caret after the text once it is in a window, then types the key press
+/// that opened the search (`HomeKeyboard.openingKey`) through its field editor, where an input
+/// method gets it like any other key: ㄴ then ㅏ composes 나. Everything typed, the composition
+/// included, becomes the query.
+final class QuickSearchTextField: NSTextField {
+    weak var keyboard: HomeKeyboard?
+    private var editing: NSObjectProtocol?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        unfollow()
+        guard let window, window.makeFirstResponder(self), let editor = currentEditor() as? NSTextView else { return }
         editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
+        follow(editor)
+        guard let opening = keyboard?.openingKey else { return }
+        keyboard?.openingKey = nil
+        editor.keyDown(with: opening)
+    }
+
+    override func textDidEndEditing(_ notification: Notification) {
+        // Before AppKit empties the shared field editor.
+        unfollow()
+        super.textDidEndEditing(notification)
+    }
+
+    /// Copies the field editor's text into the query on every change of its storage, a composition
+    /// included: `textDidChange` does not come for marked text.
+    private func follow(_ editor: NSTextView) {
+        editing = NotificationCenter.default.addObserver(
+            forName: NSTextStorage.didProcessEditingNotification,
+            object: editor.textStorage,
+            queue: nil
+        ) { [weak self, weak editor] _ in
+            MainActor.assumeIsolated {
+                guard let keyboard = self?.keyboard, keyboard.query != nil, let editor else { return }
+                keyboard.query = editor.string
+            }
+        }
+    }
+
+    private func unfollow() {
+        if let editing { NotificationCenter.default.removeObserver(editing) }
+        editing = nil
     }
 }
 

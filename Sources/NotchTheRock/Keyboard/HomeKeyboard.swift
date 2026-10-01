@@ -1,3 +1,4 @@
+import AppKit
 import Observation
 
 /// Keyboard state of the home: where the focus ring is, and the quick search while it is open.
@@ -9,10 +10,17 @@ final class HomeKeyboard {
     var focus: String?
     /// The quick search text while the search is open (possibly empty); nil when it is closed.
     var query: String? {
-        didSet { if query == nil { selection = nil } }
+        didSet {
+            guard query == nil else { return }
+            selection = nil
+            openingKey = nil
+        }
     }
     /// The chosen search result; the first result when nil or no longer among the results.
     var selection: String?
+    /// The key press that opened the quick search, until the search field takes the focus and
+    /// types it through its text input, where an input method composes it like any other key.
+    @ObservationIgnored var openingKey: NSEvent?
 
     func reset() {
         focus = nil
@@ -38,7 +46,8 @@ extension NotchHostModel {
     ///
     /// - On a plugin's screen and in edit mode only Esc is the notch's (`escape()`).
     /// - On the home, arrows move the focus ring (`HomeFocusMap`), Enter opens the focused plugin,
-    ///   Esc collapses, and letters or digits open the quick search with what was typed.
+    ///   Esc collapses, and letters or digits open an empty quick search; the search field then
+    ///   takes that key press (`HomeKeyboard.openingKey`).
     /// - In the quick search, ↑↓ choose a result and Enter opens it; Esc closes the search, and so
     ///   does Backspace once the field is empty. Typing and ←→ belong to the field.
     func handleKey(_ key: HomeKey) -> Bool {
@@ -61,8 +70,8 @@ extension NotchHostModel {
             if entry.opensDetail { open(pluginID: entry.pluginID) }
         case .escape:
             escape()
-        case .text(let text):
-            keyboard.query = text
+        case .text:
+            keyboard.query = ""
         case .backspace:
             return false
         }
@@ -88,6 +97,13 @@ extension NotchHostModel {
             return false
         }
         return true
+    }
+
+    /// The list row to scroll into view: the focused plugin when it is a list row. The list shows
+    /// six rows at a time, so a focus further down would otherwise be out of sight.
+    var listScrollTarget: String? {
+        guard let focus = keyboard.focus, home.list.contains(where: { $0.pluginID == focus }) else { return nil }
+        return focus
     }
 
     private func moveFocus(_ direction: HomeDirection) {

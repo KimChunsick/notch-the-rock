@@ -286,8 +286,10 @@ struct KeyboardTests {
         defer { fixture.cleanUp() }
         let host = sampleHost()
         host.toggleFromKeyboard()
+        // The letter opens an empty search; the search field types it (see the text input tests).
         #expect(host.handleKey(.text("w")))
-        #expect(host.keyboard.query == "w")
+        #expect(host.keyboard.query == "")
+        host.keyboard.query = "w"
         #expect(host.searchResults.map(\.pluginID) == ["F"])
 
         // The field takes further typing and Backspace while it has text.
@@ -378,6 +380,147 @@ struct KeyboardTests {
         #expect(!host.isHeldOpen)
     }
 
+    // MARK: Text input
+
+    /// The notch window as an offscreen window showing the home, key as far as the routing goes.
+    private func notchWindow(showing host: NotchHostModel) -> NSWindow {
+        let hosting = NSHostingView(rootView: HomeView(host: host))
+        hosting.frame = CGRect(x: 0, y: 0, width: 520, height: 420)
+        let window = KeyNotchWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = hosting
+        settle(hosting)
+        return window
+    }
+
+    /// Lets SwiftUI apply model changes to the views.
+    private func settle(_ view: NSView) {
+        view.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: .now + 0.05)
+        view.layoutSubtreeIfNeeded()
+    }
+
+    private func keyDown(_ characters: String, _ keyCode: Int, in window: NSWindow, flags: NSEvent.ModifierFlags = []) throws -> NSEvent {
+        try #require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: window.windowNumber,
+            context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: UInt16(keyCode)
+        ))
+    }
+
+    @Test func R17__the_key_that_opens_the_search_is_typed_through_the_search_field() throws {
+        defer { fixture.cleanUp() }
+        let host = sampleHost()
+        host.toggleFromKeyboard()
+        let window = notchWindow(showing: host)
+
+        #expect(NotchWindowController.takesKey(try keyDown("s", kVK_ANSI_S, in: window), notchWindow: window, host: host))
+        #expect(host.keyboard.query == "")
+        settle(try #require(window.contentView))
+
+        // The field has the focus and got the key through its field editor, where an input method
+        // gets it like any other key. The test process has no active input method, so the key
+        // arrives as typed text; under 2-set Hangul in the running app it starts a composition.
+        let editor = try #require(window.firstResponder as? NSTextView)
+        let delegate: AnyObject? = editor.delegate
+        #expect(delegate is QuickSearchTextField)
+        #expect(editor.string == "s" || editor.hasMarkedText())
+        #expect(host.keyboard.query == editor.string)
+        #expect(host.keyboard.openingKey == nil)
+    }
+
+    @Test func R17__enter_arrows_and_escape_belong_to_the_input_method_while_it_composes() throws {
+        defer { fixture.cleanUp() }
+        let host = sampleHost()
+        host.toggleFromKeyboard()
+        host.keyboard.query = ""
+        let window = notchWindow(showing: host)
+        let editor = try #require(window.firstResponder as? NSTextView)
+        editor.setMarkedText("ㄴ", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(editor.hasMarkedText())
+        // The composition is already searched for (ㄴ matches 날씨 by its first consonant).
+        #expect(host.keyboard.query == "ㄴ")
+
+        let keys = [("\r", kVK_Return), ("", kVK_UpArrow), ("", kVK_DownArrow), ("", kVK_LeftArrow), ("\u{1b}", kVK_Escape)]
+        for (characters, keyCode) in keys {
+            #expect(!NotchWindowController.takesKey(try keyDown(characters, keyCode, in: window), notchWindow: window, host: host))
+        }
+        #expect(host.keyboard.query != nil)
+        #expect(host.screen == .home)
+        #expect(host.state == .expanded)
+
+        // Once the composition ends, Esc is the search's again.
+        editor.unmarkText()
+        #expect(NotchWindowController.takesKey(try keyDown("\u{1b}", kVK_Escape, in: window), notchWindow: window, host: host))
+        #expect(host.keyboard.query == nil)
+    }
+
+    // MARK: Long list
+
+    /// A large tile and eight list rows, two more than the list shows without scrolling.
+    func longListHost() -> NotchHostModel {
+        let host = NotchHostModel(now: { .now }, homeStore: fixture.store)
+        host.plugins = [homePlugin("A", sizes: [.large], name: "배터리")]
+            + (1...8).map { homePlugin("L\($0)", sizes: [], name: "목록 \($0)") }
+        return host
+    }
+
+    @Test func R17__focus_on_a_list_row_past_the_sixth_scrolls_it_into_view() {
+        defer { fixture.cleanUp() }
+        let host = longListHost()
+        host.toggleFromKeyboard()
+        #expect(host.keyboard.focus == "A")
+        #expect(host.listScrollTarget == nil)
+
+        _ = host.handleKey(.down)
+        #expect(host.listScrollTarget == "L1")
+        for _ in 0..<6 { _ = host.handleKey(.down) }
+        #expect(host.keyboard.focus == "L7")
+        #expect(host.listScrollTarget == "L7")
+        _ = host.handleKey(.down)
+        #expect(host.listScrollTarget == "L8")
+    }
+
+    // MARK: Recorder
+
+    @Test func R17__recorder_takes_only_keys_of_its_window_and_stops_when_it_loses_key() throws {
+        defer { fixture.cleanUp() }
+        let registrar = FakeRegistrar()
+        let hotkey = GlobalHotkey(defaults: fixture.defaults, registrar: registrar)
+        hotkey.start {}
+        let frame = CGRect(x: 0, y: 0, width: 200, height: 100)
+        let settings = NSWindow(contentRect: frame, styleMask: [.titled], backing: .buffered, defer: false)
+        settings.isReleasedWhenClosed = false
+        let notch = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        let recorder = ShortcutRecorder()
+        let controlOptionK = KeyShortcut(keyCode: UInt16(kVK_ANSI_K), modifiers: [.control, .option])
+
+        recorder.start(hotkey, in: settings)
+        #expect(recorder.isRecording)
+        #expect(registrar.registered == nil)
+        // A key press for another window goes on to it untouched.
+        #expect(!recorder.takesKey(try keyDown("k", kVK_ANSI_K, in: notch, flags: [.control, .option])))
+        #expect(hotkey.shortcut == .default)
+        // Another window resigning key changes nothing; the recorder's window resigning key stops it.
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: notch)
+        #expect(recorder.isRecording)
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: settings)
+        #expect(!recorder.isRecording)
+        #expect(registrar.registered == .default)
+        #expect(!recorder.takesKey(try keyDown("k", kVK_ANSI_K, in: settings, flags: [.control, .option])))
+        #expect(hotkey.shortcut == .default)
+
+        // A key press in its own window becomes the shortcut.
+        recorder.start(hotkey, in: settings)
+        #expect(recorder.takesKey(try keyDown("k", kVK_ANSI_K, in: settings, flags: [.control, .option])))
+        #expect(hotkey.shortcut == controlOptionK)
+        #expect(!recorder.isRecording)
+
+        // Closing its window stops it too.
+        recorder.start(hotkey, in: settings)
+        settings.close()
+        #expect(!recorder.isRecording)
+        #expect(registrar.registered == controlOptionK)
+    }
+
     // MARK: Renders
 
     /// The focused home, the search overlay and the settings row, written only when
@@ -390,11 +533,17 @@ struct KeyboardTests {
         host.toggleFromKeyboard()
         _ = host.handleKey(.right)
         _ = host.handleKey(.down)
-        try render(HomeView(host: host).padding(16).background(Color.black), to: folder.appendingPathComponent("R17-render-home-focus-T38.png"))
+        try render(HomeView(host: host).padding(16).background(Color.black), to: folder.appendingPathComponent("R17-render-home-focus-T71.png"))
 
         _ = host.handleKey(.text("ㅁ"))
+        host.keyboard.query = "ㅁ"
         _ = host.handleKey(.down)
-        try render(HomeView(host: host).padding(16).background(Color.black), to: folder.appendingPathComponent("R17-render-search-T38.png"))
+        try render(HomeView(host: host).padding(16).background(Color.black), to: folder.appendingPathComponent("R17-render-search-T71.png"))
+
+        let long = longListHost()
+        long.toggleFromKeyboard()
+        for _ in 0..<8 { _ = long.handleKey(.down) }
+        try render(HomeView(host: long).padding(16).background(Color.black), to: folder.appendingPathComponent("R17-render-list-scroll-T71.png"))
 
         let registrar = FakeRegistrar()
         registrar.refused = [optionSpace]
@@ -403,7 +552,7 @@ struct KeyboardTests {
         _ = hotkey.change(to: optionSpace)
         try render(
             Form { Section { HotkeySettingsRow(hotkey: hotkey) } }.formStyle(.grouped).frame(width: 560),
-            to: folder.appendingPathComponent("R17-render-settings-T38.png")
+            to: folder.appendingPathComponent("R17-render-settings-T71.png")
         )
     }
 
@@ -414,9 +563,15 @@ struct KeyboardTests {
         window.appearance = NSAppearance(named: .darkAqua)
         window.contentView = hosting
         hosting.layoutSubtreeIfNeeded()
+        settle(hosting)
         let bitmap = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
         hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
         let data = try #require(bitmap.representation(using: .png, properties: [:]))
         try data.write(to: url)
     }
+}
+
+/// Key for the routing without being on screen.
+private final class KeyNotchWindow: NSWindow {
+    override var isKeyWindow: Bool { true }
 }

@@ -186,7 +186,8 @@ private struct TileView: View {
     }
 }
 
-/// One row per plugin without a grid place. Long lists scroll after six rows.
+/// One row per plugin without a grid place. Long lists scroll after six rows, and to the row with
+/// the keyboard's focus ring (`NotchHostModel.listScrollTarget`).
 private struct HomeList: View {
     let host: NotchHostModel
     let plugins: [HomePlugin]
@@ -197,9 +198,16 @@ private struct HomeList: View {
 
     var body: some View {
         if plugins.count > Self.visibleRows {
-            ScrollView { rows }
-                .scrollIndicators(.never)
-                .frame(height: CGFloat(Self.visibleRows) * Self.rowHeight + CGFloat(Self.visibleRows - 1) * Self.spacing)
+            ScrollViewReader { proxy in
+                ScrollView { rows }
+                    .scrollIndicators(.never)
+                    .frame(height: CGFloat(Self.visibleRows) * Self.rowHeight + CGFloat(Self.visibleRows - 1) * Self.spacing)
+                    // The focus also outlives a visit to a plugin's screen, where the list is gone.
+                    .onAppear { if let target = host.listScrollTarget { proxy.scrollTo(target) } }
+                    .onChange(of: host.listScrollTarget) { _, target in
+                        if let target { proxy.scrollTo(target) }
+                    }
+            }
         } else {
             rows
         }
@@ -209,6 +217,7 @@ private struct HomeList: View {
         VStack(spacing: Self.spacing) {
             ForEach(plugins, id: \.pluginID) { plugin in
                 HomeRow(host: host, plugin: plugin)
+                    .id(plugin.pluginID)
             }
         }
     }
