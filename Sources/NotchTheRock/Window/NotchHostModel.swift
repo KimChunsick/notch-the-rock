@@ -28,9 +28,9 @@ enum NotchState: Equatable {
 ///
 /// Attention requests queue in order and only the first is shown. A notice's display time starts
 /// when it is shown, so one queued behind a longer request or held by a takeover still shows for its
-/// full time; a request that waits for an answer keeps the timeout it was asked with. Up to
-/// `waitingNoticeLimit` notices wait behind the first; another one drops the oldest waiting notice
-/// (answered `.timedOut`). Requests are never dropped.
+/// full time; a request that waits for an answer keeps the timeout it was asked with. No notice is
+/// dropped before it is shown. The queue stays short because a plugin cancels a source's older
+/// notice when that source sends a newer one, and a cancelled request leaves the queue by its id.
 ///
 /// The expanded notch shows the home (`screen`): plugin tiles and a strip of icons, see `HomeModel`. API for
 /// the keyboard and URL plans (P17, P18): `showHome()`, `open(pluginID:)`, `back()`, `escape()` and
@@ -127,8 +127,6 @@ final class NotchHostModel: NotchHost {
     private var activities: [ActivityKey: PostedActivity] = [:]
     /// Waiting requests, oldest first; only the first is shown.
     private var attentions: [PendingAttention] = []
-    /// How many notices may wait behind the first attention.
-    static let waitingNoticeLimit = 10
     private var postCount = 0
     private var attentionCount = 0
 
@@ -373,10 +371,6 @@ final class NotchHostModel: NotchHost {
                 // A notice's time starts when it is shown (`startShownNotice()`).
                 if !pending.isNotice { pending.deadline = request.timeout.map { now() + $0 } }
                 attentions.append(pending)
-                let waitingNotices = attentions.dropFirst().filter(\.isNotice)
-                if waitingNotices.count > Self.waitingNoticeLimit, let oldest = waitingNotices.first {
-                    respond(.timedOut, to: oldest.id)
-                }
                 startShownNotice()
                 scheduleExpiry()
             }

@@ -291,26 +291,45 @@ struct NotchHostModelTests {
         #expect(host.state == .collapsed)
     }
 
-    @Test func R40__a_flood_drops_the_oldest_waiting_alerts_never_requests() async throws {
-        let shown = Task { await host.requestAttention(approval("허용할까요?"), from: "com.example.agent") }
-        await settle { host.attention != nil }
-        let waitingRequest = Task { await host.requestAttention(approval("이것도 허용할까요?"), from: "com.example.agent") }
-        await drain()
-        // Ten alerts may wait behind the shown request; the eleventh drops the oldest.
-        let alerts = (1...11).map { number in
-            Task { await host.requestAttention(notice("알림 \(number)"), from: "com.example.agent") }
+    @Test func R40__alerts_of_many_sessions_behind_a_request_all_show() async throws {
+        /// The alerts answered so far, in the order their answers arrived.
+        @MainActor final class Answers {
+            var titles: [String] = []
         }
+        let answers = Answers()
+        let request = Task { await host.requestAttention(approval("허용할까요?"), from: "com.example.agent") }
+        await settle { host.attention != nil }
+        // One alert from each of twelve sessions, queued in this order.
+        let titles = (1...12).map { "세션 \($0) 작업을 마쳤어요" }
+        var alerts: [Task<AttentionResponse, Never>] = []
+        for title in titles {
+            alerts.append(Task {
+                let response = await host.requestAttention(notice(title), from: "com.example.agent")
+                answers.titles.append(title)
+                return response
+            })
+            await drain()
+        }
+
+        clock.advance(by: .seconds(45))
+        host.expireDue()
         await drain()
-
+        #expect(answers.titles.isEmpty)
         host.respond(.released, to: try #require(host.attention).id)
-        #expect(await shown.value == .released)
-        #expect(host.attention?.request.title == "이것도 허용할까요?")
-        host.respond(.released, to: try #require(host.attention).id)
-        #expect(await waitingRequest.value == .released)
-        #expect(host.attention?.request.title == "알림 2")
+        #expect(await request.value == .released)
 
-        while let pending = host.attention { host.respond(.dismissed, to: pending.id) }
-        #expect(await alerts[0].value == .timedOut)
-        for alert in alerts.dropFirst() { #expect(await alert.value == .dismissed) }
+        for (index, title) in titles.enumerated() {
+            #expect(host.attention?.request.title == title)
+            clock.advance(by: .seconds(29))
+            host.expireDue()
+            await drain()
+            #expect(host.attention?.request.title == title)
+            #expect(answers.titles == Array(titles.prefix(index)))
+            clock.advance(by: .seconds(1))
+            host.expireDue()
+            #expect(await alerts[index].value == .timedOut)
+        }
+        #expect(answers.titles == titles)
+        #expect(host.state == .collapsed)
     }
 }
