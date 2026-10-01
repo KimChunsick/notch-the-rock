@@ -7,8 +7,9 @@ import SwiftUI
 /// session finishes its turn or waits for input, the notch glows with the project name and the
 /// message, and from there the user jumps to the session's terminal. Permission requests are allowed
 /// or denied, and AskUserQuestion answered, in the notch; "터미널에서 답하기" or the end of the wait
-/// hands them back to the terminal. The settings page installs and removes the hooks in
-/// `~/.claude/settings.json` and sets the wait.
+/// hands them back to the terminal. An operation too long for the notch, and typed answers to several
+/// questions, are shown in full on the plugin's screen and answered there. The settings page
+/// installs and removes the hooks in `~/.claude/settings.json` and sets the wait.
 @MainActor
 public final class AgentsPlugin: NotchPlugin {
     public static let manifest = PluginManifest(
@@ -71,6 +72,13 @@ public final class AgentsPlugin: NotchPlugin {
         server?.stop()
         server = nil
         bridge.cancelAll()
+    }
+
+    /// Requests too long for the notch, shown in full where they are answered.
+    public var expandedTab: PluginTab? {
+        PluginTab(title: Self.manifest.name, symbol: Self.manifest.symbol) { [screen = bridge.screen] in
+            AgentsScreen(model: screen)
+        }
     }
 
     public var settingsView: AnyView? {

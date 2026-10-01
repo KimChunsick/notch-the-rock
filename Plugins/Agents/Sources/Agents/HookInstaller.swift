@@ -59,12 +59,15 @@ enum InstallError: Error, Equatable {
     /// The settings file cannot be read as Claude Code settings; it was left untouched.
     case unreadable(String)
     case unwritable(String)
+    /// The settings file kept changing while the plugin was about to write it; it was left as it is.
+    case changedMeanwhile
 
     /// Shown in the settings page.
     var message: String {
         switch self {
         case .unreadable(let reason): "settings.json을 읽지 못해서 바꾸지 않았어요. \(reason)"
         case .unwritable(let reason): "settings.json을 저장하지 못했어요. \(reason)"
+        case .changedMeanwhile: "settings.json이 그사이 계속 바뀌어서 바꾸지 않았어요. 잠시 뒤에 다시 눌러 주세요."
         }
     }
 }
@@ -78,12 +81,21 @@ enum InstallError: Error, Equatable {
 /// the entries whose command is exactly the plugin's. A file that install created is deleted again,
 /// unless other keys were added to it meanwhile. A symlinked settings file stays a link: the file it
 /// points to is written.
+///
+/// Claude Code and editors save the file at any time, so every write is a compare-and-swap: the file
+/// is read again just before it is replaced or deleted, and when it changed since it was read the
+/// whole read-merge-write starts over (`attempts` times, then `InstallError.changedMeanwhile`
+/// without writing). A save in the instant between that last read and the rename itself cannot be
+/// detected; POSIX has no rename that compares first.
 struct HookInstaller {
     let settingsURL: URL
     /// Where install remembers what uninstall may put back (in the plugin's own storage).
     let recordURL: URL
     let entries: [HookEntry]
     var now: () -> Date = Date.init
+    /// Runs after the settings file was read and just before it is replaced or deleted. Tests save
+    /// the file here, as Claude Code or an editor might at that moment.
+    var willReplace: () -> Void = {}
 
     /// The shell command for `event`: the helper's path in single quotes (it may contain spaces)
     /// and the event name.
@@ -93,8 +105,9 @@ struct HookInstaller {
 
     func status() -> InstallStatus {
         do {
-            guard let settings = try read() else { return .notInstalled }
-            let present = entries.filter { contains(settings.object, $0) }.count
+            guard let data = try snapshot().data else { return .notInstalled }
+            let settings = try parse(data)
+            let present = entries.filter { contains(settings, $0) }.count
             if present == 0 { return .notInstalled }
             return present == entries.count ? .installed : .partial
         } catch {
@@ -102,11 +115,26 @@ struct HookInstaller {
         }
     }
 
+    /// How many times install and uninstall start over when the file changes under them.
+    static let attempts = 3
+
     func install() throws(InstallError) {
-        let current = try read()
-        var object = current?.object ?? [:]
+        for _ in 0..<Self.attempts {
+            if try installOnce() { return }
+        }
+        throw .changedMeanwhile
+    }
+
+    /// Reads the file, merges the entries and writes the result over exactly what was read. False
+    /// when the file changed before it could be replaced: then nothing was written.
+    private func installOnce() throws(InstallError) -> Bool {
+        let snapshot = try snapshot()
+        var object: [String: Any] = [:]
+        if let data = snapshot.data {
+            object = try parse(data)
+        }
         let missing = entries.filter { !contains(object, $0) }
-        guard !missing.isEmpty else { return }
+        guard !missing.isEmpty else { return true }
         var hooks = object["hooks"] as? [String: Any] ?? [:]
         for entry in missing {
             var group: [String: Any] = ["hooks": [["type": "command", "command": entry.command, "timeout": entry.timeout]]]
@@ -116,56 +144,66 @@ struct HookInstaller {
         object["hooks"] = hooks
         let data = try serialize(object)
 
+        // The backup holds the very bytes the merge started from.
         var backup: URL?
-        if let current {
-            backup = try writeBackup(current.data)
+        if let current = snapshot.data {
+            backup = try writeBackup(current)
         }
         let previous = loadRecord()
         let original: InstallRecord.Original?
-        if let previous, let current, previous.written == Self.digest(current.data) {
+        if let previous, let current = snapshot.data, previous.written == Self.digest(current) {
             // Only the plugin wrote to the file since the first install: that state still counts.
             original = previous.original
-        } else if let current, entries.contains(where: { contains(current.object, $0) }) {
+        } else if missing.count < entries.count {
             // The file already holds some of the plugin's entries; no earlier state is known.
             original = nil
         } else {
             original = backup.map { .backup(path: $0.path) } ?? .absent
         }
+        guard try replace(snapshot, with: data) else {
+            if let backup { unlink(backup.path) }
+            return false
+        }
         try saveRecord(InstallRecord(written: Self.digest(data), original: original))
-        try replace(with: data)
+        return true
     }
 
+    /// Puts the file back as it was, or takes the entries out. The record stays when the file kept
+    /// changing, so a later 해제 can still restore it.
     @discardableResult
     func uninstall() throws(InstallError) -> UninstallResult {
         let record = loadRecord()
-        let result = try uninstall(record: record)
-        try? FileManager.default.removeItem(at: recordURL)
-        return result
+        for _ in 0..<Self.attempts {
+            if let result = try uninstallOnce(record: record) {
+                try? FileManager.default.removeItem(at: recordURL)
+                return result
+            }
+        }
+        throw .changedMeanwhile
     }
 
-    private func uninstall(record: InstallRecord?) throws(InstallError) -> UninstallResult {
-        guard let data = try contents() else { return .nothingToRemove }
+    /// Nil when the file changed before it could be restored, rewritten or deleted: then it was left
+    /// as it is.
+    private func uninstallOnce(record: InstallRecord?) throws(InstallError) -> UninstallResult? {
+        let snapshot = try snapshot()
+        guard let data = snapshot.data else { return .nothingToRemove }
         if let record, let original = record.original, record.written == Self.digest(data) {
             switch original {
             case .absent:
-                try delete()
-                return .deleted
+                return try delete(snapshot) ? .deleted : nil
             case .backup(let path):
                 // A backup the user deleted leaves only the entries to remove.
                 if let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)) {
-                    try replace(with: bytes)
-                    return .restored
+                    return try replace(snapshot, with: bytes) ? .restored : nil
                 }
             }
         }
         var object = try parse(data)
         guard remove(from: &object) else { return .nothingToRemove }
         if object.isEmpty, record?.original == .absent {
-            try delete()
-            return .deleted
+            return try delete(snapshot) ? .deleted : nil
         }
-        try replace(with: try serialize(object))
-        return .removedEntries
+        return try replace(snapshot, with: try serialize(object)) ? .removedEntries : nil
     }
 
     // MARK: Settings file
@@ -173,18 +211,44 @@ struct HookInstaller {
     /// The file the settings path leads to, following a symlink.
     private var target: URL { settingsURL.resolvingSymlinksInPath() }
 
-    private func contents() throws(InstallError) -> Data? {
-        guard FileManager.default.fileExists(atPath: settingsURL.path) else { return nil }
+    /// The settings file's bytes and the file they were read from, at one moment.
+    private struct Snapshot: Equatable {
+        struct Identity: Equatable {
+            let device: Int32
+            let inode: UInt64
+            let size: Int64
+            let modified: Int
+            let modifiedNanoseconds: Int
+            let mode: mode_t
+        }
+
+        /// Nil when there is no settings file.
+        let data: Data?
+        let identity: Identity?
+    }
+
+    private func snapshot() throws(InstallError) -> Snapshot {
+        let fd = open(target.path, O_RDONLY | O_CLOEXEC)
+        if fd < 0 && errno == ENOENT { return Snapshot(data: nil, identity: nil) }
+        guard fd >= 0 else { throw .unreadable("파일을 열지 못했어요: \(String(cString: strerror(errno)))") }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var info = stat()
+        guard fstat(fd, &info) == 0 else { throw .unreadable("파일을 열지 못했어요: \(String(cString: strerror(errno)))") }
+        let data: Data
         do {
-            return try Data(contentsOf: settingsURL)
+            data = try handle.readToEnd() ?? Data()
         } catch {
             throw .unreadable("파일을 열지 못했어요: \(error.localizedDescription)")
         }
-    }
-
-    private func read() throws(InstallError) -> (data: Data, object: [String: Any])? {
-        guard let data = try contents() else { return nil }
-        return (data, try parse(data))
+        let identity = Snapshot.Identity(
+            device: info.st_dev,
+            inode: info.st_ino,
+            size: info.st_size,
+            modified: info.st_mtimespec.tv_sec,
+            modifiedNanoseconds: info.st_mtimespec.tv_nsec,
+            mode: info.st_mode & 0o7777
+        )
+        return Snapshot(data: data, identity: identity)
     }
 
     /// Claude Code settings as an object. Comments and trailing commas are accepted (JSON5); a
@@ -264,34 +328,44 @@ struct HookInstaller {
         return true
     }
 
-    /// Replaces the settings file through a temporary file and a rename, keeping its permissions
-    /// (0600 for a new file).
-    private func replace(with data: Data) throws(InstallError) {
+    /// Writes `data` over the file `snapshot` was read from, through a temporary file and a rename
+    /// that keep its permissions (0600 for a new file). Right before the rename the file is read
+    /// again; when its bytes or identity differ from `snapshot`, someone saved it meanwhile, so
+    /// nothing is written and the result is false. Where there was no file, the rename refuses to
+    /// replace one that appeared since.
+    private func replace(_ snapshot: Snapshot, with data: Data) throws(InstallError) -> Bool {
         let target = target
-        var info = stat()
-        let mode = lstat(target.path, &info) == 0 ? info.st_mode & 0o7777 : 0o600
         do {
             try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
         } catch {
             throw .unwritable(error.localizedDescription)
         }
         let temporary = target.deletingLastPathComponent().appendingPathComponent(".\(target.lastPathComponent).\(UUID().uuidString).tmp")
-        guard try Self.createNew(temporary, data: data, mode: mode) else {
+        guard try Self.createNew(temporary, data: data, mode: snapshot.identity?.mode ?? 0o600) else {
             throw .unwritable("임시 파일이 이미 있어요: \(temporary.path)")
         }
-        guard rename(temporary.path, target.path) == 0 else {
-            let reason = String(cString: strerror(errno))
+        willReplace()
+        guard (try? self.snapshot()) == snapshot else {
             unlink(temporary.path)
-            throw .unwritable(reason)
+            return false
         }
+        guard renamex_np(temporary.path, target.path, snapshot.data == nil ? UInt32(RENAME_EXCL) : 0) == 0 else {
+            let code = errno
+            unlink(temporary.path)
+            if code == EEXIST { return false }
+            throw .unwritable(String(cString: strerror(code)))
+        }
+        return true
     }
 
-    private func delete() throws(InstallError) {
-        do {
-            try FileManager.default.removeItem(at: target)
-        } catch {
-            throw .unwritable(error.localizedDescription)
+    /// Deletes the file `snapshot` was read from; false, leaving it, when it changed since.
+    private func delete(_ snapshot: Snapshot) throws(InstallError) -> Bool {
+        willReplace()
+        guard (try? self.snapshot()) == snapshot else { return false }
+        guard unlink(target.path) == 0 || errno == ENOENT else {
+            throw .unwritable(String(cString: strerror(errno)))
         }
+        return true
     }
 
     /// Copies the current bytes to `settings.json.notchtherock-<time>.bak` beside the settings

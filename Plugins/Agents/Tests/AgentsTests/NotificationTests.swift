@@ -157,7 +157,7 @@ import Testing
     }
 
     /// Read only: the settings page shows the default wait.
-    let renderDefaults = UserDefaults(suiteName: "com.notchtherock.agents.tests.render")!
+    let renderDefaults = UserDefaults(suiteName: isolatedDefaultsSuite(in: try! makeDirectory("agents-render")))!
 
     func settingsPage(_ model: ClaudeHooksModel) -> some View {
         Form { AgentsSettingsView(model: model, defaults: renderDefaults) }

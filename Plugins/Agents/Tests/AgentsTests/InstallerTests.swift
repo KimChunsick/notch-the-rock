@@ -204,4 +204,96 @@ import Testing
         #expect(result.stdout.isEmpty)
         #expect(result.stderr.isEmpty)
     }
+
+    // MARK: Saves while the plugin writes
+
+    /// How many times the installer reached the moment just before replacing the file.
+    final class Attempts {
+        var count = 0
+    }
+
+    @Test func R05__a_save_during_install_is_kept_and_backed_up() throws {
+        try write(Self.otherHooks)
+        let saved = Self.otherHooks.replacingOccurrences(of: "\"opus\"", with: "\"sonnet\"")
+        var installer = installer()
+        let attempts = Attempts()
+        let settings = settings
+        installer.willReplace = {
+            attempts.count += 1
+            // Claude Code saves a setting between the plugin's read and its write.
+            if attempts.count == 1 { try? Data(saved.utf8).write(to: settings) }
+        }
+
+        try installer.install()
+        #expect(attempts.count == 2)
+        #expect(try settingsObject()["model"] as? String == "sonnet")
+        #expect(try commands("Stop") == ["afplay /System/Library/Sounds/Glass.aiff", HookInstaller.command(helper: helper, event: .stop)])
+        let backups = try backups()
+        #expect(backups.count == 1)
+        #expect(try backups.first.map { try Data(contentsOf: $0) } == Data(saved.utf8))
+
+        installer.willReplace = {}
+        #expect(try installer.uninstall() == .restored)
+        #expect(try Data(contentsOf: settings) == Data(saved.utf8))
+    }
+
+    @Test func R05__install_gives_up_without_writing_when_the_file_keeps_changing() throws {
+        try write(Self.otherHooks)
+        var installer = installer()
+        let attempts = Attempts()
+        let settings = settings
+        installer.willReplace = {
+            attempts.count += 1
+            try? Data("{\"model\": \"edit \(attempts.count)\"}\n".utf8).write(to: settings, options: .atomic)
+        }
+
+        #expect(throws: InstallError.changedMeanwhile) { try installer.install() }
+        #expect(attempts.count == 3)
+        #expect(try String(contentsOf: settings, encoding: .utf8) == "{\"model\": \"edit 3\"}\n")
+        #expect(try backups().isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: record.path))
+        #expect(InstallError.changedMeanwhile.message.contains("바꾸지 않았어요"))
+    }
+
+    @Test func R05__uninstall_never_restores_over_a_newer_save() throws {
+        try write(Self.otherHooks)
+        var installer = installer()
+        try installer.install()
+        let attempts = Attempts()
+        let settings = settings
+        installer.willReplace = {
+            attempts.count += 1
+            guard attempts.count == 1 else { return }
+            // The user adds a setting while 해제 is about to put the old file back.
+            var object = (try? JSONSerialization.jsonObject(with: Data(contentsOf: settings))) as? [String: Any] ?? [:]
+            object["theme"] = "dark"
+            try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]).write(to: settings)
+        }
+
+        #expect(try installer.uninstall() == .removedEntries)
+        #expect(attempts.count == 2)
+        let object = try settingsObject()
+        #expect(object["theme"] as? String == "dark")
+        #expect(object["model"] as? String == "opus")
+        #expect(try commands("Stop") == ["afplay /System/Library/Sounds/Glass.aiff"])
+        #expect(try commands("PermissionRequest").isEmpty)
+    }
+
+    @Test func R05__uninstall_never_deletes_a_file_saved_again_meanwhile() throws {
+        var installer = installer()
+        try installer.install()
+        let ours = try Data(contentsOf: settings)
+        let attempts = Attempts()
+        let settings = settings
+        installer.willReplace = {
+            attempts.count += 1
+            // Saved again with the same text: another file now stands at the path.
+            try? ours.write(to: settings, options: .atomic)
+        }
+
+        #expect(throws: InstallError.changedMeanwhile) { try installer.uninstall() }
+        #expect(attempts.count == 3)
+        #expect(try Data(contentsOf: settings) == ours)
+        #expect(FileManager.default.fileExists(atPath: record.path))
+    }
 }

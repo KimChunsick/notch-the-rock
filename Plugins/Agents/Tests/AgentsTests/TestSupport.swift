@@ -53,11 +53,22 @@ final class FakeActivator: TerminalActivating {
     }
 }
 
+/// Plugin storage in `directory`. The defaults suite is named by an absolute path, so its plist is
+/// written inside the temporary folder rather than ~/Library/Preferences; the keychain is not used.
 @MainActor
 func makeContext(host: FakeHost, directory: URL) throws -> NotchContext {
-    let suite = "com.notchtherock.agents.tests.\(UUID().uuidString)"
-    let storage = try PluginStorage(directory: directory, defaultsSuiteName: suite, keychainService: suite)
+    let storage = try PluginStorage(
+        directory: directory,
+        defaultsSuiteName: isolatedDefaultsSuite(in: directory),
+        keychainService: "com.notchtherock.agents.tests.\(UUID().uuidString)"
+    )
     return NotchContext(pluginID: AgentsPlugin.manifest.id, bundleURL: directory, host: host, storage: storage)
+}
+
+/// A defaults suite stored as `defaults.plist` in `directory`, never in the app's or the user's
+/// defaults.
+func isolatedDefaultsSuite(in directory: URL) -> String {
+    directory.appendingPathComponent("defaults").path
 }
 
 /// A fresh folder in the temporary directory.

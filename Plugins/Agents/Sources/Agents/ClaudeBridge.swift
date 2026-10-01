@@ -19,6 +19,11 @@ final class ClaudeBridge {
     static let allowButtonID = "allow"
     static let denyButtonID = "deny"
     static let sendDenialButtonID = "send-denial"
+    /// Opens the Agents screen, where an operation too long for the notch is shown and allowed.
+    static let detailsButtonID = "details"
+    /// Several questions: one answer field per question on the Agents screen.
+    static let typeAnswersButtonID = "type-answers"
+    static let sendAnswersButtonID = "send-answers"
     static let releaseTitle = "터미널에서 답하기"
     /// Sent to Claude when the user denies without writing a reason.
     static let defaultDenial = "사용자가 노치에서 거부했어요."
@@ -32,6 +37,8 @@ final class ClaudeBridge {
     /// glow twice. A notification without a type is shown.
     static let waitingNotificationTypes: Set<String> = ["idle_prompt", "agent_needs_input", "elicitation_dialog"]
 
+    /// Requests shown in full on the Agents screen.
+    let screen = AgentsScreenModel()
     private let context: NotchContext
     private let activator: any TerminalActivating
     /// How long the notch waits for an answer before the request goes back to the terminal.
@@ -116,29 +123,42 @@ final class ClaudeBridge {
             decision.cancel()
         }
         decisions.removeAll()
+        screen.cancelAll()
     }
 
-    /// 허용 or 거부 for one tool call. 거부 then asks for a message to Claude in a text field.
+    /// 허용 or 거부 for one tool call. 거부 then asks for a message to Claude in a text field. The
+    /// notch offers 허용 only for an operation it shows in full; anything longer goes to the Agents
+    /// screen (자세히 보기), which shows all of it and is where it is allowed.
     private func decidePermission(_ message: HookMessage, title: String) async -> HookDecision? {
         let tool = message.payload["tool_name"]?.string ?? "도구"
         // AskUserQuestion is answered through its PreToolUse hook.
         guard tool != "AskUserQuestion" else { return nil }
+        let detail = OperationDetail(tool: tool, input: message.payload["tool_input"])
         let wait = wait()
         let deadline = ContinuousClock.now + wait
         let response = await context.requestAttention(AttentionRequest(
             title: "\(title) · \(tool)",
-            message: Self.summary(of: message.payload["tool_input"]),
+            message: detail.notchText ?? detail.headline,
             accent: Self.accent,
             sourceIcon: terminalIcon(message),
             buttons: [
                 AttentionButton(id: Self.denyButtonID, title: "거부", role: .destructive),
-                AttentionButton(id: Self.allowButtonID, title: "허용", role: .primary),
+                detail.notchText == nil
+                    ? AttentionButton(id: Self.detailsButtonID, title: "자세히 보기", role: .primary)
+                    : AttentionButton(id: Self.allowButtonID, title: "허용", role: .primary),
             ],
             releaseTitle: Self.releaseTitle,
             timeout: wait
         ))
         guard case .answered(let answer) = response else { return nil }
-        if answer.buttonID == Self.allowButtonID { return .allow }
+        if answer.buttonID == Self.allowButtonID, detail.notchText != nil { return .allow }
+        if answer.buttonID == Self.detailsButtonID {
+            switch await showOnScreen("\(title) · \(tool)", .permission(detail), until: deadline) {
+            case .allow: return .allow
+            case .deny(let reason): return .deny(message: Self.denial(reason))
+            default: return nil
+            }
+        }
         guard answer.buttonID == Self.denyButtonID else { return nil }
         let left = deadline - .now
         guard left > .zero else { return nil }
@@ -154,62 +174,62 @@ final class ClaudeBridge {
         ))
         // Return in the text field answers without a button.
         guard case .answered(let written) = reason else { return nil }
-        let text = written.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return .deny(message: text.isEmpty ? Self.defaultDenial : text)
+        return .deny(message: Self.denial(written.text ?? ""))
     }
 
-    /// AskUserQuestion: each question's options (one or several), and a text field that answers the
-    /// questions left without a picked option. A question left without either goes to the terminal.
+    /// AskUserQuestion: each question's options (one or several). A single question also takes free
+    /// text in the notch; several questions each get their own answer field on the Agents screen, so
+    /// one typed value never answers them all. A question left without an answer goes to the terminal.
     private func answerQuestions(_ message: HookMessage, title: String) async -> HookDecision? {
         guard message.payload["tool_name"]?.string == "AskUserQuestion",
-              let items = message.payload["tool_input"]?["questions"]?.array, !items.isEmpty else { return nil }
-        let questions = items.compactMap { item -> (text: String, options: [String], multiple: Bool)? in
-            guard let text = item["question"]?.string else { return nil }
-            let options = item["options"]?.array?.compactMap { $0["label"]?.string } ?? []
-            return (text, options, item["multiSelect"]?.bool ?? false)
-        }
-        guard questions.count == items.count else { return nil }
+              let questions = Question.parse(message.payload["tool_input"]) else { return nil }
+        let single = questions.count == 1
+        let wait = wait()
+        let deadline = ContinuousClock.now + wait
         let response = await context.requestAttention(AttentionRequest(
             title: "\(title) · Claude의 질문",
             message: "",
             accent: Self.accent,
             sourceIcon: terminalIcon(message),
+            // Any button replaces the notch's own 보내기, so several questions bring their own.
+            buttons: single ? [] : [
+                AttentionButton(id: Self.typeAnswersButtonID, title: "직접 입력하기"),
+                AttentionButton(id: Self.sendAnswersButtonID, title: "보내기", role: .primary),
+            ],
             choices: questions.enumerated().map { index, question in
                 AttentionChoices(id: String(index), prompt: question.text, options: question.options, allowsMultiple: question.multiple)
             },
-            textField: AttentionTextField(placeholder: "고르지 않은 질문에는 직접 답해요"),
+            textField: single ? AttentionTextField(placeholder: "직접 입력해서 답해요") : nil,
             releaseTitle: Self.releaseTitle,
-            timeout: wait()
+            timeout: wait
         ))
         guard case .answered(let answer) = response else { return nil }
-        let text = answer.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        var answers: [String: JSONValue] = [:]
-        for (index, question) in questions.enumerated() {
-            let picked = answer.choices[String(index)] ?? []
-            if let first = picked.first {
-                answers[question.text] = question.multiple ? .array(picked.map(JSONValue.string)) : .string(first)
-            } else if !text.isEmpty {
-                answers[question.text] = .string(text)
-            } else {
-                return nil
-            }
+        var picked: [Int: [String]] = [:]
+        for index in questions.indices {
+            if let options = answer.choices[String(index)], !options.isEmpty { picked[index] = options }
         }
-        return .answers(answers)
+        let typed = single ? [0: answer.text ?? ""] : [:]
+        if answer.buttonID != Self.typeAnswersButtonID, let answers = Question.answers(questions, picked: picked, typed: typed) {
+            return .answers(answers)
+        }
+        guard !single else { return nil }
+        // Typed answers, or questions still open: one field per question on the Agents screen.
+        let result = await showOnScreen("\(title) · Claude의 질문", .questions(questions, picked: picked), until: deadline)
+        guard case .answers(let screenPicked, let screenTyped) = result else { return nil }
+        return Question.answers(questions, picked: screenPicked, typed: screenTyped).map(HookDecision.answers)
     }
 
-    /// One line about what the tool will do: the Bash command, the file path, the URL…
-    static func summary(of input: JSONValue?) -> String {
-        let keys = ["command", "file_path", "notebook_path", "url", "query", "pattern", "path", "description", "prompt"]
-        var text: String
-        if let value = keys.lazy.compactMap({ input?[$0]?.string }).first {
-            text = value
-        } else if let input, let data = try? JSONEncoder().encode(input) {
-            text = String(decoding: data, as: UTF8.self)
-        } else {
-            text = ""
-        }
-        text = text.split(whereSeparator: \.isNewline).joined(separator: " ⏎ ")
-        return text.count > 200 ? String(text.prefix(200)) + "…" : text
+    /// Opens the Agents screen on the request and waits there until the user answers, hands it to the
+    /// terminal or the wait that began in the notch ends.
+    private func showOnScreen(_ title: String, _ content: ScreenItem.Content, until deadline: ContinuousClock.Instant) async -> ScreenResponse {
+        guard deadline > .now else { return .timedOut }
+        context.expand()
+        return await screen.show(title: title, content: content, until: deadline)
+    }
+
+    private static func denial(_ reason: String) -> String {
+        let text = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? defaultDenial : text
     }
 
     private func terminalIcon(_ message: HookMessage) -> Image? {
