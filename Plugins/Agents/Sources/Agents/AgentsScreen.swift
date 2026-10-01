@@ -211,11 +211,13 @@ private struct ScreenItemView: View {
                                 }
                                 .buttonStyle(.plain)
                             }
-                            TextField("직접 입력", text: Binding(
-                                get: { draft.typed[index] ?? "" },
-                                set: { draft.type($0, at: index) }
-                            ))
-                            .textFieldStyle(.roundedBorder)
+                            if question.takesText {
+                                TextField("직접 입력", text: Binding(
+                                    get: { draft.typed[index] ?? "" },
+                                    set: { draft.type($0, at: index) }
+                                ))
+                                .textFieldStyle(.roundedBorder)
+                            }
                         }
                     }
                 }

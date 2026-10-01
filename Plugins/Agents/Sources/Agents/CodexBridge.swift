@@ -34,11 +34,16 @@ final class CodexBridge {
     /// The terminal of the `codex` TUI working in a folder, looked up when it is needed.
     private let terminal: @MainActor (String?) -> TerminalLocation?
     private let wait: @MainActor () -> Duration
+    private let initializeTimeout: Duration
     /// Thread folders by thread id, kept across connections.
     private(set) var threads: [String: String] = [:]
 
     // One connection's state; `close()` clears it.
     private var send: (@MainActor (JSONValue) -> Void)?
+    private var ready: (@MainActor () -> Void)?
+    private var failed: (@MainActor (String) -> Void)?
+    /// Gives up on the connection when `initialize` goes unanswered.
+    private var initializing: Task<Void, Never>?
     /// Counts connections, so an answer never goes out on a later connection than its request's.
     private var connection = 0
     private var callCount = 0
@@ -63,6 +68,7 @@ final class CodexBridge {
         activator: any TerminalActivating,
         screen: AgentsScreenModel = AgentsScreenModel(),
         terminal: @escaping @MainActor (String?) -> TerminalLocation?,
+        initializeTimeout: Duration = .seconds(10),
         wait: @escaping @MainActor () -> Duration = { .seconds(ApprovalWait.defaultSeconds) }
     ) {
         self.context = context
@@ -70,13 +76,29 @@ final class CodexBridge {
         self.screen = screen
         self.terminal = terminal
         self.wait = wait
+        self.initializeTimeout = initializeTimeout
     }
 
-    /// A new connection: `send` writes one message to it. Starts with `initialize`.
-    func open(send: @escaping @MainActor (JSONValue) -> Void) {
+    /// A new connection: `send` writes one message to it, `ready` runs once the server accepted
+    /// `initialize`, and `failed` once the bridge gave up on the connection because the server refused
+    /// `initialize` or left it unanswered for `initializeTimeout`; the bridge is closed by then. Starts
+    /// with `initialize`.
+    func open(
+        send: @escaping @MainActor (JSONValue) -> Void,
+        ready: @escaping @MainActor () -> Void = {},
+        failed: @escaping @MainActor (String) -> Void = { _ in }
+    ) {
         close()
         connection += 1
         self.send = send
+        self.ready = ready
+        self.failed = failed
+        let connection = connection
+        initializing = Task { [weak self, initializeTimeout] in
+            try? await Task.sleep(for: initializeTimeout)
+            guard !Task.isCancelled, let self, self.connection == connection else { return }
+            self.fail("app-server가 초기화 요청에 답하지 않았어요.")
+        }
         call(.initialize, "initialize", .object([
             "clientInfo": Self.clientInfo,
             "capabilities": .object(["experimentalApi": .bool(true)]),
@@ -86,6 +108,10 @@ final class CodexBridge {
     /// The connection is gone: its requests can no longer be answered, so they leave the notch.
     func close() {
         send = nil
+        ready = nil
+        failed = nil
+        initializing?.cancel()
+        initializing = nil
         calls.removeAll()
         callCount = 0
         resumed.removeAll()
@@ -94,6 +120,13 @@ final class CodexBridge {
             request.task.cancel()
         }
         pending.removeAll()
+    }
+
+    /// Closes the connection's state, then tells the link why it should drop the connection.
+    private func fail(_ reason: String) {
+        let failed = failed
+        close()
+        failed?(reason)
     }
 
     /// Withdraws every request and notice. Called when the plugin is turned off.
@@ -108,6 +141,8 @@ final class CodexBridge {
     /// One message from the server. Returns the task that asks the user, when it asks something.
     @discardableResult
     func receive(_ message: JSONValue) -> Task<Void, Never>? {
+        // Only an open connection's messages count.
+        guard send != nil else { return nil }
         if let method = message["method"]?.string {
             let params = message["params"] ?? .null
             if let id = message["id"] {
@@ -122,7 +157,11 @@ final class CodexBridge {
         }
         if let error = message["error"] {
             context.log.error("codex app-server refused a request: \(Self.encode(error))")
-            if case .resume(let thread) = call { resumed.remove(thread) }
+            switch call {
+            case .initialize: fail("app-server가 초기화 요청을 거절했어요.")
+            case .list: break
+            case .resume(let thread): resumed.remove(thread)
+            }
             return nil
         }
         response(call, message["result"] ?? .null)
@@ -154,8 +193,11 @@ final class CodexBridge {
     private func response(_ kind: Call, _ result: JSONValue) {
         switch kind {
         case .initialize:
+            initializing?.cancel()
+            initializing = nil
             send?(.object(["method": .string("initialized")]))
             call(.list, "thread/loaded/list", .object([:]))
+            ready?()
         case .list:
             if let cursor = result["nextCursor"]?.string {
                 call(.list, "thread/loaded/list", .object(["cursor": .string(cursor)]))
@@ -214,7 +256,16 @@ final class CodexBridge {
 
     // MARK: Requests
 
+    /// Every request leaves `pending` one way: answered, left to the terminal, answered elsewhere
+    /// (`serverRequest/resolved`), replaced by a request with its id, or dropped with its connection.
+    /// Each way but the first cancels its task, and a cancelled task neither asks nor answers.
     private func request(_ id: JSONValue, _ method: String, _ params: JSONValue) -> Task<Void, Never>? {
+        // A reused id: the server no longer means the older request, whatever the new one asks and
+        // whether or not the notch takes it, so the older one leaves first.
+        if let older = pending.removeValue(forKey: id) {
+            older.task.cancel()
+            context.log.error("codex app-server reused the request id \(Self.encode(id)); the older request was withdrawn")
+        }
         let ask: @MainActor () async -> JSONValue?
         switch method {
         case "item/commandExecution/requestApproval":
@@ -231,16 +282,15 @@ final class CodexBridge {
             // Requests meant for the client that started the thread stay with it.
             return nil
         }
-        // A reused id: the server no longer means the older request, which leaves the notch.
-        if let older = pending.removeValue(forKey: id) {
-            older.task.cancel()
-            context.log.error("codex app-server reused the request id \(Self.encode(id)); the older request was withdrawn")
-        }
         pendingCount += 1
         let number = pendingCount
         let connection = connection
         let task = Task {
-            let result = await ask()
+            // Withdrawn before it ran: the notch never shows it.
+            var result: JSONValue?
+            if !Task.isCancelled {
+                result = await ask()
+            }
             // Only the request still waiting under this id, on the connection it came from, answers.
             let current = !Task.isCancelled && self.connection == connection && self.pending[id]?.number == number
             if current, let result {
@@ -513,7 +563,7 @@ struct CodexQuestion: Equatable {
     var prompt: String { header.isEmpty ? text : "\(header) · \(text)" }
     var takesText: Bool { isOther || options.isEmpty }
     /// The question as the Agents screen's form shows it.
-    var question: Question { Question(text: prompt, options: options, multiple: false) }
+    var question: Question { Question(text: prompt, options: options, multiple: false, takesText: takesText) }
 
     static func parse(_ value: JSONValue?) -> [CodexQuestion]? {
         guard let items = value?.array, !items.isEmpty else { return nil }

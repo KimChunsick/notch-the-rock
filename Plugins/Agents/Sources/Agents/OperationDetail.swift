@@ -94,6 +94,9 @@ struct Question: Equatable {
     let text: String
     let options: [String]
     let multiple: Bool
+    /// Typed text answers it. AskUserQuestion always takes it; a codex question may take only its
+    /// options, and then the form offers no field for it.
+    var takesText = true
 
     /// The tool input's questions, or nil when there are none or one cannot be read.
     static func parse(_ input: JSONValue?) -> [Question]? {
@@ -107,7 +110,7 @@ struct Question: Equatable {
     }
 
     /// Each question's answer by its text: the picked option (labels when several may be picked),
-    /// otherwise the text typed for that question. Nil while some question has neither.
+    /// otherwise the text typed for a question that takes it. Nil while some question has neither.
     static func answers(_ questions: [Question], picked: [Int: [String]], typed: [Int: String]) -> [String: JSONValue]? {
         var answers: [String: JSONValue] = [:]
         for (index, question) in questions.enumerated() {
@@ -115,7 +118,7 @@ struct Question: Equatable {
             let text = typed[index]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if let first = picks.first {
                 answers[question.text] = question.multiple ? .array(picks.map(JSONValue.string)) : .string(first)
-            } else if !text.isEmpty {
+            } else if !text.isEmpty, question.takesText {
                 answers[question.text] = .string(text)
             } else {
                 return nil

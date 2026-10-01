@@ -102,8 +102,9 @@ struct WebSocketFrame: Equatable {
 }
 
 /// A WebSocket client over a connected stream socket, as codex's app-server speaks it on its Unix
-/// socket: an HTTP Upgrade, then text frames that each carry one JSON-RPC message. `receive()` is
-/// called from one thread at a time and blocks. `send(text:)` never blocks: a serial writer delivers
+/// socket: an HTTP Upgrade, then text frames that each carry one JSON-RPC message. A socket made for
+/// a path connects in `handshake`, so whoever holds it can `close()` it before anything blocks.
+/// `receive()` is called from one thread at a time and blocks. `send(text:)` never blocks: a serial writer delivers
 /// the frames in order, and a failed write closes the connection. `close()` works from any thread,
 /// at any time, and ends a blocked handshake, receive or write; the descriptor itself is closed when
 /// the last user lets go of the socket, so it is never reused under a thread still using it.
@@ -112,6 +113,8 @@ final class WebSocket: CodexConnection, @unchecked Sendable {
     static let maxMessage = 16 << 20
 
     private let fd: Int32
+    /// Where `handshake` connects; nil for a descriptor that is already connected.
+    private let unixPath: String?
     private let maxMessage: Int
     /// Bytes read but not yet used; touched only by the reading thread.
     private var buffer = Data()
@@ -121,46 +124,67 @@ final class WebSocket: CodexConnection, @unchecked Sendable {
     /// Bytes handed to the writer and not written yet.
     private var queued = 0
 
-    /// Takes over `fd`.
-    init(fd: Int32, maxMessage: Int = WebSocket.maxMessage) {
+    /// Takes over `fd`, connected already unless `unixPath` says where `handshake` connects it.
+    init(fd: Int32, maxMessage: Int = WebSocket.maxMessage, unixPath: String? = nil) {
         self.fd = fd
+        self.unixPath = unixPath
         self.maxMessage = maxMessage
         var on: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
     }
 
-    /// Connects to the Unix socket at `unixPath`, without the handshake.
+    /// A socket for the Unix socket at `unixPath`; `handshake` connects it.
     convenience init(unixPath: String) throws {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw WebSocketError(description: "socket: \(String(cString: strerror(errno)))") }
+        self.init(fd: fd, unixPath: unixPath)
+    }
+
+    /// Connects `fd` to the Unix socket at `path` without blocking past `deadline`: the connect runs
+    /// non-blocking and is waited for in short slices, checking `abandoned` before and between them
+    /// (shutting down a socket that is not connected yet wakes nothing). Leaves `fd` blocking. Returns
+    /// 0, or the error that ended it: `ETIMEDOUT` at the deadline, `ECANCELED` when abandoned.
+    static func connectSocket(_ fd: Int32, to path: String, by deadline: ContinuousClock.Instant, abandoned: () -> Bool) -> Int32 {
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
-        let path = unixPath.utf8CString
-        guard path.count <= MemoryLayout.size(ofValue: address.sun_path) else {
-            Darwin.close(fd)
-            throw WebSocketError(description: "The socket path is too long: \(unixPath)")
-        }
+        let bytes = path.utf8CString
+        guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { return ENAMETOOLONG }
         withUnsafeMutableBytes(of: &address.sun_path) { raw in
-            path.withUnsafeBytes { raw.copyMemory(from: $0) }
+            bytes.withUnsafeBytes { raw.copyMemory(from: $0) }
         }
+        guard !abandoned() else { return ECANCELED }
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { return errno }
+        defer { _ = fcntl(fd, F_SETFL, flags) }
         let result = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        guard result == 0 else {
-            let message = String(cString: strerror(errno))
-            Darwin.close(fd)
-            throw WebSocketError(description: "connect \(unixPath): \(message)")
+        let code = result == 0 ? 0 : errno
+        guard code == EINPROGRESS || code == EINTR else { return code }
+        while !abandoned() {
+            let left = deadline - .now
+            guard left > .zero else { return ETIMEDOUT }
+            let slice = min(left, .milliseconds(50)).components
+            var poller = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            let ready = poll(&poller, 1, max(1, Int32(slice.seconds * 1000 + slice.attoseconds / 1_000_000_000_000_000)))
+            if ready < 0, errno != EINTR { return errno }
+            if ready > 0 {
+                var error: Int32 = 0
+                var length = socklen_t(MemoryLayout<Int32>.size)
+                guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) == 0 else { return errno }
+                return error
+            }
         }
-        self.init(fd: fd)
+        return ECANCELED
     }
 
     deinit {
         Darwin.close(fd)
     }
 
-    /// Connects to the Unix socket at `unixPath` and completes the handshake within `timeout`.
+    /// Connects to the Unix socket at `unixPath` and completes the handshake, both within `timeout`.
     static func connect(unixPath: String, timeout: Duration = .seconds(5)) throws -> WebSocket {
         let socket = try WebSocket(unixPath: unixPath)
         do {
@@ -178,10 +202,17 @@ final class WebSocket: CodexConnection, @unchecked Sendable {
         return Data(digest).base64EncodedString()
     }
 
-    /// Sends the HTTP Upgrade request and checks the server's 101 answer and accept key, all within
-    /// `timeout`; a server that answers slowly or not at all fails it.
+    /// Connects (for a socket made for a path), sends the HTTP Upgrade request and checks the server's
+    /// 101 answer and accept key, all within `timeout`; a server that answers slowly or not at all
+    /// fails it, and so does `close()` from another thread.
     func handshake(timeout: Duration = .seconds(5)) throws {
         let deadline = ContinuousClock.now + timeout
+        if let unixPath {
+            let code = Self.connectSocket(fd, to: unixPath, by: deadline) { lock.withLock { isClosed } }
+            guard code == 0 else { throw WebSocketError(description: "connect \(unixPath): \(String(cString: strerror(code)))") }
+            // A close() that came just as the connect went through found nothing to shut down.
+            guard !lock.withLock({ isClosed }) else { throw WebSocketError(description: "The connection was closed while connecting") }
+        }
         defer {
             setTimeout(SO_SNDTIMEO, nil)
             setTimeout(SO_RCVTIMEO, nil)

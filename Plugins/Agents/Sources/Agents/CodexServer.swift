@@ -74,16 +74,25 @@ final class CodexSupervisor {
     private let executable: URL?
     private let launcher: any CodexLaunching
     private let startTimeout: Duration
+    /// Looks at the endpoint off the main actor; tests replace it.
+    private let check: @Sendable (String) async -> Check
     private var process: (any CodexServerProcess)?
     private var launchCount = 0
 
     var ownsServer: Bool { process != nil }
 
-    init(endpoint: CodexEndpoint, executable: URL?, launcher: any CodexLaunching, startTimeout: Duration = .seconds(10)) {
+    init(
+        endpoint: CodexEndpoint,
+        executable: URL?,
+        launcher: any CodexLaunching,
+        startTimeout: Duration = .seconds(10),
+        check: @escaping @Sendable (String) async -> Check = { await CodexSupervisor.check($0) }
+    ) {
         self.endpoint = endpoint
         self.executable = executable
         self.launcher = launcher
         self.startTimeout = startTimeout
+        self.check = check
     }
 
     /// The delay before retry number `attempt` (from 0): 1, 2, 4, 8, 16, then 30 seconds.
@@ -92,12 +101,16 @@ final class CodexSupervisor {
     }
 
     /// Makes sure a server listens at the endpoint. Throws when the socket folder or socket is not
-    /// the user's alone, when codex is missing, or when a started server does not listen in time.
+    /// the user's alone, when something there does not accept in time, when codex is missing, or when
+    /// a started server does not listen in time. Throws `CancellationError` once its task is cancelled
+    /// (해제), so a check that ends after 해제 never starts a server.
     func ensure() async throws -> CodexServerOwnership {
         let path = endpoint.socketPath
-        switch Self.check(path) {
+        let found = await check(path)
+        try Task.checkCancellation()
+        switch found {
         case .listening: return process == nil ? .reused : .spawned
-        case .unsafe(let reason): throw CodexServerError(description: reason)
+        case .unsafe(let reason), .unreachable(let reason): throw CodexServerError(description: reason)
         case .absent: break
         }
         // Ours, but no longer listening: start over.
@@ -118,12 +131,14 @@ final class CodexSupervisor {
         let deadline = ContinuousClock.now + startTimeout
         while ContinuousClock.now < deadline {
             guard process === launched else { throw CodexServerError(description: "codex app-server가 바로 끝났어요.") }
-            switch Self.check(path) {
+            let found = await check(path)
+            try Task.checkCancellation()
+            switch found {
             case .listening: return .spawned
             case .unsafe(let reason):
                 stop()
                 throw CodexServerError(description: reason)
-            case .absent:
+            case .absent, .unreachable:
                 try await Task.sleep(for: .milliseconds(100))
             }
         }
@@ -146,10 +161,14 @@ final class CodexSupervisor {
         /// Nothing listens: no socket, or a stale file nobody accepts on.
         case absent
         case unsafe(String)
+        /// Something is there but did not accept within the check's time: try again later rather
+        /// than start a second server on its path.
+        case unreachable(String)
     }
 
-    /// Whether a server listens at `path` in a folder (0700) and socket (0600) of the user's own.
-    nonisolated static func check(_ path: String) -> Check {
+    /// Whether a server listens at `path` in a folder (0700) and socket (0600) of the user's own. Runs
+    /// off the main actor; the connect gives up after `timeout` or once the calling task is cancelled.
+    nonisolated static func check(_ path: String, timeout: Duration = .seconds(1)) async -> Check {
         let folder = (path as NSString).deletingLastPathComponent
         var info = stat()
         guard lstat(folder, &info) == 0 else { return .absent }
@@ -160,29 +179,20 @@ final class CodexSupervisor {
         guard info.st_mode & S_IFMT == S_IFSOCK, info.st_uid == getuid(), info.st_mode & 0o777 == 0o600 else {
             return .unsafe("\(path) 소켓을 다른 사용자도 쓸 수 있어서 연결하지 않았어요.")
         }
-        return canConnect(path) ? .listening : .absent
-    }
-
-    private nonisolated static func canConnect(_ path: String) -> Bool {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return false }
+        guard fd >= 0 else { return .absent }
         defer { close(fd) }
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let bytes = path.utf8CString
-        guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { return false }
-        withUnsafeMutableBytes(of: &address.sun_path) { raw in
-            bytes.withUnsafeBytes { raw.copyMemory(from: $0) }
+        switch WebSocket.connectSocket(fd, to: path, by: .now + timeout, abandoned: { Task.isCancelled }) {
+        case 0: return .listening
+        case ETIMEDOUT: return .unreachable("\(path) 소켓이 제때 연결을 받지 않았어요.")
+        default: return .absent
         }
-        return withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
-        } == 0
     }
 }
 
 /// One connection to the app-server as `CodexLink` uses it: `WebSocket` on this Mac, fakes in tests.
 protocol CodexConnection: AnyObject, Sendable {
-    /// Completes the connection (the HTTP Upgrade) within `timeout`; blocks.
+    /// Connects and completes the HTTP Upgrade within `timeout`; blocks.
     func handshake(timeout: Duration) throws
     /// Queues one message; never blocks.
     func send(text: String)
@@ -194,7 +204,10 @@ protocol CodexConnection: AnyObject, Sendable {
 
 /// Keeps the plugin connected while Codex is 연결: makes sure the server runs, connects over
 /// WebSocket, hands messages to the bridge, and when the socket closes (or the attempt fails) tries
-/// again after `CodexSupervisor.backoff`. Only the current connection reaches the bridge: one that
+/// again after `CodexSupervisor.backoff`. It shows as connected once the server accepted `initialize`;
+/// a refused or unanswered `initialize` drops the connection and retries with the reason. The
+/// connection is held from before it connects, so 해제 closes it wherever it waits. Only the current
+/// connection reaches the bridge: one that
 /// 해제 replaced may still be unwinding on its own thread, and it neither delivers messages nor
 /// closes the bridge.
 @MainActor
@@ -218,8 +231,11 @@ final class CodexLink {
     private let connect: @Sendable (String) throws -> any CodexConnection
     private let handshakeTimeout: Duration
     private var loop: Task<Void, Never>?
-    /// The connection from the moment it exists, so 해제 can close it even during the handshake.
+    /// The connection from the moment it exists, so 해제 can close it even while it connects.
     private var connection: (any CodexConnection)?
+    /// Why the bridge gave up on the current connection, and since when it was initialized.
+    private var failure: String?
+    private var readySince: ContinuousClock.Instant?
 
     init(
         supervisor: CodexSupervisor,
@@ -259,13 +275,8 @@ final class CodexLink {
             state = .connecting
             do {
                 let ownership = try await supervisor.ensure()
-                let path = supervisor.endpoint.socketPath
-                let connect = connect
-                let connection = try await Task.detached { try connect(path) }.value
-                guard !Task.isCancelled else {
-                    connection.close()
-                    return
-                }
+                // Not connected yet: the handshake connects it, and 해제 can close it from here on.
+                let connection = try connect(supervisor.endpoint.socketPath)
                 self.connection = connection
                 let timeout = handshakeTimeout
                 do {
@@ -277,16 +288,17 @@ final class CodexLink {
                 }
                 // 해제 during the handshake closed the connection already.
                 guard !Task.isCancelled, self.connection === connection else { return }
-                state = .connected(ownership)
-                let started = ContinuousClock.now
-                await session(connection)
+                failure = nil
+                readySince = nil
+                await session(connection, ownership)
                 // A connection 해제 replaced is not this loop's to clean up.
                 guard !Task.isCancelled, self.connection === connection else { return }
                 self.connection = nil
                 bridge.close()
-                // A connection that lasted resets the backoff; one that drops at once does not.
-                if ContinuousClock.now - started > .seconds(30) { attempt = 0 }
-                state = .retrying("app-server와 연결이 끊겼어요.")
+                // A connection that worked for a while resets the backoff; one that drops at once or
+                // never initialized does not.
+                if let readySince, ContinuousClock.now - readySince > .seconds(30) { attempt = 0 }
+                state = .retrying(failure ?? "app-server와 연결이 끊겼어요.")
             } catch let error as CodexServerError {
                 guard !Task.isCancelled else { return }
                 state = .retrying(error.description)
@@ -301,11 +313,23 @@ final class CodexLink {
     }
 
     /// Reads on its own thread until the connection closes; messages reach the bridge in order while
-    /// it is still the current connection.
-    private func session(_ connection: any CodexConnection) async {
-        bridge.open { message in
-            connection.send(text: CodexBridge.encode(message))
-        }
+    /// it is still the current connection. When the bridge gives up on the connection it is closed,
+    /// which ends the reading.
+    private func session(_ connection: any CodexConnection, _ ownership: CodexServerOwnership) async {
+        bridge.open(
+            send: { message in connection.send(text: CodexBridge.encode(message)) },
+            ready: { [weak self] in
+                guard let self, self.connection === connection else { return }
+                readySince = .now
+                state = .connected(ownership)
+            },
+            failed: { [weak self] reason in
+                guard let self, self.connection === connection else { return }
+                failure = reason
+                log("Dropped the codex app-server connection: \(reason)")
+                connection.close()
+            }
+        )
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
             Thread.detachNewThread { [weak self] in
                 while let text = try? connection.receive() {

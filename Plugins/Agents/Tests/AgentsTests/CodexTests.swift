@@ -566,7 +566,11 @@ func writeAll(_ fd: Int32, _ data: Data) {
             socket.send(text: big)
             returned.set()
         }
-        try await Task.sleep(for: .seconds(1))
+        // A blocking write would never return: the peer never reads. Masking 8 MiB in a debug build
+        // takes a while under a loaded test run, so the wait is generous.
+        for _ in 0..<500 where !returned.isSet {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         #expect(returned.isSet, "send waited for the peer")
         // Disconnect still works while the write is stuck.
         socket.close()

@@ -174,17 +174,19 @@ func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         link.stop()
         link.start()
         #expect(await eventually { new.sent.count == 1 })
-        #expect(link.state == .connected(.reused))
+        // Connected only once the server accepts `initialize`.
+        #expect(link.state == .connecting)
         // The old session unwinds only now, after handing over a request it read before 해제.
         old.deliver(CodexBridge.encode(try codexFixture("commandApproval")))
         old.finish()
         try await Task.sleep(for: .milliseconds(200))
         #expect(host.requests.isEmpty)
-        #expect(link.state == .connected(.reused))
+        #expect(link.state == .connecting)
         // The replacement still works: its answer to initialize gets `initialized` back.
         new.deliver(#"{"id":1,"result":{}}"#)
         #expect(await eventually { new.sent.count == 3 })
         #expect(new.sent.dropFirst().first == #"{"method":"initialized"}"#)
+        #expect(link.state == .connected(.reused))
         link.stop()
         new.finish()
     }
@@ -287,5 +289,241 @@ extension CodexBridgeTests {
             try jsonValue(#"{"id":"req-8","result":{"decision":"decline"}}"#),
             try jsonValue(#"{"id":10,"result":{"decision":"acceptForSession"}}"#),
         ])
+    }
+}
+
+// MARK: Every way a request leaves
+
+extension CodexBridgeTests {
+    @Test(arguments: [
+        // A secret question, which the terminal asks.
+        #"{"id":"req-8","method":"item/tool/requestUserInput","params":{"threadId":"019a0000-0000-7000-8000-000000000001","turnId":"t","itemId":"call_7","isBlocking":true,"questions":[{"id":"q_token","header":"토큰","question":"API 토큰을 입력해 주세요","isOther":false,"isSecret":true,"options":null}]}}"#,
+        // A question that cannot be read.
+        #"{"id":"req-8","method":"item/tool/requestUserInput","params":{"threadId":"019a0000-0000-7000-8000-000000000001","turnId":"t","itemId":"call_7","isBlocking":true,"questions":[{"header":"토큰"}]}}"#,
+        // A request meant for another client.
+        #"{"id":"req-8","method":"item/tool/call","params":{"threadId":"019a0000-0000-7000-8000-000000000001","turnId":"t","callId":"c","tool":"lookup","arguments":{}}}"#,
+    ])
+    func R07__a_reused_id_withdraws_the_older_request_whatever_replaces_it(replacement: String) async throws {
+        try connect()
+        host.responses = [Self.answer(CodexBridge.detailsButtonID)]
+        let first = bridge.receive(try codexFixture("commandApprovalLong"))
+        let item = try await screenItem()
+        #expect(bridge.receive(try jsonValue(replacement)) == nil)
+        for _ in 0..<100 where !bridge.screen.items.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(bridge.screen.items.isEmpty, "the older request still waits")
+        // The older request's answer must not go out as the answer to its replacement.
+        bridge.screen.respond(to: item.id, with: .allow)
+        await first?.value
+        #expect(outbox.messages.isEmpty)
+    }
+
+    @Test func R07__a_request_withdrawn_before_it_is_shown_never_reaches_the_notch() async throws {
+        try connect()
+        let resolved = bridge.receive(try codexFixture("commandApproval"))
+        bridge.receive(try codexFixture("resolved"))
+        await resolved?.value
+        let closed = bridge.receive(try codexFixture("userInput"))
+        bridge.close()
+        await closed?.value
+        #expect(host.requests.isEmpty)
+        #expect(outbox.messages.isEmpty)
+    }
+
+    static let mixedQuestions = #"{"id":15,"method":"item/tool/requestUserInput","params":{"threadId":"019a0000-0000-7000-8000-000000000001","turnId":"t","itemId":"call_8","isBlocking":true,"questions":[{"id":"q_note","header":"메모","question":"남길 말이 있나요?","isOther":true,"isSecret":false,"options":[{"label":"없어요","description":""}]},{"id":"q_env","header":"환경","question":"어디에 올릴까요?","isOther":false,"isSecret":false,"options":[{"label":"staging","description":""},{"label":"production","description":""}]}]}}"#
+
+    @Test func R07__the_screen_sends_only_answers_codex_accepts() async throws {
+        try connect()
+        host.responses = [Self.answer(CodexBridge.typeAnswersButtonID)]
+        let task = bridge.receive(try jsonValue(Self.mixedQuestions))
+        let item = try await screenItem()
+        guard case .questions(let questions, let picked) = item.content else {
+            Issue.record("not a question form")
+            return
+        }
+        var draft = AnswerDraft(questions, picked: picked)
+        draft.type("배포가 끝나면 알려 주세요", at: 0)
+        // Typed into a question that only takes its options: 보내기 must stay off.
+        draft.type("스테이징", at: 1)
+        #expect(draft.answers == nil, "the screen accepts an answer codex never receives")
+        draft.pick("production", at: 1)
+        #expect(draft.answers != nil)
+        bridge.screen.respond(to: item.id, with: draft.response)
+        await task?.value
+        #expect(outbox.messages == [try jsonValue(#"{"id":15,"result":{"answers":{"q_note":{"answers":["배포가 끝나면 알려 주세요"]},"q_env":{"answers":["production"]}}}}"#)])
+    }
+}
+
+/// Link states in the order they were set.
+@MainActor
+final class StateLog {
+    var all: [CodexLink.State] = []
+
+    func retried(because word: String) -> Bool {
+        all.contains { if case .retrying(let reason) = $0 { reason.contains(word) } else { false } }
+    }
+}
+
+extension CodexLinkTests {
+    @Test func R07__a_refused_initialize_drops_the_connection_and_retries() async throws {
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let refused = FakeConnection()
+        let next = FakeConnection()
+        let (link, listener) = try makeLink([refused, next])
+        defer { close(listener) }
+        let states = StateLog()
+        link.onState = { [states] in states.all.append($0) }
+        link.start()
+        #expect(await eventually { refused.sent.count == 1 })
+        refused.deliver(#"{"id":1,"error":{"code":-32600,"message":"Invalid request"}}"#)
+        #expect(await eventually { refused.closed }, "the refused connection stays open")
+        refused.finish()
+        #expect(await eventually { next.sent.count == 1 }, "no new attempt after the refusal")
+        #expect(!states.all.contains(.connected(.reused)), "settings showed a connection that never initialized")
+        #expect(states.retried(because: "초기화"))
+        link.stop()
+        next.finish()
+    }
+}
+
+@MainActor
+@Suite struct CodexOwnershipTests {
+    @Test func R07__releasing_the_plugin_frees_the_codex_link_and_model() throws {
+        let directory = try makeDirectory()
+        weak var link: CodexLink?
+        weak var model: CodexModel?
+        do {
+            let plugin = AgentsPlugin(
+                context: try makeContext(host: FakeHost(), directory: directory),
+                socketPath: directory.appendingPathComponent("s").path,
+                settingsURL: directory.appendingPathComponent("settings.json"),
+                activator: FakeActivator(),
+                codexEndpoint: CodexEndpoint(home: directory),
+                codexExecutable: nil,
+                codexLauncher: FakeLauncher(socketPath: ""),
+                codexTerminal: { _ in nil }
+            )
+            link = plugin.codexLink
+            model = plugin.codex
+        }
+        #expect(link == nil, "the link outlives the plugin")
+        #expect(model == nil, "the Codex model outlives the plugin")
+    }
+}
+
+extension WebSocketTests {
+    @Test func R07__a_socket_closed_before_its_handshake_never_connects() throws {
+        let (folder, path) = makeSocketPath()
+        defer { try? FileManager.default.removeItem(atPath: folder) }
+        let listener = try listen(at: path)
+        defer { close(listener) }
+        // The link holds the socket before anything can block, so 해제 can close it.
+        let socket = try WebSocket(unixPath: path)
+        socket.close()
+        #expect(throws: WebSocketError.self) { try socket.handshake(timeout: .seconds(1)) }
+        _ = fcntl(listener, F_SETFL, fcntl(listener, F_GETFL) | O_NONBLOCK)
+        let accepted = Darwin.accept(listener, nil, nil)
+        if accepted >= 0 { close(accepted) }
+        #expect(accepted < 0, "the socket connected before its handshake")
+    }
+}
+
+// MARK: Initialize deadline, the server check, question forms
+
+/// Strings collected on the main actor.
+@MainActor
+final class Notes {
+    var all: [String] = []
+}
+
+extension CodexBridgeTests {
+    @Test func R07__an_unanswered_initialize_fails_only_its_own_connection() async throws {
+        let bridge = CodexBridge(
+            context: try makeContext(host: host, directory: try makeDirectory()),
+            activator: activator,
+            terminal: { _ in nil },
+            initializeTimeout: .milliseconds(150)
+        )
+        let notes = Notes()
+        // Replaced at once: its deadline must not fire into the next connection.
+        bridge.open(send: { _ in }, ready: { notes.all.append("ready 1") }, failed: { notes.all.append("failed 1: \($0)") })
+        bridge.open(send: { _ in }, ready: { notes.all.append("ready 2") }, failed: { notes.all.append("failed 2: \($0)") })
+        bridge.receive(try jsonValue(#"{"id":1,"result":{}}"#))
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(notes.all == ["ready 2"])
+        bridge.open(send: { _ in }, ready: { notes.all.append("ready 3") }, failed: { notes.all.append("failed 3: \($0)") })
+        #expect(await eventually { notes.all.count == 2 })
+        #expect(notes.all.last == "failed 3: app-server가 초기화 요청에 답하지 않았어요.")
+        // A closed connection's messages are no longer read.
+        bridge.receive(try codexFixture("commandApproval"))
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(host.requests.isEmpty)
+    }
+
+    @Test func R07__an_options_only_question_gets_no_text_field_on_the_screen() async throws {
+        try connect()
+        host.responses = [Self.answer(CodexBridge.typeAnswersButtonID)]
+        let task = bridge.receive(try jsonValue(Self.mixedQuestions))
+        let item = try await screenItem()
+        guard case .questions(let questions, _) = item.content else {
+            Issue.record("not a question form")
+            return
+        }
+        #expect(questions.map(\.takesText) == [true, false])
+        try capture(AgentsScreen(model: bridge.screen).padding(.horizontal, 12).frame(width: 390, height: 400).background(Color.black), named: "R07-render-screen-mixed")
+        bridge.screen.respond(to: item.id, with: .released)
+        await task?.value
+    }
+}
+
+/// A server check the test holds until it lets go.
+final class HeldCheck: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entered = false
+    private var released = false
+    private var mainThread: Bool?
+
+    var hasEntered: Bool { lock.withLock { entered } }
+    var ranOnMainThread: Bool? { lock.withLock { mainThread } }
+    func release() { lock.withLock { released = true } }
+
+    func check(_ path: String) async -> CodexSupervisor.Check {
+        lock.withLock {
+            entered = true
+            mainThread = pthread_main_np() != 0
+        }
+        while !lock.withLock({ released }) {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return .absent
+    }
+}
+
+extension CodexSupervisorTests {
+    @Test func R07__the_server_check_runs_off_the_main_actor_and_disconnect_ends_it() async throws {
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let held = HeldCheck()
+        let launcher = FakeLauncher(socketPath: endpoint.socketPath)
+        defer { launcher.listeners.forEach { close($0) } }
+        let supervisor = CodexSupervisor(endpoint: endpoint, executable: codex, launcher: launcher, check: held.check)
+        let attempt = Task { try await supervisor.ensure() }
+        #expect(await eventually { held.hasEntered })
+        #expect(held.ranOnMainThread == false)
+        // 해제 as the link does it: cancel the attempt, then stop the supervisor.
+        attempt.cancel()
+        supervisor.stop()
+        held.release()
+        await #expect(throws: CancellationError.self) { try await attempt.value }
+        #expect(launcher.launches.isEmpty, "a server started after 해제")
+    }
+
+    @Test func R07__the_real_check_is_bounded_and_off_the_main_actor() async throws {
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let fd = try listen(at: endpoint.socketPath)
+        #expect(await CodexSupervisor.check(endpoint.socketPath, timeout: .milliseconds(200)) == .listening)
+        // The socket file stays behind, but nothing accepts on it.
+        close(fd)
+        #expect(await CodexSupervisor.check(endpoint.socketPath, timeout: .milliseconds(200)) == .absent)
     }
 }

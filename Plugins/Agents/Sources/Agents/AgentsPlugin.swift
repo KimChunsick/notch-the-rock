@@ -73,7 +73,9 @@ public final class AgentsPlugin: NotchPlugin {
             log: { [log = context.log] in log.error($0) }
         )
         let codex = CodexModel(defaults: defaults, executable: codexExecutable, start: { link.start() }, stop: { link.stop() })
-        link.onState = { codex.state = $0 }
+        // The plugin owns the model and the link; the model's closures own the link, so the link
+        // must not own the model back.
+        link.onState = { [weak codex] in codex?.state = $0 }
         self.codexBridge = codexBridge
         codexLink = link
         self.codex = codex
