@@ -9,9 +9,9 @@ struct NotchPointerTests {
     let notchRect = CGRect(x: 646, y: 924, width: 179, height: 32)
 
     /// The home, 264 pt tall, and a plugin screen, 124 pt tall.
-    var home: NotchLayout.Metrics { NotchLayout.metrics(for: .expanded, notch: notchRect.size, hasActivity: false, content: CGSize(width: 390, height: 200)) }
-    var detail: NotchLayout.Metrics { NotchLayout.metrics(for: .expanded, notch: notchRect.size, hasActivity: false, content: CGSize(width: 191, height: 60)) }
-    var collapsed: NotchLayout.Metrics { NotchLayout.metrics(for: .collapsed, notch: notchRect.size, hasActivity: false) }
+    var home: NotchLayout.Metrics { NotchLayout.metrics(for: .expanded, notch: notchRect.size, content: CGSize(width: 390, height: 200)) }
+    var detail: NotchLayout.Metrics { NotchLayout.metrics(for: .expanded, notch: notchRect.size, content: CGSize(width: 191, height: 60)) }
+    var collapsed: NotchLayout.Metrics { NotchLayout.metrics(for: .collapsed, notch: notchRect.size) }
 
     /// A lower home row: on the home, below the plugin screen.
     var lowRow: CGPoint { CGPoint(x: notchRect.midX, y: 720) }

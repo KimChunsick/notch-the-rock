@@ -70,20 +70,24 @@ private func models() throws -> [(String, NowPlayingModel)] {
     #expect(paused.allSatisfy { $0 == PlaybackBars.stillLevels })
 }
 
-/// The collapsed notch around the wings, as the app draws it: 78 pt wings beside the notch.
+/// The collapsed notch around the wings, as the app draws it at a 32 pt notch: each view as far
+/// from the side edge as from the bottom (5 pt beside the art, 9 pt beside the bars), both wings
+/// as wide as the bars' (36 pt).
 private struct CollapsedNotch: View {
     let model: NowPlayingModel
 
     var body: some View {
         HStack(spacing: 0) {
             NowPlayingWings.Leading(model: model)
-                .frame(width: 78, height: 32)
-            Spacer(minLength: 180)
+                .padding(5)
+                .frame(width: 36, alignment: .leading)
+            Spacer(minLength: 185)
             NowPlayingWings.Trailing(model: model)
-                .frame(width: 78, height: 32)
+                .padding(9)
+                .frame(width: 36, alignment: .trailing)
         }
         .padding(.horizontal, 6)
-        .frame(width: 348, height: 32)
+        .frame(width: 185 + 2 * (6 + 36), height: 32)
         .background(.black, in: UnevenRoundedRectangle(bottomLeadingRadius: 10, bottomTrailingRadius: 10))
         .foregroundStyle(.white)
     }
@@ -201,5 +205,70 @@ private func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom
 @Test func R15__now_playing_tab_draws_to_its_edges() throws {
     for (name, model) in try models() {
         expectNoOuterSpace(try inkInsets(NowPlayingView(model: model) { _ in }), name)
+    }
+}
+
+/// The wings' views carry no space of their own: the host puts the same space beside and below
+/// each one (R22), so their ink reaches their left, right and bottom edges within 1 pt. The art
+/// fills its square; the bars stand on its bottom edge, playing or paused.
+@MainActor
+@Test func R22__wing_views_have_no_outer_padding() throws {
+    for (name, model) in try models() where name == "playing" || name == "paused" {
+        let views: [(String, AnyView)] = [
+            ("leading", AnyView(NowPlayingWings.Leading(model: model))),
+            ("trailing", AnyView(NowPlayingWings.Trailing(model: model))),
+        ]
+        for (side, view) in views {
+            let insets = try inkInsets(view)
+            print("R22 \(name) \(side): ink insets left \(insets.left) right \(insets.right) bottom \(insets.bottom) pt")
+            for (edge, inset) in [("left", insets.left), ("right", insets.right), ("bottom", insets.bottom)] {
+                #expect(inset <= 1, "\(name) \(side): \(inset) pt of empty space at the \(edge) edge")
+            }
+        }
+    }
+}
+
+/// The wide tile has previous, play/pause and next, the small one play/pause alone. Each sends the
+/// command the tab's button sends through the plugin's helper, and each is a hit target of at least
+/// 24 x 24 pt.
+@MainActor
+@Test func R24__tile_buttons_send_previous_play_pause_and_next() throws {
+    let launcher = FakeLauncher()
+    let plugin = NowPlayingPlugin(context: try makeContext(host: RecordingHost()), launcher: launcher, clock: VirtualClock())
+    let playing = TrackInfo(title: "t", sampledAt: Date(timeIntervalSince1970: 0), isPlaying: true)
+    let paused = TrackInfo(title: "t", sampledAt: Date(timeIntervalSince1970: 0), isPlaying: false)
+
+    let wide = NowPlayingTile.buttons(for: playing, size: .wide, send: plugin.send)
+    #expect(wide.map(\.label) == ["이전 곡", "일시정지", "다음 곡"])
+    wide.forEach { $0.action() }
+    #expect(launcher.sent == [.previous, .pause, .next])
+
+    let small = NowPlayingTile.buttons(for: paused, size: .small, send: plugin.send)
+    #expect(small.map(\.label) == ["재생"])
+    small.forEach { $0.action() }
+    #expect(launcher.sent == [.previous, .pause, .next, .play])
+
+    for button in wide + small {
+        let size = NSHostingView(rootView: button).fittingSize
+        #expect(size.width >= 24 && size.height >= 24, "\(button.label): \(size)")
+    }
+}
+
+/// Both tile sizes while a track plays, to look at: with NOWPLAYING_RENDER_DIR set they are saved
+/// there as R24-render-tile-*-T83.png.
+@MainActor
+@Test func R24__renders_both_tiles_with_their_buttons() throws {
+    let playing = NowPlayingModel()
+    playing.apply(try #require(HelperLine(infoLine(
+        title: "알루미늄", artist: "Broken Valentine", duration: 343, elapsed: 120,
+        timestamp: Date.now.timeIntervalSince1970, artwork: artworkObject(samplePNG(side: 240))
+    ))))
+    let directory = ProcessInfo.processInfo.environment["NOWPLAYING_RENDER_DIR"].map { URL(fileURLWithPath: $0) }
+    for size in [TileSize.wide, .small] {
+        let image = try render(OnNotch(tile: tileFrames[size]) { NowPlayingTile(model: playing, size: size) { _ in } })
+        #expect(image.width > 100)
+        guard let directory else { continue }
+        let png = try #require(NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))
+        try png.write(to: directory.appendingPathComponent("R24-render-tile-\(size == .wide ? "wide" : "small")-T83.png"))
     }
 }

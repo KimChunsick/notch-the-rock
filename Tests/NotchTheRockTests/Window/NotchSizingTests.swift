@@ -81,7 +81,7 @@ struct NotchSizingTests {
         let notchRect = geometry.notchRect
         for content in [CGSize(width: 191, height: 108), CGSize(width: 390, height: 230)] {
             for state in [NotchState.expanded, .attention, .takeover, .hud] {
-                let metrics = NotchLayout.metrics(for: state, notch: notchRect.size, hasActivity: false, content: content)
+                let metrics = NotchLayout.metrics(for: state, notch: notchRect.size, content: content)
                 let frame = NotchLayout.frame(of: metrics, notchRect: notchRect)
                 #expect(frame.maxY == geometry.screenFrame.maxY)
                 #expect(abs(frame.midX - notchRect.midX) <= 0.5)
@@ -93,8 +93,8 @@ struct NotchSizingTests {
     /// it and inside a taller one.
     @Test func R15__hit_testing_follows_the_measured_frame() {
         let notchRect = CGRect(x: 646, y: 924, width: 179, height: 32)
-        let small = NotchLayout.metrics(for: .expanded, notch: notchRect.size, hasActivity: false, content: CGSize(width: 191, height: 60))
-        let tall = NotchLayout.metrics(for: .expanded, notch: notchRect.size, hasActivity: false, content: CGSize(width: 191, height: 200))
+        let small = NotchLayout.metrics(for: .expanded, notch: notchRect.size, content: CGSize(width: 191, height: 60))
+        let tall = NotchLayout.metrics(for: .expanded, notch: notchRect.size, content: CGSize(width: 191, height: 200))
         let point = CGPoint(x: notchRect.midX, y: notchRect.maxY - small.size.height - 20)
         #expect(!NotchLayout.contains(point, metrics: small, notchRect: notchRect))
         #expect(NotchLayout.contains(point, metrics: tall, notchRect: notchRect))

@@ -21,6 +21,8 @@ struct NotchRootView: View {
 
     /// The measured size of what the current state shows.
     @State private var contentSize: CGSize = .zero
+    /// Each wing's width for the live activity, as `ActivityWings` measures its views.
+    @State private var activityWing: CGFloat = 0
 
     /// Opening is a little lively; closing settles without overshoot.
     private static let openSpring = Animation.spring(response: 0.42, dampingFraction: 0.74)
@@ -32,7 +34,7 @@ struct NotchRootView: View {
         let metrics = NotchLayout.metrics(
             for: state,
             notch: notchSize,
-            hasActivity: host.liveActivity != nil,
+            activityWing: host.liveActivity == nil ? 0 : activityWing,
             content: contentSize,
             minWidth: showsHomeBand ? BandLayout.minimumWidth(notch: notchSize, leading: HomeChrome.editWidth, trailing: HomeChrome.gearWidth) : 0
         )
@@ -65,11 +67,15 @@ struct NotchRootView: View {
         switch state {
         case .collapsed:
             if let posted = host.liveActivity {
-                Wings(notchSize: notchSize, wingWidth: NotchLayout.activityWingWidth) {
+                ActivityWings(notch: notchSize) {
                     posted.activity.leading
-                } trailing: {
                     posted.activity.trailing
                 }
+                .foregroundStyle(.white)
+                .font(.system(size: 12, weight: .medium))
+                .onGeometryChange(for: CGFloat.self) { ($0.size.width - notchSize.width) / 2 } action: { activityWing = $0 }
+                // Centred on the camera while the shape springs to the measured wings around it.
+                .frame(maxWidth: .infinity)
                 .id("activity \(posted.pluginID) \(posted.activity.id)")
                 .transition(Self.contentTransition)
             }
@@ -180,24 +186,37 @@ private struct AttentionGlow: View {
     }
 }
 
-/// Views on both sides of the collapsed notch, keeping the camera area in the middle free.
-private struct Wings<Leading: View, Trailing: View>: View {
-    let notchSize: CGSize
-    let wingWidth: CGFloat
-    @ViewBuilder let leading: Leading
-    @ViewBuilder let trailing: Trailing
+/// The live activity's two views beside the camera. Each sits `NotchLayout.activityInset` from the
+/// shape's side edge and from its bottom, and at least as far from the camera; both wings are as
+/// wide as the wider one needs, so the shape stays centred on the camera. Its size is always its own,
+/// the camera and both wings without the shoulders, whatever it is offered: the root measures it
+/// for the shape's width.
+private struct ActivityWings: Layout {
+    let notch: CGSize
 
-    var body: some View {
-        HStack(spacing: 0) {
-            leading
-                .frame(width: wingWidth, height: notchSize.height)
-            Spacer(minLength: notchSize.width)
-            trailing
-                .frame(width: wingWidth, height: notchSize.height)
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let wing = subviews.prefix(2).map { subview in
+            let size = fittedSize(of: subview)
+            return size.width + 2 * NotchLayout.activityInset(contentHeight: size.height, notchHeight: notch.height)
+        }.max() ?? 0
+        return CGSize(width: notch.width + 2 * min(wing, NotchLayout.maxActivityWing), height: notch.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for (index, subview) in subviews.prefix(2).enumerated() {
+            let size = fittedSize(of: subview)
+            let inset = NotchLayout.activityInset(contentHeight: size.height, notchHeight: notch.height)
+            let x = index == 0 ? bounds.minX + inset : bounds.maxX - inset - size.width
+            subview.place(at: CGPoint(x: x, y: bounds.minY + inset), anchor: .topLeading, proposal: ProposedViewSize(size))
         }
-        .padding(.horizontal, NotchLayout.collapsedShoulder)
-        .foregroundStyle(.white)
-        .font(.system(size: 12, weight: .medium))
+    }
+
+    /// A view's own size, no taller than the notch and no wider than the widest wing leaves room for.
+    private func fittedSize(of subview: LayoutSubview) -> CGSize {
+        let ideal = subview.sizeThatFits(.unspecified)
+        let height = min(ideal.height, notch.height)
+        let room = NotchLayout.maxActivityWing - 2 * NotchLayout.activityInset(contentHeight: height, notchHeight: notch.height)
+        return CGSize(width: min(ideal.width, room), height: height)
     }
 }
 

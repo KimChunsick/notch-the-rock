@@ -53,7 +53,7 @@ import Testing
     func measure(_ name: String, minWidth: CGFloat = 0, _ content: some View, band: @escaping (CGFloat) -> some View = { _ in EmptyView() }) async throws -> Gaps {
         let measured = IntrinsicSizeLayout(maxSize: NotchSizing.maxContentSize) { content }
         let contentSize = NSHostingView(rootView: measured.environment(\.colorScheme, .dark)).fittingSize
-        let metrics = NotchLayout.metrics(for: .expanded, notch: Self.notch, hasActivity: false, content: contentSize, minWidth: minWidth)
+        let metrics = NotchLayout.metrics(for: .expanded, notch: Self.notch, content: contentSize, minWidth: minWidth)
         let canvas = CGSize(width: metrics.size.width + 2 * Self.margin, height: metrics.size.height + Self.margin)
         let rep = try snapshot(
             NotchSurface(metrics: metrics) { measured } band: { band(metrics.size.width) }

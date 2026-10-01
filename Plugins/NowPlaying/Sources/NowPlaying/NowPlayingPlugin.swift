@@ -25,8 +25,9 @@ public final class NowPlayingPlugin: NotchPlugin {
     static let activityID = "now-playing"
     /// Live activity priority while something plays: something the user is doing, as the docs say.
     static let playingPriority = 100
-    /// Paused, the item stays beside the notch as ambient information.
-    static let pausedPriority = 0
+    /// How long the wings stay after a pause: a track change can report paused for a moment, and the
+    /// wings should not flicker for it.
+    static let pauseGrace: Duration = .milliseconds(1500)
 
     let model = NowPlayingModel()
     private let context: NotchContext
@@ -43,8 +44,9 @@ public final class NowPlayingPlugin: NotchPlugin {
     private var runningTime: (@MainActor () -> Duration)?
     private var backoff = RestartBackoff()
     private var restartTask: Task<Void, Never>?
-    /// Priority of the posted live activity, nil while none is posted.
-    private var postedPriority: Int?
+    private var isActivityPosted = false
+    /// Waits out `pauseGrace` after a pause, then takes the wings down.
+    private var pauseTask: Task<Void, Never>?
 
     public convenience init(context: NotchContext) {
         let library = context.bundleURL.appendingPathComponent(HelperCommand.libraryPath)
@@ -163,21 +165,44 @@ public final class NowPlayingPlugin: NotchPlugin {
         startStream()
     }
 
-    /// Posts the wings while an item is playing or paused and clears them when nothing is. The
-    /// posted views follow the model, so a new post is needed only when the priority changes.
+    /// Posts the wings while an item plays. A pause takes them down after `pauseGrace` unless play
+    /// comes back first; nothing playing (or the helper gone) takes them down at once. An item that
+    /// is paused when it appears posts nothing. The posted views follow the model, so the wings are
+    /// posted once while they stay.
     private func updateActivity() {
-        let priority: Int? = model.track.map { $0.isPlaying ? Self.playingPriority : Self.pausedPriority }
-        guard priority != postedPriority else { return }
-        if let priority {
-            context.post(LiveActivity(id: Self.activityID, priority: priority) { [model] in
+        switch model.track?.isPlaying {
+        case true?:
+            cancelPauseGrace()
+            guard !isActivityPosted else { return }
+            context.post(LiveActivity(id: Self.activityID, priority: Self.playingPriority) { [model] in
                 NowPlayingWings.Leading(model: model)
             } trailing: { [model] in
                 NowPlayingWings.Trailing(model: model)
             })
-        } else {
-            context.clear(activityID: Self.activityID)
+            isActivityPosted = true
+        case false?:
+            guard isActivityPosted, pauseTask == nil else { return }
+            pauseTask = Task { [weak self, wait] in
+                do { try await wait(Self.pauseGrace) } catch { return }
+                guard !Task.isCancelled else { return }
+                self?.pauseTask = nil
+                self?.clearActivity()
+            }
+        case nil:
+            cancelPauseGrace()
+            clearActivity()
         }
-        postedPriority = priority
+    }
+
+    private func cancelPauseGrace() {
+        pauseTask?.cancel()
+        pauseTask = nil
+    }
+
+    private func clearActivity() {
+        guard isActivityPosted else { return }
+        context.clear(activityID: Self.activityID)
+        isActivityPosted = false
     }
 }
 

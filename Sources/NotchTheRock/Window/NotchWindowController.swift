@@ -207,7 +207,7 @@ final class NotchWindowController {
         if pointer == nil {
             pointer = NotchPointer(
                 notchRect: notchRect,
-                metrics: NotchLayout.metrics(for: host.state, notch: notchRect.size, hasActivity: host.liveActivity != nil)
+                metrics: NotchLayout.metrics(for: host.state, notch: notchRect.size)
             )
         }
         pointer?.notchRect = notchRect

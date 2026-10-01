@@ -51,19 +51,31 @@ enum NotchLayout {
         height: 44 + NotchSizing.maxContentSize.height + 2 * NotchSizing.padding + glowMargin
     )
     static let glowMargin: CGFloat = 30
-    static let activityWingWidth: CGFloat = 78
+    /// The widest a live activity's wing gets, its views and their insets included, so a plugin
+    /// cannot widen the collapsed notch without bound: the fixed wing the measured one replaced.
+    static let maxActivityWing: CGFloat = 78
     static let collapsedShoulder: CGFloat = 6
     static let collapsedBottom: CGFloat = 10
     static let openShoulder: CGFloat = 14
     static let openBottom: CGFloat = 30
 
+    /// The space a live activity's view keeps in its wing, on the outer side and below it: what the
+    /// notch height leaves above and below the view, halved, so it sits as far from the shape's side
+    /// edge as from its bottom. Toward the camera it keeps at least as much.
+    static func activityInset(contentHeight: CGFloat, notchHeight: CGFloat) -> CGFloat {
+        max(0, (notchHeight - contentHeight) / 2)
+    }
+
     /// - Parameters:
+    ///   - activityWing: the width of each wing beside the camera for the live activity, as
+    ///     `ActivityWings` measures its views; 0 without one. Collapsed only, at most `maxActivityWing`.
     ///   - content: the measured size of what the state shows (see `NotchSizing`); unused when collapsed.
     ///   - minWidth: a wider minimum for the expanded shape, e.g. for controls in the band.
-    static func metrics(for state: NotchState, notch: CGSize, hasActivity: Bool, content: CGSize = .zero, minWidth: CGFloat = 0) -> Metrics {
+    static func metrics(for state: NotchState, notch: CGSize, activityWing: CGFloat = 0, content: CGSize = .zero, minWidth: CGFloat = 0) -> Metrics {
         switch state {
         case .collapsed:
-            let size = CGSize(width: notch.width + 2 * (collapsedShoulder + (hasActivity ? activityWingWidth : 0)), height: notch.height)
+            let wing = min(max(activityWing, 0), maxActivityWing)
+            let size = CGSize(width: notch.width + 2 * (collapsedShoulder + wing), height: notch.height)
             return Metrics(size: size, shoulderRadius: collapsedShoulder, bottomRadius: collapsedBottom, content: CGRect(origin: .zero, size: size))
         case .hud:
             let frame = NotchSizing.bandFrame(content: content, notch: notch)
