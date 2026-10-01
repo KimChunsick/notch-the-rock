@@ -9,10 +9,12 @@ import CoreGraphics
 /// - When the expanded shape shrinks (a tile opening a smaller plugin screen, back, another screen)
 ///   while the pointer hovers it, the old frame and `keepOpenMargin` around it stay open until the
 ///   pointer enters the new shape (the usual rules again), leaves that region away from the notch
-///   (it hangs from the screen top around the notch), or clicks off the shape. For `shrinkFloor`
-///   after the shrink, leaving is ignored so the resize cannot close it; where the pointer rests
-///   when it ends (`floorEnded`) counts as a move. A notch the pointer has not entered since it
-///   opened (the hotkey, a link) keeps the usual rules.
+///   (it hangs from the screen top around the notch), or clicks beyond it off the shape. For
+///   `shrinkFloor` after the shrink, leaving is ignored so the resize cannot close it; where the
+///   pointer rests when it ends (`floorEnded`) counts as a move. Once the keep-open has ended, the
+///   pointer still on the larger shape drawn while it springs and off the new one closes the
+///   notch when the shape settles (or at the floor's end). A notch the pointer has not entered
+///   since it opened (the hotkey, a link) keeps the usual rules.
 /// - While the shape springs to a new size, the window takes mouse events on the frame drawn now
 ///   and on the frame it is heading to; once it settles, on that frame alone.
 /// - A tile drag holds the notch open, and the window takes every mouse event, until the drag ends
@@ -65,6 +67,8 @@ struct NotchPointer {
     private var pointerInside = false
     private var isDragging = false
     private var keepOpen: KeepOpen?
+    /// A shrink kept the old frame open and the shape has not settled since: see `settledCheck(at:)`.
+    private var checksSettledShape = false
 
     init(notchRect: CGRect, metrics: NotchLayout.Metrics) {
         self.notchRect = notchRect
@@ -82,17 +86,19 @@ struct NotchPointer {
         case .pointerMoved:
             return moved(to: pointer, now: now)
         case .clicked:
-            if !isOnShape(pointer) { keepOpen = nil }
+            if let keepOpen, !isOnShape(pointer), !isIn(keepOpen.region, pointer) { self.keepOpen = nil }
             return moved(to: pointer, now: now)
         case .floorEnded:
-            guard keepOpen != nil else { return nil }
+            guard keepOpen != nil else { return settledCheck(at: pointer) }
             return moved(to: pointer, now: now)
         case .shapeChanged(let metrics, let expanded):
             reshaped(to: metrics, expanded: expanded, pointer: pointer, now: now)
             return nil
         case .shapeDrawn(let metrics):
             drawn = metrics
-            return nil
+            guard drawn == destination else { return nil }
+            defer { checksSettledShape = false }
+            return settledCheck(at: pointer)
         case .dragBegan:
             isDragging = true
             pointerInside = true
@@ -121,6 +127,7 @@ struct NotchPointer {
         destination = metrics
         guard expanded else {
             keepOpen = nil
+            checksSettledShape = false
             return
         }
         let region = old.insetBy(dx: -Self.keepOpenMargin, dy: -Self.keepOpenMargin)
@@ -129,6 +136,16 @@ struct NotchPointer {
         else { return }
         // One screen change can shrink in steps; the first frame stays open.
         keepOpen = KeepOpen(region: keepOpen.map { $0.region.union(region) } ?? region, floorEnd: now + Self.shrinkFloor)
+        checksSettledShape = true
+    }
+
+    /// After a shrink kept the old frame open and the keep-open ended while the larger shape was
+    /// still drawn (the pointer entered the new shape, then went back onto the larger one): no move
+    /// reports leaving it as it shrinks away, so the pointer off the shape now leaves.
+    private mutating func settledCheck(at point: CGPoint) -> Hover? {
+        guard checksSettledShape, keepOpen == nil, !isDragging, pointerInside, !isOnShape(point) else { return nil }
+        pointerInside = false
+        return .leave
     }
 
     /// In `region`, the pointer on the screen's top row included; above it is another display.

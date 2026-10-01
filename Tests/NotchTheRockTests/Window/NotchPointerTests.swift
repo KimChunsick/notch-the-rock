@@ -142,7 +142,7 @@ struct NotchPointerTests {
         #expect(held.keepOpenFloorEnd == nil)
     }
 
-    @Test func R41__escape_and_a_click_outside_still_close() {
+    @Test func R41__escape_and_a_click_beyond_the_old_frame_still_close() {
         // Esc collapses the notch: the old frame is no longer kept, and hovering the notch opens it again.
         var escaped = NotchPointer(notchRect: notchRect, metrics: home)
         #expect(escaped.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
@@ -153,15 +153,69 @@ struct NotchPointerTests {
         #expect(escaped.handle(.pointerMoved, at: nearLowRow, now: t0 + .milliseconds(300)) == .leave)
         #expect(escaped.handle(.pointerMoved, at: CGPoint(x: notchRect.midX, y: 950), now: t0 + .seconds(1)) == .enter)
 
-        // A click off the new shape ends the keep-open, even during the floor.
+        // A click beyond the old frame ends the keep-open, even during the floor.
         var clicked = NotchPointer(notchRect: notchRect, metrics: home)
         #expect(clicked.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
         #expect(clicked.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0) == nil)
-        // A second click on the tile while the home is still drawn is on the shape.
-        #expect(clicked.handle(.clicked, at: lowRow, now: t0 + .milliseconds(100)) == nil)
-        #expect(clicked.handle(.shapeDrawn(detail), at: lowRow, now: t0 + .milliseconds(300)) == nil)
-        #expect(clicked.handle(.clicked, at: nearLowRow, now: t0 + .milliseconds(400)) == .leave)
+        #expect(clicked.handle(.clicked, at: away, now: t0 + .milliseconds(100)) == .leave)
         #expect(clicked.keepOpenFloorEnd == nil)
+    }
+
+    @Test func R41__a_click_inside_the_old_frame_keeps_it_open() {
+        var pointer = NotchPointer(notchRect: notchRect, metrics: home)
+        #expect(pointer.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
+        #expect(pointer.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0) == nil)
+        // A second click on the tile while the home is still drawn is on the shape.
+        #expect(pointer.handle(.clicked, at: lowRow, now: t0 + .milliseconds(100)) == nil)
+        #expect(pointer.handle(.shapeDrawn(detail), at: lowRow, now: t0 + .milliseconds(300)) == nil)
+        // Off the plugin screen, inside the home's frame: clicks there, during the floor or long after
+        // it at the tile's spot, keep it open, and so does the next move.
+        #expect(pointer.handle(.clicked, at: nearLowRow, now: t0 + .milliseconds(400)) == nil)
+        #expect(pointer.handle(.clicked, at: lowRow, now: t0 + .seconds(2)) == nil)
+        #expect(pointer.keepOpenFloorEnd != nil)
+        #expect(pointer.handle(.pointerMoved, at: nearLowRow, now: t0 + .seconds(3)) == nil)
+        #expect(pointer.handle(.pointerMoved, at: away, now: t0 + .seconds(4)) == .leave)
+    }
+
+    /// Shapes on the way from the home to the plugin screen: `nearLowRow` is on `halfway`, off
+    /// `nearlyDetail` (a last frame drawn a hair off the plugin screen).
+    var halfway: NotchLayout.Metrics { NotchLayout.metrics(for: .expanded, notch: notchRect.size, content: CGSize(width: 300, height: 190)) }
+    var nearlyDetail: NotchLayout.Metrics { NotchLayout.metrics(for: .expanded, notch: notchRect.size, content: CGSize(width: 192, height: 61)) }
+
+    @Test func R41__entering_and_leaving_the_smaller_shape_while_it_springs_closes_once_it_settles() {
+        // Into the plugin screen while the home is still drawn, then back out onto the larger shape
+        // drawn around it, and still: the floor's end leaves it open, the settled shape closes it.
+        var pointer = NotchPointer(notchRect: notchRect, metrics: home)
+        #expect(pointer.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
+        #expect(pointer.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0) == nil)
+        #expect(pointer.handle(.pointerMoved, at: inDetail, now: t0 + .milliseconds(100)) == nil)
+        #expect(pointer.handle(.shapeDrawn(halfway), at: inDetail, now: t0 + .milliseconds(150)) == nil)
+        #expect(pointer.handle(.pointerMoved, at: nearLowRow, now: t0 + .milliseconds(200)) == nil)
+        #expect(pointer.takesMouseEvents(at: nearLowRow))
+        #expect(pointer.handle(.floorEnded, at: nearLowRow, now: t0 + .milliseconds(600)) == nil)
+        #expect(pointer.handle(.shapeDrawn(detail), at: nearLowRow, now: t0 + .milliseconds(700)) == .leave)
+        #expect(pointer.handle(.pointerMoved, at: away, now: t0 + .seconds(1)) == nil)
+
+        // The same, back in the plugin screen when it settles: open.
+        var back = NotchPointer(notchRect: notchRect, metrics: home)
+        #expect(back.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
+        #expect(back.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0) == nil)
+        #expect(back.handle(.pointerMoved, at: inDetail, now: t0 + .milliseconds(100)) == nil)
+        #expect(back.handle(.shapeDrawn(halfway), at: inDetail, now: t0 + .milliseconds(150)) == nil)
+        #expect(back.handle(.pointerMoved, at: nearLowRow, now: t0 + .milliseconds(200)) == nil)
+        #expect(back.handle(.pointerMoved, at: inDetail, now: t0 + .milliseconds(300)) == nil)
+        #expect(back.handle(.shapeDrawn(detail), at: inDetail, now: t0 + .milliseconds(400)) == nil)
+        #expect(back.handle(.floorEnded, at: inDetail, now: t0 + .milliseconds(600)) == nil)
+
+        // The last frame drawn misses the plugin screen by a hair: the floor's end closes it instead.
+        var missed = NotchPointer(notchRect: notchRect, metrics: home)
+        #expect(missed.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
+        #expect(missed.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0) == nil)
+        #expect(missed.handle(.pointerMoved, at: inDetail, now: t0 + .milliseconds(100)) == nil)
+        #expect(missed.handle(.pointerMoved, at: nearLowRow, now: t0 + .milliseconds(200)) == nil)
+        #expect(missed.handle(.shapeDrawn(nearlyDetail), at: nearLowRow, now: t0 + .milliseconds(400)) == nil)
+        #expect(!missed.takesMouseEvents(at: nearLowRow))
+        #expect(missed.handle(.floorEnded, at: nearLowRow, now: t0 + .milliseconds(600)) == .leave)
     }
 
     @Test func R16__escape_belongs_to_the_notch_only_while_its_window_is_key() {
