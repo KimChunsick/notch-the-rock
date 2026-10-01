@@ -39,11 +39,18 @@ final class ClipboardHistory {
     @ObservationIgnored private var originals: [ClipItem.ID: Data] = [:]
     @ObservationIgnored private let logError: @MainActor (String) -> Void
     @ObservationIgnored private let now: @MainActor () -> Date
+    @ObservationIgnored private let sources: SourceAppLookup
 
     /// `now` gives the time `unsavedSince` records; tests pass a clock they move themselves.
-    init(logError: @escaping @MainActor (String) -> Void, now: @escaping @MainActor () -> Date = { .now }) {
+    /// `sources` finds the app a pasteboard change came from.
+    init(
+        logError: @escaping @MainActor (String) -> Void,
+        now: @escaping @MainActor () -> Date = { .now },
+        sources: SourceAppLookup = .system
+    ) {
         self.logError = logError
         self.now = now
+        self.sources = sources
     }
 
     /// Whether the tab mentions the unsaved entries at `date`: `unsavedCount` has stayed above zero
@@ -112,14 +119,17 @@ final class ClipboardHistory {
         refreshUnsavedCount()
     }
 
-    /// Records the pasteboard's current content unless it is excluded or empty.
+    /// Records the pasteboard's current content, with the app it came from, unless it is excluded
+    /// or empty.
     func record(from pasteboard: NSPasteboard) {
         if let capture = ClipCapture.read(from: pasteboard) {
-            record(capture)
+            record(capture, source: sources.source(of: pasteboard))
         }
     }
 
-    func record(_ capture: ClipCapture, at date: Date = .now) {
+    /// A repeat keeps the app it was copied from before when `source` is nil, so copying an entry
+    /// back from this app does not lose it.
+    func record(_ capture: ClipCapture, at date: Date = .now, source: SourceApp? = nil) {
         let content: ClipItem.Content
         var png: Data?
         switch capture {
@@ -135,12 +145,13 @@ final class ClipboardHistory {
         if let index = items.firstIndex(where: { $0.content.isSameClip(as: content) }) {
             var item = items.remove(at: index)
             item.date = date
+            if let source { item.source = source }
             items.insert(item, at: 0)
             save()
             return
         }
 
-        let item = ClipItem(id: UUID(), content: content, date: date, isPinned: false)
+        let item = ClipItem(id: UUID(), content: content, date: date, isPinned: false, source: source)
         // One file per image, written here before any list that names it.
         if let png, !writeImageFile(png, for: item.id) {
             originals[item.id] = png

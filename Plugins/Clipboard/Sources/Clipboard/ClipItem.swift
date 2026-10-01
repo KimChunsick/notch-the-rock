@@ -21,6 +21,9 @@ struct ClipItem: Codable, Hashable, Identifiable, Sendable {
     /// When this content was last copied.
     var date: Date
     var isPinned: Bool
+    /// The app it was last copied from, when that is known. Lists saved before entries had one
+    /// leave it out.
+    var source: SourceApp? = nil
 
     var kind: Kind {
         switch content {
