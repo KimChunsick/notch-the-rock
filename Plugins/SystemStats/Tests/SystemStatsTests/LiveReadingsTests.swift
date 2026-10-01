@@ -7,9 +7,9 @@ import Testing
 // tools must agree within the tolerances written next to each comparison. Values that are read once
 // bracket the tool between two plugin readings taken right before and right after it (plugin, tool,
 // plugin), so a value that moves while the tool runs still has to land between the two. The GPU
-// statistic jumps too far within milliseconds for that: it brackets a plugin reading between two
-// tool runs instead and gets a few attempts (see its test). Rates are the collector's own, read the
-// way the plugin reads them.
+// statistic is the busy share since its previous read, so it brackets a plugin reading between two
+// tool runs instead, spaced out, and judges only the attempts whose tool runs agree (see its test).
+// Rates are the collector's own, read the way the plugin reads them.
 
 /// Runs a tool to completion and returns its standard output. It is async so the wait happens off
 /// the main actor, where the other tests of the package keep running.
@@ -262,15 +262,19 @@ struct R11LiveReadings {
     }
 
     /// GPU: IOAccelerator "Device Utilization %" must read 0…100 and agree with the same statistic as
-    /// `ioreg -r -c IOAccelerator` prints it. The driver refreshes the statistic on its own schedule,
-    /// and while other processes render it jumps by tens of points between readings milliseconds
-    /// apart (ioreg read 0% between plugin readings of 31% and 30%, and 48% between 30% and 0%). So an
-    /// attempt brackets one plugin reading with an ioreg run right before and right after it, and the
-    /// reading must lie between the two ±15 points. Under a bursty Metal load that swung ioreg between
-    /// 0% and 100% from one run to the next, 15 of 30 attempts agreed and one test needed six; up to
-    /// ten attempts, 100 ms apart, of which one must agree, leave such a load about a 0.1% chance to
-    /// fail the test. Repeating lets no wrong reading through while the load holds steady: then the
-    /// two ioreg runs agree and every attempt must match them. Every plugin reading must be 0…100.
+    /// `ioreg -r -c IOAccelerator` prints it. Each read reports the busy share since the previous read
+    /// by anyone, so readings milliseconds apart differ by up to 100 points under a bursty load
+    /// (artifacts/P28 R11-probe-T82.txt). An attempt reads ioreg, waits 150 ms, reads the plugin,
+    /// waits 100 ms and reads ioreg again; with ioreg's own ~80 ms each reading covers about 150–250
+    /// ms. Only informative attempts count, those whose two ioreg readings lie within 10 points of
+    /// each other, and the plugin agrees with one when it lies between them ±15 points (adjacent
+    /// idle windows read 0 or 11–15%). Attempts, 100 ms apart, go on until 9 are informative; at
+    /// least 6 of the 9 must agree. Two to one, not 3 of 4: under a bursty Metal load 3 of 20
+    /// informative attempts were outliers (a window another reader of the statistic, such as the
+    /// installed app, cut short), and 3 of 4 failed one of five loaded runs. If 30 attempts bring
+    /// fewer than 9, the test fails and lists them all: it never passes without a comparison. It
+    /// takes about 5 s idle and 8 s under load. The rule is `gpuVerdict` (GPUComparisonTests.swift).
+    /// A sampler stuck at 50 agreed with no informative attempt, idle or under load.
     @Test func R11__gpu_utilization_reads_0_to_100_like_ioreg() async throws {
         let sampler = AcceleratorSampler()
         func ioreg() async throws -> Int {
@@ -278,20 +282,22 @@ struct R11LiveReadings {
             return try #require(output.matches(of: /"Device Utilization %"=(\d+)/).compactMap { Int($0.1) }.max())
         }
 
-        var attempts: [String] = []
-        var agreed = false
-        for attempt in 1...10 where !agreed {
-            if attempt > 1 { try await Task.sleep(for: .milliseconds(100)) }
+        var attempts: [GPUAttempt] = []
+        while !gpuAttemptsComplete(attempts) {
+            if !attempts.isEmpty { try await Task.sleep(for: .milliseconds(100)) }
             let before = try await ioreg()
+            try await Task.sleep(for: .milliseconds(150))
             let value = try #require(sampler.utilization())
+            try await Task.sleep(for: .milliseconds(100))
             let after = try await ioreg()
-            attempts.append("ioreg \(before)%…\(after)% | plugin \(StatFormat.percent(value))")
             #expect((0...100).contains(value))
-            agreed = between(Int(value.rounded()), before, after, slack: 15)
+            attempts.append(GPUAttempt(before: before, plugin: value, after: after))
         }
-        print("R11 GPU: \(attempts.joined(separator: "; "))")
+        let list = attempts.map(\.description).joined(separator: "; ")
+        print("R11 GPU: \(list)")
 
-        #expect(agreed, "no attempt agreed: \(attempts.joined(separator: "; "))")
+        let verdict = gpuVerdict(attempts)
+        #expect(verdict == .agrees, "\(verdict) over \(attempts.count) attempts: \(list)")
     }
 
     /// At least one SMC temperature sensor reads, and the averages the tab shows are plausible die
