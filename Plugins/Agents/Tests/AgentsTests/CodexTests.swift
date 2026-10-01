@@ -93,6 +93,69 @@ final class Outbox {
         #expect(bridge.threads["019a0000-0000-7000-8000-000000000003"] == "/Users/me/other-project")
     }
 
+    // MARK: Recovering thread discovery
+
+    /// A bridge past `initialize` that sends a refused discovery call again at once, and what it
+    /// reported as not followed.
+    func refusingBridge(retryDelay: Duration = .milliseconds(5)) throws -> (bridge: CodexBridge, outbox: Outbox, reported: Outbox) {
+        let bridge = CodexBridge(
+            context: try makeContext(host: host, directory: try makeDirectory()),
+            activator: activator,
+            terminal: { _ in nil },
+            retryDelay: { _ in retryDelay }
+        )
+        let outbox = Outbox()
+        let reported = Outbox()
+        bridge.open(send: { outbox.messages.append($0) }, incomplete: { reported.messages.append(.string($0)) })
+        bridge.receive(try codexFixture("initializeResponse"))
+        return (bridge, outbox, reported)
+    }
+
+    static func refusal(_ id: Int) throws -> JSONValue {
+        try jsonValue(#"{"id":\#(id),"error":{"code":-32603,"message":"internal error"}}"#)
+    }
+
+    @Test func R07__a_refused_thread_list_is_retried_then_reported() async throws {
+        let (bridge, outbox, reported) = try refusingBridge()
+        // The first list goes out as id 2; each refusal brings the same call back under the next id.
+        for id in 2..<(2 + CodexBridge.discoveryAttempts) {
+            #expect(await eventually { outbox.messages.last?["id"] == .number(Double(id)) })
+            #expect(outbox.messages.last == .object(["id": .number(Double(id)), "method": .string("thread/loaded/list"), "params": .object([:])]))
+            #expect(reported.messages.isEmpty)
+            bridge.receive(try Self.refusal(id))
+        }
+        #expect(await eventually { !reported.messages.isEmpty })
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(outbox.messages.filter { $0["method"]?.string == "thread/loaded/list" }.count == CodexBridge.discoveryAttempts)
+        #expect(reported.messages.count == 1)
+    }
+
+    @Test func R07__a_refused_resume_is_sent_again_rather_than_dropped() async throws {
+        let (bridge, outbox, reported) = try refusingBridge()
+        bridge.receive(try jsonValue(#"{"id":2,"result":{"data":["t2"],"nextCursor":null}}"#))
+        let resume = { (id: Int) in JSONValue.object(["id": .number(Double(id)), "method": .string("thread/resume"), "params": .object(["threadId": .string("t2"), "excludeTurns": .bool(true)])]) }
+        #expect(outbox.messages.last == resume(3))
+        bridge.receive(try Self.refusal(3))
+        #expect(await eventually { outbox.messages.last == resume(4) })
+        bridge.receive(try jsonValue(#"{"id":4,"result":{"thread":{"id":"t2","cwd":"/Users/me/p"}}}"#))
+        #expect(bridge.threads["t2"] == "/Users/me/p")
+        #expect(reported.messages.isEmpty)
+    }
+
+    @Test func R07__a_retry_never_reaches_a_later_connection() async throws {
+        let (bridge, _, _) = try refusingBridge(retryDelay: .milliseconds(100))
+        bridge.receive(try Self.refusal(2))
+        let later = Outbox()
+        bridge.open { later.messages.append($0) }
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(later.messages.map { $0["method"]?.string } == ["initialize"])
+    }
+
+    @Test func R07__the_wait_note_holds_back_only_claude_code_questions() {
+        // codex's TUI keeps its own prompt while the notch waits; only Claude Code's terminal does not.
+        #expect(AgentsSettingsView.waitNote.contains("Claude Code의 질문은 기다리는 동안 터미널에 나타나지 않아요."))
+    }
+
     @Test func R07__numeric_ids_go_out_as_integers() throws {
         let text = CodexBridge.encode(try jsonValue(#"{"id":7,"result":{"decision":"accept"}}"#))
         #expect(text.contains(#""id":7"#))
@@ -143,6 +206,21 @@ final class Outbox {
         bridge.screen.respond(to: item.id, with: .allow)
         await task?.value
         #expect(outbox.messages == [try jsonValue(#"{"id":"req-8","result":{"decision":"accept"}}"#)])
+    }
+
+    @Test func R07__codex_items_take_no_deny_reason_and_use_the_codex_colour() async throws {
+        try connect()
+        host.responses = [Self.answer(CodexBridge.detailsButtonID)]
+        let task = bridge.receive(try codexFixture("commandApprovalLong"))
+        let item = try await screenItem()
+        // codex's `decline` carries no message, so the screen asks for none.
+        #expect(!item.takesDenyReason)
+        #expect(CodexBridge.accent != ClaudeBridge.accent)
+        #expect(host.requests.first?.accent == CodexBridge.accent)
+        #expect(item.accent == CodexBridge.accent)
+        bridge.screen.respond(to: item.id, with: .deny(reason: ""))
+        await task?.value
+        #expect(outbox.messages.first?["result"] == .object(["decision": .string("decline")]))
     }
 
     @Test func R07__network_access_is_shown_in_full_before_it_is_allowed() async throws {

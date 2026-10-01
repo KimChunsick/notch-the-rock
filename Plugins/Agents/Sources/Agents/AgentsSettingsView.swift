@@ -102,6 +102,9 @@ final class CodexModel {
 /// 연결 adds the plugin's hooks to `~/.claude/settings.json` after backing it up; 해제 takes them out.
 /// The wait applies to the next request.
 struct AgentsSettingsView: View {
+    /// codex's TUI keeps its own prompt while the notch waits; Claude Code's terminal holds its question back.
+    static let waitNote = "권한 요청과 질문에 이 시간 안에 답하지 않으면 터미널에서 이어서 답해요. Claude Code의 질문은 기다리는 동안 터미널에 나타나지 않아요."
+
     let model: ClaudeHooksModel
     let codex: CodexModel
     @AppStorage private var wait: Int
@@ -143,7 +146,7 @@ struct AgentsSettingsView: View {
                 }
             } label: {
                 Text("노치에서 기다리는 시간")
-                Text("권한 요청과 질문에 이 시간 안에 답하지 않으면 터미널에서 이어서 답해요. 질문은 기다리는 동안 터미널에 나타나지 않아요.")
+                Text(Self.waitNote)
             }
         }
         .onAppear { model.refresh() }
@@ -160,7 +163,7 @@ struct AgentsSettingsView: View {
             }
         } label: {
             Text("Codex")
-            Text(codexStatusText)
+            Text(Self.status(of: codex.state))
         }
         if let install = codex.install {
             Text("codex 위치: \(install.executable.path) · 버전: \(install.version ?? "알 수 없음")")
@@ -184,12 +187,13 @@ struct AgentsSettingsView: View {
             .foregroundStyle(.secondary)
     }
 
-    private var codexStatusText: String {
-        switch codex.state {
+    static func status(of state: CodexLink.State) -> String {
+        switch state {
         case .off: "연결하지 않았어요. 연결하면 Codex가 작업을 마치거나 승인과 답을 기다릴 때 노치가 알려 줘요."
         case .connecting: "app-server에 연결하고 있어요."
         case .connected(.reused): "연결했어요. 이미 떠 있던 app-server를 함께 쓰고 있어요."
         case .connected(.spawned): "연결했어요. 노치가 띄운 app-server를 쓰고 있어요."
+        case .incomplete(_, let reason): "연결했지만 \(reason) 해제한 뒤 다시 연결하면 세션을 다시 찾아요."
         case .retrying(let reason): "연결하지 못해서 잠시 뒤 다시 시도해요. \(reason)"
         }
     }

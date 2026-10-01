@@ -216,6 +216,9 @@ final class CodexLink {
         case off
         case connecting
         case connected(CodexServerOwnership)
+        /// Connected, but the server kept refusing to list or follow sessions, so those sessions stay
+        /// out of the notch until the next connection.
+        case incomplete(CodexServerOwnership, String)
         /// Waiting to retry after the reason.
         case retrying(String)
     }
@@ -328,6 +331,11 @@ final class CodexLink {
                 failure = reason
                 log("Dropped the codex app-server connection: \(reason)")
                 connection.close()
+            },
+            incomplete: { [weak self] reason in
+                guard let self, self.connection === connection else { return }
+                log("Some codex sessions are not followed: \(reason)")
+                state = .incomplete(ownership, reason)
             }
         )
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in

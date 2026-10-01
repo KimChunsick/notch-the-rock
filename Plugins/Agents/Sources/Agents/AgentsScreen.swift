@@ -15,8 +15,13 @@ struct ScreenItem: Identifiable {
     let content: Content
     /// When the request goes back to the terminal.
     let expires: Date
+    /// The colour of the agent that asks.
+    let accent: Color
     /// The permission may also be allowed for the rest of the session (codex's `acceptForSession`).
     var allowsSession = false
+    /// A denial carries the typed reason back to the agent (Claude Code's does; codex's `decline`
+    /// has no room for one).
+    var takesDenyReason = false
 }
 
 enum ScreenResponse: Equatable {
@@ -43,7 +48,14 @@ final class AgentsScreenModel {
 
     /// Shows `content` until the user answers on the screen, the deadline passes or the calling task
     /// is cancelled (the hook went away); the item leaves the screen in every case.
-    func show(title: String, content: ScreenItem.Content, allowsSession: Bool = false, until deadline: ContinuousClock.Instant) async -> ScreenResponse {
+    func show(
+        title: String,
+        content: ScreenItem.Content,
+        accent: Color,
+        allowsSession: Bool = false,
+        takesDenyReason: Bool = false,
+        until deadline: ContinuousClock.Instant
+    ) async -> ScreenResponse {
         guard !Task.isCancelled else { return .cancelled }
         count += 1
         let id = count
@@ -57,7 +69,10 @@ final class AgentsScreenModel {
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 waiting[id] = continuation
-                items.append(ScreenItem(id: id, title: title, content: content, expires: expires, allowsSession: allowsSession))
+                items.append(ScreenItem(
+                    id: id, title: title, content: content, expires: expires, accent: accent,
+                    allowsSession: allowsSession, takesDenyReason: takesDenyReason
+                ))
             }
         } onCancel: {
             Task { @MainActor [weak self] in self?.respond(to: id, with: .cancelled) }
@@ -81,7 +96,8 @@ final class AgentsScreenModel {
 /// The plugin's screen in the expanded notch: the oldest waiting request, in full. The title and the
 /// controls always stay in view; the request itself scrolls in the height left between them, so the
 /// screen fits whatever size the host offers (on main up to 390 × 400 points, often less). Measured
-/// without a limit it asks for all of its content.
+/// without a limit it asks for all of its content. The host adds the margin around it, so the screen
+/// adds none of its own.
 struct AgentsScreen: View {
     /// The scrolling body never gets less than this, however little height the host offers.
     static let minimumBodyHeight: CGFloat = 56
@@ -97,7 +113,6 @@ struct AgentsScreen: View {
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 24)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -141,7 +156,7 @@ private struct ScreenItemView: View {
                     Image(systemName: "timer")
                 }
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(ClaudeBridge.accent)
+                .foregroundStyle(item.accent)
             }
             switch item.content {
             case .permission(let detail):
@@ -150,7 +165,6 @@ private struct ScreenItemView: View {
                 form(questions)
             }
         }
-        .padding(.vertical, 8)
     }
 
     private func permission(_ detail: OperationDetail) -> some View {
@@ -174,8 +188,10 @@ private struct ScreenItemView: View {
             }
             .frame(minHeight: AgentsScreen.minimumBodyHeight, maxHeight: .infinity)
             .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.06)))
-            TextField("거부하는 이유 (비워 두면 이유 없이 거부해요)", text: $reason)
-                .textFieldStyle(.roundedBorder)
+            if item.takesDenyReason {
+                TextField("거부하는 이유 (비워 두면 이유 없이 거부해요)", text: $reason)
+                    .textFieldStyle(.roundedBorder)
+            }
             HStack(spacing: 8) {
                 Button(ClaudeBridge.releaseTitle) { respond(.released) }
                     .buttonStyle(.bordered)
@@ -184,10 +200,10 @@ private struct ScreenItemView: View {
                     .tint(.red)
                 if item.allowsSession {
                     Button("이번 세션 동안 허용") { respond(.allowForSession) }
-                        .tint(ClaudeBridge.accent)
+                        .tint(item.accent)
                 }
                 Button("허용") { respond(.allow) }
-                    .tint(ClaudeBridge.accent)
+                    .tint(item.accent)
             }
             .buttonStyle(.borderedProminent)
         }
@@ -230,7 +246,7 @@ private struct ScreenItemView: View {
                     .buttonStyle(.bordered)
                 Spacer(minLength: 0)
                 Button("보내기") { respond(draft.response) }
-                    .tint(ClaudeBridge.accent)
+                    .tint(item.accent)
                     .disabled(draft.answers == nil)
             }
             .buttonStyle(.borderedProminent)
