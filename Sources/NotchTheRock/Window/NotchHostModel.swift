@@ -3,6 +3,12 @@ import NotchKit
 import Observation
 import OSLog
 
+/// Which screen the expanded notch shows: the home, or one plugin's screen (its tab).
+enum HomeScreen: Equatable {
+    case home
+    case detail(pluginID: String)
+}
+
 /// What the notch shows, decided by `NotchHostModel.state`.
 enum NotchState: Equatable {
     case collapsed
@@ -19,6 +25,10 @@ enum NotchState: Equatable {
 /// collapsed. The collapsed notch carries the highest-priority unexpired live activity; on a
 /// priority tie the most recently posted one wins. Time-bound items are removed by `expireDue()`,
 /// which the model schedules itself for the next deadline.
+///
+/// The expanded notch shows the home (`screen`): plugin tiles and a list, see `HomeModel`. API for
+/// the keyboard and URL plans (P17, P18): `showHome()`, `open(pluginID:)`, `back()`, `escape()` and
+/// the read-only `homeEntries`.
 @MainActor
 @Observable
 final class NotchHostModel: NotchHost {
@@ -63,13 +73,31 @@ final class NotchHostModel: NotchHost {
     private(set) var hud: ShownHUD?
     private(set) var takeover: ShownTakeover?
     private(set) var isExpanded: Bool
-    private(set) var selectedTabID: String?
-    /// Plugin tabs of the expanded notch, in tab bar order. Set by whoever loads the plugins.
-    var tabs: [Tab] = [] {
-        didSet {
-            if !tabs.contains(where: { $0.id == selectedTabID }) { selectedTabID = tabs.first?.id }
+    /// The screen of the expanded notch. Collapsing returns it to the home.
+    private(set) var screen: HomeScreen = .home
+    let home: HomeModel
+
+    /// The running plugins in load order, as the home shows them. Set by whoever loads the plugins.
+    var plugins: [HomePlugin] {
+        get { home.plugins }
+        set {
+            home.plugins = newValue
+            if case .detail(let pluginID) = screen, home.plugin(pluginID)?.tab == nil { screen = .home }
         }
     }
+
+    /// The plugin tabs, in load order. `PluginCatalog` still hands over tabs only, so setting them
+    /// makes tab-only plugins named by their tab title: list rows without tiles. Once the catalog
+    /// sets `plugins` with each plugin's tile and manifest name and symbol, this goes away.
+    var tabs: [Tab] {
+        get { plugins.compactMap { plugin in plugin.tab.map { Tab(pluginID: plugin.pluginID, tab: $0) } } }
+        set {
+            plugins = newValue.map { HomePlugin(pluginID: $0.pluginID, name: $0.tab.title, symbol: $0.tab.symbol, tab: $0.tab, tile: nil) }
+        }
+    }
+
+    /// The home in the order it is shown, grid tiles then list rows, with each plugin's name.
+    var homeEntries: [HomeEntry] { home.entries }
 
     private var activities: [ActivityKey: PostedActivity] = [:]
     /// Waiting requests, oldest first; only the first is shown.
@@ -82,12 +110,19 @@ final class NotchHostModel: NotchHost {
     @ObservationIgnored private var expiryTask: Task<Void, Never>?
     @ObservationIgnored private let logger = Logger(subsystem: "com.notchtherock.NotchTheRock", category: "plugin")
 
-    /// - Parameter pinnedExpansion: when set, the notch stays expanded (`true`) or collapsed
-    ///   (`false`) whatever the pointer or plugins ask; used to capture a state without a mouse.
-    init(now: @escaping @MainActor () -> ContinuousClock.Instant = { .now }, pinnedExpansion: Bool? = nil) {
+    /// - Parameters:
+    ///   - pinnedExpansion: when set, the notch stays expanded (`true`) or collapsed (`false`)
+    ///     whatever the pointer or plugins ask; used to capture a state without a mouse.
+    ///   - homeStore: where the home layout is saved; the app's own defaults by default.
+    init(
+        now: @escaping @MainActor () -> ContinuousClock.Instant = { .now },
+        pinnedExpansion: Bool? = nil,
+        homeStore: HomeLayoutStore = HomeLayoutStore(defaults: .standard)
+    ) {
         self.now = now
         self.pinnedExpansion = pinnedExpansion
         isExpanded = pinnedExpansion ?? false
+        home = HomeModel(store: homeStore)
     }
 
     var state: NotchState {
@@ -111,8 +146,36 @@ final class NotchHostModel: NotchHost {
         setExpanded(hovering)
     }
 
-    func selectTab(_ pluginID: String) {
-        if tabs.contains(where: { $0.id == pluginID }) { selectedTabID = pluginID }
+    // MARK: Home navigation
+
+    /// Expands the notch on the home.
+    func showHome() {
+        screen = .home
+        setExpanded(true)
+    }
+
+    /// Expands the notch on the plugin's screen. A plugin that is not running or has no screen
+    /// (unknown id, display-only tile) opens the home instead.
+    func open(pluginID: String) {
+        screen = home.plugin(pluginID)?.tab == nil ? .home : .detail(pluginID: pluginID)
+        setExpanded(true)
+    }
+
+    /// From a plugin's screen back to the home.
+    func back() {
+        screen = .home
+    }
+
+    /// Esc in the expanded notch: leaves edit mode, then a plugin's screen, then collapses.
+    func escape() {
+        guard state == .expanded else { return }
+        if home.isEditing {
+            home.finishEditing()
+        } else if screen != .home {
+            back()
+        } else {
+            setExpanded(false)
+        }
     }
 
     /// Answers the attention request `id`. Only the first response counts; later ones (a second
@@ -141,6 +204,10 @@ final class NotchHostModel: NotchHost {
     private func setExpanded(_ expanded: Bool) {
         guard pinnedExpansion == nil else { return }
         isExpanded = expanded
+        if !expanded {
+            screen = .home
+            home.finishEditing()
+        }
     }
 
     private func scheduleExpiry() {
@@ -222,8 +289,7 @@ final class NotchHostModel: NotchHost {
     }
 
     func expand(toTabOf pluginID: String) {
-        selectTab(pluginID)
-        setExpanded(true)
+        open(pluginID: pluginID)
     }
 
     func collapse(from pluginID: String) {

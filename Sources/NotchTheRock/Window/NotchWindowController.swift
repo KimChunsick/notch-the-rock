@@ -35,8 +35,10 @@ private final class NotchHostingView: NSHostingView<NotchRootView> {
 }
 
 /// Places the notch window over the notch of the preferred screen and turns pointer movement into
-/// hover: the window takes clicks only while the pointer is on the drawn shape, so everything
-/// around the shape stays clickable for the apps below.
+/// hover (`NotchPointer`): the window takes clicks only while the pointer is on the drawn shape, so
+/// everything around the shape stays clickable for the apps below. Esc goes to
+/// `NotchHostModel.escape()` while the window is key (after a click in it); another key window, such
+/// as Settings, keeps its own Esc.
 @MainActor
 final class NotchWindowController {
     /// Pointer must rest on the notch this long before it opens, so passing by does not open it.
@@ -47,8 +49,8 @@ final class NotchWindowController {
     private let openSettings: @MainActor () -> Void
     private let panel = NotchPanel()
     private let hostingView: NotchHostingView
-    private var geometry: NotchGeometry?
-    private var pointerInside = false
+    /// Set once the window is placed over a notch.
+    private var pointer: NotchPointer?
     private var hoverTask: Task<Void, Never>?
     private var monitors: [Any] = []
 
@@ -72,7 +74,7 @@ final class NotchWindowController {
             MainActor.assumeIsolated { self?.placeOnScreen() }
         }
         let track: (NSEvent) -> Void = { [weak self] _ in
-            MainActor.assumeIsolated { self?.trackPointer() }
+            MainActor.assumeIsolated { self?.handle(.pointerMoved) }
         }
         let events: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDown, .leftMouseDown]
         if let global = NSEvent.addGlobalMonitorForEvents(matching: events, handler: track) {
@@ -84,13 +86,36 @@ final class NotchWindowController {
         }) {
             monitors.append(local)
         }
-        observeHost()
+        if let escape = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { [weak self] event in
+            let keyCode = event.keyCode
+            let windowNumber = event.windowNumber
+            let handled = MainActor.assumeIsolated {
+                guard let self, Self.handlesEscape(
+                    keyCode: keyCode,
+                    inNotchWindow: windowNumber == self.panel.windowNumber,
+                    notchIsKey: self.panel.isKeyWindow,
+                    state: self.host.state
+                ) else { return false }
+                self.host.escape()
+                return true
+            }
+            return handled ? nil : event
+        }) {
+            monitors.append(escape)
+        }
+    }
+
+    private static let escapeKeyCode: UInt16 = 53
+
+    /// Whether a key event is the notch's Esc: Esc for the notch window while it is key and the
+    /// notch is expanded. Esc for any other window goes on to that window untouched.
+    static func handlesEscape(keyCode: UInt16, inNotchWindow: Bool, notchIsKey: Bool, state: NotchState) -> Bool {
+        keyCode == escapeKeyCode && inNotchWindow && notchIsKey && state == .expanded
     }
 
     private func placeOnScreen() {
         guard let screen = NotchGeometry.preferredScreen() else { return }
         let geometry = NotchGeometry(screen: screen)
-        self.geometry = geometry
         let canvas = NotchLayout.canvasSize
         panel.setFrame(
             CGRect(
@@ -101,36 +126,50 @@ final class NotchWindowController {
             ),
             display: true
         )
-        hostingView.rootView = NotchRootView(host: host, notchSize: geometry.notchRect.size, openSettings: openSettings)
-        trackPointer()
-    }
-
-    /// The shape changes with the host state even when the pointer does not move.
-    private func observeHost() {
-        withObservationTracking {
-            _ = host.state
-            _ = host.liveActivity != nil
-        } onChange: { [weak self] in
-            Task { @MainActor in
-                self?.trackPointer()
-                self?.observeHost()
-            }
+        let notchRect = geometry.notchRect
+        if pointer == nil {
+            pointer = NotchPointer(
+                notchRect: notchRect,
+                metrics: NotchLayout.metrics(for: host.state, notch: notchRect.size, hasActivity: host.liveActivity != nil)
+            )
         }
+        pointer?.notchRect = notchRect
+        // The shape changes with the host state and the measured content even when the pointer does
+        // not move; the root view reports where it is heading, every frame drawn on the way, and
+        // tile drags.
+        hostingView.rootView = NotchRootView(
+            host: host,
+            notchSize: notchRect.size,
+            openSettings: openSettings,
+            metricsChanged: { [weak self] metrics in self?.handle(.shapeChanged(metrics)) },
+            shapeDrawn: { [weak self] metrics in self?.handle(.shapeDrawn(metrics)) },
+            dragChanged: { [weak self] dragging in self?.handle(dragging ? .dragBegan : .dragEnded) }
+        )
     }
 
-    private func trackPointer() {
-        guard let geometry else { return }
-        let metrics = NotchLayout.metrics(for: host.state, notch: geometry.notchRect.size, hasActivity: host.liveActivity != nil)
-        let inside = NotchLayout.contains(NSEvent.mouseLocation, metrics: metrics, notchRect: geometry.notchRect)
-        panel.ignoresMouseEvents = !inside
-        guard inside != pointerInside else { return }
-        pointerInside = inside
+    /// Feeds `event` to the pointer tracking, lets the window take mouse events where it says and
+    /// schedules the hover change it asks for.
+    private func handle(_ event: NotchPointer.Event) {
+        guard var pointer else { return }
+        let location = NSEvent.mouseLocation
+        let hover = pointer.handle(event, at: location)
+        self.pointer = pointer
+        let ignores = !pointer.takesMouseEvents(at: location)
+        if panel.ignoresMouseEvents != ignores { panel.ignoresMouseEvents = ignores }
+        guard let hover else { return }
         hoverTask?.cancel()
-        let delay = inside ? Self.openIntent : Self.closeDelay
+        hoverTask = nil
+        let hovering: Bool
+        let delay: Duration
+        switch hover {
+        case .enter: (hovering, delay) = (true, Self.openIntent)
+        case .leave: (hovering, delay) = (false, Self.closeDelay)
+        case .hold: return
+        }
         hoverTask = Task { [weak self] in
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
-            self?.host.setHovering(inside)
+            self?.host.setHovering(hovering)
         }
     }
 }

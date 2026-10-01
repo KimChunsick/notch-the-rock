@@ -2,8 +2,8 @@ import NotchKit
 import SwiftUI
 
 /// Slides the percentage and charging state out of the notch when external power connects or
-/// disconnects, shows a compact charging indicator beside the notch while charging, and shows the
-/// percentage, state and remaining time in the expanded notch.
+/// disconnects, shows a compact charging indicator beside the notch while charging, shows the
+/// percentage in a home tile, and shows the percentage, state and remaining time in its screen.
 @MainActor
 public final class BatteryPlugin: NotchPlugin {
     public static let manifest = PluginManifest(
@@ -48,6 +48,12 @@ public final class BatteryPlugin: NotchPlugin {
     public var expandedTab: PluginTab? {
         PluginTab(title: Self.manifest.name, symbol: Self.manifest.symbol) { [model] in
             BatteryView(model: model)
+        }
+    }
+
+    public var tile: PluginTile? {
+        PluginTile(supportedSizes: [.small, .wide]) { [model] size in
+            BatteryTile(model: model, size: size)
         }
     }
 

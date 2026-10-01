@@ -172,19 +172,6 @@ struct NotchHostModelTests {
         #expect(host.state == .collapsed)
     }
 
-    @Test func R02__expand_selects_the_plugins_tab() {
-        host.tabs = [
-            NotchHostModel.Tab(pluginID: "com.example.a", tab: PluginTab(title: "A", symbol: "a.circle") { EmptyView() }),
-            NotchHostModel.Tab(pluginID: "com.example.b", tab: PluginTab(title: "B", symbol: "b.circle") { EmptyView() }),
-        ]
-        #expect(host.selectedTabID == "com.example.a")
-        host.expand(toTabOf: "com.example.b")
-        #expect(host.state == .expanded)
-        #expect(host.selectedTabID == "com.example.b")
-        host.collapse(from: "com.example.b")
-        #expect(host.state == .collapsed)
-    }
-
     @Test func R02__pinned_state_ignores_hover_and_plugins() {
         let pinned = NotchHostModel(now: { .now }, pinnedExpansion: true)
         #expect(pinned.state == .expanded)

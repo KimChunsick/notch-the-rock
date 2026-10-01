@@ -30,48 +30,47 @@ struct NotchShape: Shape {
     }
 }
 
-/// Size and corner radii of the black shape for each state. The shape hangs from the screen top,
-/// centered on the notch; the window and the pointer tracking both use these numbers.
+/// Size and corner radii of the black shape for each state, and where its content goes. The shape
+/// hangs from the screen top, centered on the notch; the window and the pointer tracking both use
+/// these numbers.
 enum NotchLayout {
     struct Metrics: Equatable {
         var size: CGSize
         var shoulderRadius: CGFloat
         var bottomRadius: CGFloat
+        /// Where the measured content goes, in the shape's coordinates (origin top-left).
+        var content: CGRect
 
         var shape: NotchShape { NotchShape(shoulderRadius: shoulderRadius, bottomRadius: bottomRadius) }
     }
 
-    /// The transparent window: the largest shape plus room for the attention glow.
-    static let canvasSize = CGSize(width: 680, height: 340)
-    static let openSize = CGSize(width: 580, height: 210)
-    static let attentionSize = CGSize(width: 580, height: 300)
+    /// The transparent window: the largest shape (a notch up to 44 pt tall) plus room for the
+    /// attention glow.
+    static let canvasSize = CGSize(
+        width: NotchSizing.maxWidth + 2 * glowMargin,
+        height: 44 + NotchSizing.maxContentSize.height + 2 * NotchSizing.padding + glowMargin
+    )
+    static let glowMargin: CGFloat = 30
     static let activityWingWidth: CGFloat = 78
-    static let hudWingWidth: CGFloat = 112
     static let collapsedShoulder: CGFloat = 6
     static let collapsedBottom: CGFloat = 10
     static let openShoulder: CGFloat = 14
     static let openBottom: CGFloat = 30
 
-    static func metrics(for state: NotchState, notch: CGSize, hasActivity: Bool) -> Metrics {
-        func slim(wing: CGFloat) -> Metrics {
-            Metrics(
-                size: CGSize(width: notch.width + 2 * (collapsedShoulder + wing), height: notch.height),
-                shoulderRadius: collapsedShoulder,
-                bottomRadius: collapsedBottom
-            )
-        }
-        func open(_ size: CGSize) -> Metrics {
-            Metrics(
-                size: CGSize(width: max(size.width, notch.width + 2 * hudWingWidth), height: size.height),
-                shoulderRadius: openShoulder,
-                bottomRadius: openBottom
-            )
-        }
+    /// - Parameters:
+    ///   - content: the measured size of what the state shows (see `NotchSizing`); unused when collapsed.
+    ///   - minWidth: a wider minimum for the expanded shape, e.g. for controls in the band.
+    static func metrics(for state: NotchState, notch: CGSize, hasActivity: Bool, content: CGSize = .zero, minWidth: CGFloat = 0) -> Metrics {
         switch state {
-        case .collapsed: return slim(wing: hasActivity ? activityWingWidth : 0)
-        case .hud: return slim(wing: hudWingWidth)
-        case .expanded, .takeover: return open(openSize)
-        case .attention: return open(attentionSize)
+        case .collapsed:
+            let size = CGSize(width: notch.width + 2 * (collapsedShoulder + (hasActivity ? activityWingWidth : 0)), height: notch.height)
+            return Metrics(size: size, shoulderRadius: collapsedShoulder, bottomRadius: collapsedBottom, content: CGRect(origin: .zero, size: size))
+        case .hud:
+            let frame = NotchSizing.bandFrame(content: content, notch: notch)
+            return Metrics(size: frame.size, shoulderRadius: collapsedShoulder, bottomRadius: collapsedBottom, content: frame.content)
+        case .expanded, .attention, .takeover:
+            let frame = NotchSizing.frame(content: content, notch: notch, minWidth: minWidth)
+            return Metrics(size: frame.size, shoulderRadius: openShoulder, bottomRadius: openBottom, content: frame.content)
         }
     }
 
