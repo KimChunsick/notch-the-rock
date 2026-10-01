@@ -99,7 +99,7 @@ final class ClaudeBridge {
             decision = await decidePermission(message, title: title)
         case .preToolUse:
             decision = await answerQuestions(message, title: title)
-        case .sessionStart, .userPromptSubmit, .stop, .notification, .sessionEnd:
+        case .sessionStart, .userPromptSubmit, .stop, .notification, .sessionEnd, .postToolUse:
             decision = nil
         }
         // Answered in the notch, or in the terminal (the hook went away and cancelled this task).
@@ -119,11 +119,11 @@ final class ClaudeBridge {
         track(sessionID, message)
         let title = projectName(sessionID, message)
         switch message.event {
-        case .sessionStart, .userPromptSubmit:
+        case .sessionStart, .userPromptSubmit, .postToolUse:
             return nil
         case .sessionEnd:
-            // /clear ends one conversation and starts the next in the same terminal.
-            guard payload["reason"]?.string != "clear" else { return nil }
+            // Every end alerts, /clear's too: it ends this conversation, and the next one in the same
+            // terminal is a new session.
             return notify(sessionID, title: title, message: "Claude Code 세션이 끝났어요.")
         case .stop:
             sessions[sessionID]?.alertedPause = true
@@ -292,7 +292,7 @@ final class ClaudeBridge {
         switch message.event {
         case .stop, .notification:
             break
-        case .sessionStart, .userPromptSubmit, .permissionRequest, .preToolUse, .sessionEnd:
+        case .sessionStart, .userPromptSubmit, .permissionRequest, .preToolUse, .postToolUse, .sessionEnd:
             record.alertedPause = false
         }
         sessions[sessionID] = record
@@ -310,7 +310,8 @@ final class ClaudeBridge {
             return false
         case .sessionStart, .stop:
             state = .idle
-        case .userPromptSubmit:
+        case .userPromptSubmit, .postToolUse:
+            // A finished tool also ends a wait that was answered in the terminal.
             state = .working
         case .permissionRequest:
             // AskUserQuestion waits through its PreToolUse hook.
@@ -318,7 +319,7 @@ final class ClaudeBridge {
         case .preToolUse:
             state = .awaitingAnswer
         case .notification:
-            state = nil
+            state = Self.waitingState(payload: message.payload)
         }
         screen.sessions.update(
             key, folder: projectName(sessionID, message), state: state,
@@ -328,6 +329,17 @@ final class ClaudeBridge {
     }
 
     private typealias Key = AgentSession.Key
+
+    /// The state a Notification puts the session in: a question it asks (an MCP server's form, a
+    /// subagent that needs input) or Claude Code's idle reminder. Any other notice, or one without a
+    /// type, keeps the state.
+    private static func waitingState(payload: JSONValue) -> AgentSessionState? {
+        switch payload["notification_type"]?.string {
+        case "elicitation_dialog", "agent_needs_input": .awaitingAnswer
+        case "idle_prompt": .idle
+        default: nil
+        }
+    }
 
     /// The last folder name of the session's working folder, or of the project folder.
     private func projectName(_ sessionID: String, _ message: HookMessage) -> String {

@@ -45,6 +45,13 @@ final class CodexBridge {
     private let retryDelay: @MainActor (Int) -> Duration
     /// Thread folders by thread id, kept across connections.
     private(set) var threads: [String: String] = [:]
+    /// The terminal found when each thread joined, kept across connections like `threads`. Its own
+    /// TUI's terminal: a lookup by folder later may find another TUI in the same folder.
+    private var terminals: [String: TerminalLocation] = [:]
+    /// The threads that joined on this connection (started, or listed and resumed) and have not
+    /// closed. The Agents screen's list may drop a silent thread's row; this does not, so the
+    /// thread's end still alerts, once.
+    private var joined: Set<String> = []
 
     // One connection's state; `close()` clears it.
     private var send: (@MainActor (JSONValue) -> Void)?
@@ -139,6 +146,7 @@ final class CodexBridge {
         calls.removeAll()
         callCount = 0
         resumed.removeAll()
+        joined.removeAll()
         fileChanges.removeAll()
         for request in pending.values {
             request.task.cancel()
@@ -236,7 +244,7 @@ final class CodexBridge {
                 threads[thread] = cwd
             }
             // A thread in the middle of a turn is working; any other loaded thread waits for the user.
-            track(thread, result["thread"]?["status"]?["type"]?.string == "active" ? .working : .idle, findTerminal: true)
+            join(thread, result["thread"]?["status"]?["type"]?.string == "active" ? .working : .idle)
         }
     }
 
@@ -280,7 +288,7 @@ final class CodexBridge {
         case "thread/started":
             guard let thread = params["thread"], let id = thread["id"]?.string else { return nil }
             if let cwd = thread["cwd"]?.string { threads[id] = cwd }
-            track(id, .idle, findTerminal: true)
+            join(id, .idle)
             resume(id)
         case "item/started" where params["item"]?["type"]?.string == "fileChange":
             if let item = params["item"], let id = item["id"]?.string {
@@ -303,18 +311,18 @@ final class CodexBridge {
         case "turn/started":
             if let thread = params["threadId"]?.string { track(thread, .working) }
         case "thread/closed":
-            // One alert per thread: only a thread the list still has ends here. The TUI may be gone
-            // already, so the alert keeps the terminal the row knew.
-            guard let thread = params["threadId"]?.string,
-                  let session = screen.sessions[AgentSession.Key(agent: .codex, id: thread)] else { return nil }
-            screen.sessions.remove(session.id)
-            return notify(thread, message: "Codex 세션이 끝났어요.", known: session.terminal)
+            guard let thread = params["threadId"]?.string else { return nil }
+            screen.sessions.remove(AgentSession.Key(agent: .codex, id: thread))
+            // One alert per thread that joined, whether or not the list still shows it. The TUI may
+            // be gone already; the alert takes the user to the terminal the thread joined in.
+            guard joined.remove(thread) != nil else { return nil }
+            return notify(thread, message: "Codex 세션이 끝났어요.", saved: terminals.removeValue(forKey: thread))
         case "turn/completed":
             guard let thread = params["threadId"]?.string else { return nil }
             track(thread, .idle)
             switch params["turn"]?["status"]?.string {
-            case "completed": return notify(thread, message: "Codex가 작업을 마쳤어요.")
-            case "failed": return notify(thread, message: "Codex 작업이 오류로 멈췄어요.")
+            case "completed": return notify(thread, message: "Codex가 작업을 마쳤어요.", saved: terminals[thread])
+            case "failed": return notify(thread, message: "Codex 작업이 오류로 멈췄어요.", saved: terminals[thread])
             default: return nil
             }
         default:
@@ -504,23 +512,29 @@ final class CodexBridge {
 
     // MARK: Notices and the terminal
 
-    /// Moves the thread's row on the Agents screen. The terminal is looked up only when the thread
-    /// joins: the lookup walks the running processes.
-    private func track(_ thread: String, _ state: AgentSessionState, findTerminal: Bool = false) {
-        let cwd = threads[thread]
-        let folder = cwd.flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0).lastPathComponent } ?? "Codex"
-        screen.sessions.update(
-            AgentSession.Key(agent: .codex, id: thread), folder: folder, state: state,
-            terminal: findTerminal ? terminal(cwd) : nil
-        )
+    /// A thread started, or was listed and resumed: it joins, and its terminal is looked up. Only
+    /// here: the lookup walks the running processes.
+    private func join(_ thread: String, _ state: AgentSessionState) {
+        joined.insert(thread)
+        if let found = terminal(threads[thread]) {
+            terminals[thread] = found
+        }
+        track(thread, state)
     }
 
-    /// `known` is the terminal to use when the TUI's own can no longer be found.
-    private func notify(_ thread: String, message: String, known: TerminalLocation? = nil) -> Task<Void, Never> {
+    /// Moves the thread's row on the Agents screen; a row that left the list comes back with the
+    /// terminal the thread joined in.
+    private func track(_ thread: String, _ state: AgentSessionState) {
+        let folder = threads[thread].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0).lastPathComponent } ?? "Codex"
+        screen.sessions.update(AgentSession.Key(agent: .codex, id: thread), folder: folder, state: state, terminal: terminals[thread])
+    }
+
+    /// `saved` is the terminal the thread joined in; the folder is looked up only without one.
+    private func notify(_ thread: String, message: String, saved: TerminalLocation?) -> Task<Void, Never> {
         notices[thread]?.task.cancel()
         noticeCount += 1
         let id = noticeCount
-        let found = terminal(threads[thread]) ?? known
+        let found = saved ?? terminal(threads[thread])
         let request = AttentionRequest(
             title: projectName(.object(["threadId": .string(thread)])),
             message: message,
@@ -532,7 +546,7 @@ final class CodexBridge {
         let task = Task { [context] in
             let response = await context.requestAttention(request)
             if case .answered(let answer) = response, answer.buttonID == Self.jumpButtonID {
-                self.jump(to: thread, known: known)
+                self.jump(to: thread, saved: saved)
             }
             if self.notices[thread]?.id == id {
                 self.notices[thread] = nil
@@ -542,9 +556,10 @@ final class CodexBridge {
         return task
     }
 
-    /// Brings the thread's TUI terminal forward, or opens the notch when it is unknown or gone.
-    private func jump(to thread: String, known: TerminalLocation? = nil) {
-        if let found = terminal(threads[thread]) ?? known, activator.activate(found) {
+    /// Brings the thread's TUI terminal forward, or opens the notch when it is unknown or gone. The
+    /// terminal it joined in comes first: another TUI may work in the same folder now.
+    private func jump(to thread: String, saved: TerminalLocation?) {
+        if let found = saved ?? terminal(threads[thread]), activator.activate(found) {
             return
         }
         context.expand()

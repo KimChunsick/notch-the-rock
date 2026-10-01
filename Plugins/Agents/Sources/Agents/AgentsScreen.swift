@@ -99,11 +99,16 @@ final class AgentsScreenModel {
 /// The plugin's screen in the expanded notch: the oldest waiting request, in full, and the open
 /// sessions under it. The title and the controls always stay in view; the request itself scrolls in
 /// the height left between them, so the screen fits whatever size the host offers (on main up to
-/// 390 × 400 points, often less). Measured without a limit it asks for all of its content. The host
-/// adds the margin around it, so the screen adds none of its own.
+/// 390 × 400 points, often less). The sessions scroll too when they do not fit: in the height the
+/// screen is offered, or under a request in `listHeightUnderRequest`. Measured without a limit it
+/// asks for all of its content. The host adds the margin around it, so the screen adds none of its
+/// own.
 struct AgentsScreen: View {
     /// The scrolling body never gets less than this, however little height the host offers.
     static let minimumBodyHeight: CGFloat = 56
+    /// Under a request the session list scrolls in this height, about two rows; the request keeps
+    /// the rest, so at 390 × 210 it still shows whole.
+    static let listHeightUnderRequest: CGFloat = 44
     let model: AgentsScreenModel
     /// The agents' marks; without one a row shows a symbol and the agent's name.
     var logos: (any AgentLogoProviding)? = nil
@@ -116,13 +121,11 @@ struct AgentsScreen: View {
             if let item = model.items.first {
                 ScreenItemView(item: item, others: model.items.count - 1) { model.respond(to: item.id, with: $0) }
                     .id(item.id)
+                    // Laid out first: the list under it gets what the request leaves.
+                    .layoutPriority(1)
             }
             if !sessions.isEmpty {
-                VStack(spacing: 6) {
-                    ForEach(sessions) { session in
-                        AgentSessionRow(session: session, logo: logos?.logo(for: session.agent), open: open)
-                    }
-                }
+                sessionList(sessions, underRequest: !model.items.isEmpty)
             } else if model.items.isEmpty {
                 // A dimmed terminal and the message at either end of what the screen is offered.
                 HStack(spacing: 0) {
@@ -136,6 +139,21 @@ struct AgentsScreen: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    /// The rows as they are when they fit; otherwise a scroll view, where keyboard focus and
+    /// scrolling reach every row.
+    private func sessionList(_ sessions: [AgentSession], underRequest: Bool) -> some View {
+        let rows = VStack(spacing: 6) {
+            ForEach(sessions) { session in
+                AgentSessionRow(session: session, logo: logos?.logo(for: session.agent), open: open)
+            }
+        }
+        return ViewThatFits(in: .vertical) {
+            rows
+            ScrollView { rows }
+                .frame(height: underRequest ? Self.listHeightUnderRequest : nil)
+        }
     }
 }
 

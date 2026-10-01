@@ -158,6 +158,124 @@ func share(of rect: CGRect, in view: NSView, where matches: (UInt8, UInt8, UInt8
         #expect(!AgentSessionList.processExists(exited.processIdentifier))
     }
 
+    @Test func R33__silence_drops_only_a_session_whose_process_is_unknown() throws {
+        world.alive = [100]
+        bridge.receive(try message(.sessionStart, session: "alive", pid: 100))
+        bridge.receive(try message(.sessionStart, session: "unknown", pid: nil))
+        world.now += AgentSessionList.silenceLimit + 60
+        list.prune()
+        // A process that still runs keeps its session open, however long it stays silent.
+        #expect(list.sessions.map(\.id.id) == ["alive"])
+        world.alive = []
+        list.prune()
+        #expect(list.sessions.isEmpty)
+    }
+
+    @Test func R33__waiting_notifications_move_the_session_to_its_waiting_state() throws {
+        for type in ["elicitation_dialog", "agent_needs_input"] {
+            bridge.receive(try message(.userPromptSubmit, #","prompt":"go""#))
+            #expect(state == .working)
+            bridge.receive(try message(.notification, #","notification_type":"\#(type)","message":"asks""#))
+            #expect(state == .awaitingAnswer, "\(type)")
+        }
+        bridge.receive(try message(.notification, #","notification_type":"idle_prompt","message":"waiting""#))
+        #expect(state == .idle)
+        // A notice that is no wait keeps the state.
+        bridge.receive(try message(.userPromptSubmit, #","prompt":"go""#))
+        bridge.receive(try message(.notification, #","notification_type":"auth_success","message":"ok""#))
+        #expect(state == .working)
+    }
+
+    @Test func R33__work_resuming_after_a_terminal_answer_moves_the_session_back_to_working() async throws {
+        bridge.receive(try message(.userPromptSubmit, #","prompt":"build it""#))
+        // Handed to the terminal: the terminal asks now.
+        host.responses = [.released]
+        #expect(await bridge.decide(try message(.permissionRequest, Self.bash)) == nil)
+        #expect(state == .awaitingApproval)
+        // Approved there, the tool runs and its PostToolUse hook reaches the plugin through the helper.
+        let server = try TestServer()
+        defer { server.stop() }
+        let runner = HookRunner(
+            socketPath: server.path, environment: [:],
+            readInput: { Data(#"{"session_id":"s1","cwd":"/Users/me/work/rock-garden","hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"a.txt"}}"#.utf8) },
+            findTerminal: { ghostty }, findClaudeProcess: { 4242 }
+        )
+        #expect(await run(runner, ["PostToolUse"]).isEmpty)
+        let received = try #require(await server.inbox.wait(for: 1).first)
+        #expect(received.event == .postToolUse)
+        bridge.receive(received)
+        #expect(state == .working)
+        // A question asked by an MCP server and answered in the terminal ends the same way.
+        bridge.receive(try message(.notification, #","notification_type":"elicitation_dialog","message":"asks""#))
+        #expect(state == .awaitingAnswer)
+        bridge.receive(try message(.postToolUse, #","tool_name":"mcp__forms__ask""#))
+        #expect(state == .working)
+    }
+
+    @Test func R33__under_a_request_the_list_scrolls_to_its_last_row() async throws {
+        let offer = CGSize(width: 390, height: 210)
+        for index in 1...12 {
+            world.now += 1
+            bridge.receive(try message(.sessionStart, session: "s\(index)"))
+        }
+        let request = Task {
+            await bridge.screen.show(
+                title: "rock-garden · Bash",
+                content: .permission(OperationDetail(tool: "Bash", input: try? json(#"{"command":"npm run build"}"#))),
+                accent: ClaudeBridge.accent, takesDenyReason: true, until: .now + .seconds(60)
+            )
+        }
+        defer { request.cancel() }
+        #expect(await eventually { !bridge.screen.items.isEmpty })
+        let screen = AgentsScreen(model: bridge.screen)
+        let root = layOut(screen, in: offer)
+        try capture(root, named: "R33-render-list-under-request-390x210-T126")
+
+        // The request stays whole: everything it needs fits the offer and its controls are in view.
+        let needed = NSHostingController(rootView: screen).sizeThatFits(in: offer)
+        #expect(needed.height <= offer.height, "the screen needs \(needed)")
+        let (controls, _) = pinnedControls(in: root)
+        #expect(controls.contains { $0.control is NSTextField })
+        for (control, frame) in controls {
+            #expect(root.bounds.contains(frame), "\(type(of: control)) at \(frame) is outside \(root.bounds)")
+        }
+
+        // The list scrolls in its own view under the request, inside the offer, and holds all twelve rows.
+        var scrollViews: [NSScrollView] = []
+        func walk(_ view: NSView) {
+            if let scroll = view as? NSScrollView { scrollViews.append(scroll) } else { view.subviews.forEach(walk) }
+        }
+        walk(root)
+        #expect(scrollViews.count == 2)
+        let below = scrollViews.max { a, b in
+            let (fa, fb) = (a.convert(a.bounds, to: root), b.convert(b.bounds, to: root))
+            return root.isFlipped ? fa.minY < fb.minY : fa.minY > fb.minY
+        }
+        let listView = try #require(below)
+        let listFrame = listView.convert(listView.bounds, to: root)
+        #expect(root.bounds.contains(listFrame))
+        // Each row is a view of its own in the list's scroll view (its focus ring, which keyboard focus
+        // moves to); the last one lies below what the list shows.
+        let rowHeight = NSHostingView(rootView: AgentSessionRow(session: list.sessions[0], logo: nil, open: { _ in })).fittingSize.height
+        var rows: [NSView] = []
+        func collectRows(_ view: NSView) {
+            for sub in view.subviews {
+                if sub.frame.height == rowHeight { rows.append(sub) } else { collectRows(sub) }
+            }
+        }
+        collectRows(listView.contentView)
+        #expect(rows.count == 12)
+        let lastRow = try #require(rows.max { $0.convert($0.bounds, to: root).maxY < $1.convert($1.bounds, to: root).maxY })
+        #expect(!listFrame.contains(lastRow.convert(lastRow.bounds, to: root)))
+        // Scrolled to its end, the last row shows inside the list.
+        let end = lastRow.convert(lastRow.bounds, to: listView.contentView).maxY - listView.contentView.bounds.height
+        listView.contentView.scroll(to: NSPoint(x: 0, y: end))
+        listView.reflectScrolledClipView(listView.contentView)
+        let shown = lastRow.convert(lastRow.bounds, to: root)
+        #expect(listFrame.contains(shown), "the last row at \(shown) is outside the list at \(listFrame)")
+        print("R33 list under request at 390x210: \(scrollViews.count) scroll views, list at \(listFrame), \(rows.count) rows of \(rowHeight), last row scrolled to \(shown)")
+    }
+
     @Test func R33__the_hook_helper_sends_the_claude_process_past_the_hook_shell() async throws {
         // hook shell (500) → claude (400) → login shell (300) → Terminal (100).
         let table = FakeProcessTable(entries: [
@@ -194,12 +312,14 @@ func share(of rect: CGRect, in view: NSView, where matches: (UInt8, UInt8, UInt8
         func installer(_ entries: [HookEntry]) -> HookInstaller {
             HookInstaller(settingsURL: settings, recordURL: home.appendingPathComponent("storage/claude-install.json"), entries: entries)
         }
-        for event in [HookEvent.userPromptSubmit, .sessionEnd] {
+        for event in [HookEvent.userPromptSubmit, .sessionEnd, .postToolUse] {
             let entry = try #require(entries.first { $0.event == event.rawValue })
             #expect(entry.matcher == nil && entry.timeout == 10 && entry.command == HookInstaller.command(helper: helper, event: event))
         }
-        // What an earlier version installed.
-        try installer(entries.filter { $0.event != "UserPromptSubmit" && $0.event != "SessionEnd" }).install()
+        // What earlier versions installed: before the session hooks, and before PostToolUse.
+        try installer(entries.filter { $0.event != "UserPromptSubmit" && $0.event != "SessionEnd" && $0.event != "PostToolUse" }).install()
+        #expect(installer(entries).status() == .partial)
+        try installer(entries.filter { $0.event != "PostToolUse" }).install()
         #expect(installer(entries).status() == .partial)
 
         try installer(entries).install()
@@ -211,6 +331,7 @@ func share(of rect: CGRect, in view: NSView, where matches: (UInt8, UInt8, UInt8
         }
         #expect(commands("UserPromptSubmit") == [HookInstaller.command(helper: helper, event: .userPromptSubmit)])
         #expect(commands("SessionEnd") == [HookInstaller.command(helper: helper, event: .sessionEnd)])
+        #expect(commands("PostToolUse") == [HookInstaller.command(helper: helper, event: .postToolUse)])
         #expect(commands("Stop").count == 1 && commands("SessionStart").count == 1)
     }
 

@@ -82,7 +82,9 @@ struct AgentSession: Identifiable, Hashable {
 
 /// The sessions the Agents screen lists, fed by the Claude Code hooks and the codex bridge. A
 /// session joins on its first event (one that started before the app joins on its next one) and
-/// leaves when it ends, when its process is gone or when it stays silent for `silenceLimit`.
+/// leaves when it ends or when its process is gone; one whose process is not known leaves when it
+/// stays silent for `silenceLimit`. The bridges keep what a session's end needs (its alert, its
+/// terminal) themselves, so a row that left the list still ends once.
 @MainActor
 @Observable
 final class AgentSessionList {
@@ -134,11 +136,12 @@ final class AgentSessionList {
         byKey = byKey.filter { agent != nil && $0.key.agent != agent }
     }
 
-    /// Drops the sessions whose process is gone and those silent for longer than `silenceLimit`.
+    /// Drops the sessions whose process is gone, and those without a known process that stayed
+    /// silent for longer than `silenceLimit`. A process that still runs keeps its session.
     func prune() {
         let now = now()
         byKey = byKey.filter { _, session in
-            if let pid = session.pid, !isAlive(pid) { return false }
+            if let pid = session.pid { return isAlive(pid) }
             return now.timeIntervalSince(session.changed) <= Self.silenceLimit
         }
     }

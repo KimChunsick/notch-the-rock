@@ -11,6 +11,9 @@ public enum HookEvent: String, Codable, Sendable, CaseIterable {
     case permissionRequest = "PermissionRequest"
     /// Installed for `AskUserQuestion` only.
     case preToolUse = "PreToolUse"
+    /// A tool finished, for every tool: the session works again, also after a request was answered
+    /// in the terminal.
+    case postToolUse = "PostToolUse"
     /// The session ended: it leaves the Agents screen.
     case sessionEnd = "SessionEnd"
 

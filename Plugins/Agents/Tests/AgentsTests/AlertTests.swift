@@ -7,6 +7,12 @@ import Testing
 @testable import Agents
 
 /// One alert for each wait, finished turn and ended session of both agents, with the agent's logo.
+/// What the Codex bridge's terminal lookup finds, by working folder.
+@MainActor
+final class FolderTerminals {
+    var byFolder = ["/Users/me/notch-the-rock": ghostty]
+}
+
 @MainActor
 @Suite struct AlertTests {
     static let magenta = NSColor(srgbRed: 1, green: 0, blue: 1, alpha: 1)
@@ -86,8 +92,8 @@ import Testing
         #expect(await alerts(try hook(.notification, #","notification_type":"idle_prompt","message":"waiting""#)).isEmpty)
         _ = await claude.decide(try hook(.permissionRequest, #","tool_name":"Bash","tool_input":{"command":"ls"}"#))
         #expect(await alerts(try hook(.notification, #","notification_type":"agent_needs_input","message":"needs you""#)).count == 1)
-        // /clear ends one conversation and starts the next in the same terminal: no session-ended alert.
-        #expect(await alerts(try hook(.sessionEnd, #","reason":"clear""#)).isEmpty)
+        // Every session end alerts, /clear's too.
+        #expect(await alerts(try hook(.sessionEnd, #","reason":"clear""#)).count == 1)
         #expect(await alerts(try hook(.sessionEnd, #","reason":"logout""#)).count == 1)
     }
 
@@ -133,6 +139,52 @@ import Testing
         let count = host.requests.count
         codex.close()
         #expect(host.requests.count == count)
+    }
+
+    /// A Codex bridge on a connection that listed `thread1`, working in /Users/me/notch-the-rock, with
+    /// the terminal lookup `terminals` answers.
+    func joinedCodex(_ terminals: FolderTerminals, world: SessionWorld? = nil) throws -> CodexBridge {
+        let codex = CodexBridge(
+            context: try makeContext(host: host, directory: try makeDirectory()),
+            activator: activator,
+            terminal: { cwd in cwd.flatMap { terminals.byFolder[$0] } },
+            logos: logos
+        )
+        world?.attach(to: codex.screen.sessions)
+        codex.open { _ in }
+        codex.receive(try codexFixture("initializeResponse"))
+        codex.receive(try codexFixture("loadedListPage1"))
+        codex.receive(try codexFixture("resumeResponse"))
+        return codex
+    }
+
+    @Test func R40__a_codex_thread_closed_after_its_row_was_pruned_still_alerts_once() async throws {
+        let world = SessionWorld()
+        let codex = try joinedCodex(FolderTerminals(), world: world)
+        let key = AgentSession.Key(agent: .codex, id: Self.thread1)
+        #expect(codex.screen.sessions[key] != nil)
+        world.now += AgentSessionList.silenceLimit + 60
+        codex.screen.sessions.prune()
+        #expect(codex.screen.sessions[key] == nil)
+
+        let closed = try jsonValue(#"{"method":"thread/closed","params":{"threadId":"\#(Self.thread1)"}}"#)
+        let before = host.requests.count
+        await codex.receive(closed)?.value
+        #expect(host.requests[before...].map(\.message) == ["Codex 세션이 끝났어요."])
+        await codex.receive(closed)?.value
+        #expect(host.requests.count == before + 1)
+    }
+
+    @Test func R40__codex_alerts_jump_to_the_sessions_own_terminal_while_another_holds_its_folder() async throws {
+        let terminals = FolderTerminals()
+        let codex = try joinedCodex(terminals)
+        // Another Codex TUI now works in the same folder, in another terminal.
+        terminals.byFolder["/Users/me/notch-the-rock"] = TerminalLocation(bundleID: "com.apple.Terminal", tty: "/dev/ttys009")
+        host.responses = [Self.jump]
+        await codex.receive(try codexFixture("turnCompleted"))?.value
+        host.responses = [Self.jump]
+        await codex.receive(try jsonValue(#"{"method":"thread/closed","params":{"threadId":"\#(Self.thread1)"}}"#))?.value
+        #expect(activator.activated == [ghostty, ghostty])
     }
 
     @Test func R40__render_alerts_with_a_fake_logo() throws {

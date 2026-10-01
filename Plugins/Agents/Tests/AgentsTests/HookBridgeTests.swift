@@ -99,8 +99,9 @@ func run(_ runner: HookRunner, _ arguments: [String]) async -> Data {
         #expect(server.inbox.all.isEmpty)
     }
 
-    @Test(arguments: [false, true])
-    func R05__offline_hook_exits_at_once_with_empty_output(staleSocket: Bool) throws {
+    /// PostToolUse runs after every tool call, so its hook must return as fast as the others.
+    @Test(arguments: [false, true], ["Stop", "PostToolUse"])
+    func R05__offline_hook_exits_at_once_with_empty_output(staleSocket: Bool, event: String) throws {
         let paths = makeSocketPath()
         defer { try? FileManager.default.removeItem(atPath: paths.folder) }
         if staleSocket {
@@ -115,11 +116,11 @@ func run(_ runner: HookRunner, _ arguments: [String]) async -> Data {
             close(fd)
         }
         let result = try runProcess(
-            builtHook, ["Stop"],
-            input: Data(#"{"session_id":"s1","hook_event_name":"Stop"}"#.utf8),
+            builtHook, [event],
+            input: Data(#"{"session_id":"s1","hook_event_name":"\#(event)"}"#.utf8),
             environment: [HookSocket.pathEnvironmentKey: paths.socket]
         )
-        print("R05 offline notch-hook (stale socket: \(staleSocket)): exit \(result.status), \(result.stdout.count) bytes on stdout, \(result.elapsed)")
+        print("R05 R33 offline notch-hook \(event) (stale socket: \(staleSocket)): exit \(result.status), \(result.stdout.count) bytes on stdout, \(result.elapsed)")
         #expect(result.status == 0)
         #expect(result.stdout.isEmpty)
         #expect(result.elapsed < .seconds(1))
