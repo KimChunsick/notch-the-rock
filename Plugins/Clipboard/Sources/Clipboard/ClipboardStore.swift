@@ -7,7 +7,8 @@ import NotchKit
 ///
 /// Images are kept apart so that recording a text does not rewrite every image, and an image is
 /// written once when it is first copied. An image file is always written before any list names
-/// it, so a list on disk never refers to an image that is not.
+/// it, so a list on disk never refers to an image that is not. An image file that the list does
+/// not name was never saved, or belongs to a removed entry.
 struct ClipboardStore: Sendable {
     static let listFileName = "history.sealed"
     static let imageExtension = "image"
@@ -27,16 +28,16 @@ struct ClipboardStore: Sendable {
         self.writeFile = writeFile
     }
 
-    /// The stored list, empty when none was written yet. Throws when the file cannot be read or
-    /// opened with this key.
-    func loadList() throws -> StoredList {
+    /// The stored list, newest first, empty when none was written yet. Throws when the file cannot
+    /// be read or opened with this key.
+    func loadList() throws -> [ClipItem] {
         let url = directory.appendingPathComponent(Self.listFileName)
-        guard FileManager.default.fileExists(atPath: url.path) else { return StoredList() }
-        return try JSONDecoder().decode(StoredList.self, from: open(Data(contentsOf: url)))
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        return try JSONDecoder().decode([ClipItem].self, from: open(Data(contentsOf: url)))
     }
 
-    func saveList(_ list: StoredList) throws {
-        try write(JSONEncoder().encode(list), to: directory.appendingPathComponent(Self.listFileName))
+    func saveList(_ items: [ClipItem]) throws {
+        try write(JSONEncoder().encode(items), to: directory.appendingPathComponent(Self.listFileName))
     }
 
     func saveImage(_ png: Data, for id: UUID) throws {
@@ -53,30 +54,24 @@ struct ClipboardStore: Sendable {
         try FileManager.default.removeItem(at: url)
     }
 
-    /// Deletes the list and every image file, for a history that can no longer be read.
-    func deleteAll() throws {
-        let list = directory.appendingPathComponent(Self.listFileName)
-        if FileManager.default.fileExists(atPath: list.path) {
-            try FileManager.default.removeItem(at: list)
-        }
-        for url in try imageURLs() {
+    /// Deletes every image file whose entry id is not in `kept`.
+    func deleteImages(except kept: Set<UUID>) throws {
+        for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        where url.pathExtension == Self.imageExtension {
+            if let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent), kept.contains(id) { continue }
             try FileManager.default.removeItem(at: url)
         }
     }
 
-    /// The entry id of every image file on disk, with the time the file was written.
-    func imageFiles() throws -> [UUID: Date] {
-        var files: [UUID: Date] = [:]
-        for url in try imageURLs() {
-            guard let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent) else { continue }
-            files[id] = try url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate ?? .distantPast
+    /// Deletes every image file and then the list, for a history that can no longer be read. The
+    /// list goes last: a deletion that stops partway leaves it in place, so the store stays
+    /// unreadable and none of its remaining image files is loaded as a new entry.
+    func deleteAll() throws {
+        try deleteImages(except: [])
+        let list = directory.appendingPathComponent(Self.listFileName)
+        if FileManager.default.fileExists(atPath: list.path) {
+            try FileManager.default.removeItem(at: list)
         }
-        return files
-    }
-
-    private func imageURLs() throws -> [URL] {
-        try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey])
-            .filter { $0.pathExtension == Self.imageExtension }
     }
 
     private func imageURL(_ id: UUID) -> URL {
@@ -93,19 +88,6 @@ struct ClipboardStore: Sendable {
     private func open(_ sealed: Data) throws -> Data {
         try AES.GCM.open(AES.GCM.SealedBox(combined: sealed), using: key)
     }
-}
-
-/// What the list file holds.
-///
-/// Opening a store deletes only the image files that `removedImageIDs` names. Any other image file
-/// that `items` does not name was written before a list write that failed or never ran, so it is
-/// brought back as an entry rather than deleted.
-struct StoredList: Codable, Equatable, Sendable {
-    /// Newest first.
-    var items: [ClipItem] = []
-    /// Images whose entry was removed and whose file may still be on disk: each was named by the
-    /// list this one replaces, or its file could not be deleted.
-    var removedImageIDs: Set<UUID> = []
 }
 
 /// The 256-bit history key, kept in the Keychain under the plugin's service (this Mac only).

@@ -85,6 +85,7 @@ import Testing
     wrongKey.record(try #require(ClipCapture(png: png)))
     wrongKey.flush()
     #expect(wrongKey.items.map(\.kind) == [.image, .text])
+    #expect(wrongKey.unsavedCount == 2)
     #expect(wrongKey.imageData(for: wrongKey.items[0]) == png)
     #expect(try contents(of: directory) == stored)
 
@@ -153,12 +154,185 @@ import Testing
     #expect(makeHistory(directory: directory, key: key).items == history.items)
 }
 
-/// A reset whose image write fails (a full disk) keeps that entry in the list, pinned and copyable,
-/// with its original in memory, and reports it. The list on disk leaves it out until its file is
-/// written. A retry once the disk takes files again saves the image and a list that refers to it,
-/// and only then lets the original go.
+/// A reset deletes the image files before the list. When it stops partway, here at an image file
+/// that cannot be deleted, the unreadable list is still on disk: the store stays unreadable, in
+/// this session and the next, and no image file comes back as an entry. Once every file can go,
+/// the reset finishes and saves this session.
 @MainActor
-@Test func R09__a_reset_keeps_images_it_could_not_save_until_a_retry_saves_them() throws {
+@Test func R09__an_interrupted_reset_leaves_the_store_unreadable() throws {
+    let directory = try makeDirectory()
+    let old = makeHistory(directory: directory, key: makeKey())
+    old.record(try #require(ClipCapture(png: samplePNG(seed: 20))))
+    old.record(try #require(ClipCapture(png: samplePNG(seed: 21))))
+    old.record(.text("unreadable later"))
+    old.flush()
+    let locked = imageFile(for: try #require(old.items.first { $0.kind == .image }).id, in: directory)
+    try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: locked.path)
+    defer { try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: locked.path) }
+    let list = directory.appendingPathComponent(ClipboardStore.listFileName)
+    let unreadableList = try Data(contentsOf: list)
+
+    let key = makeKey()
+    let errors = ErrorLog()
+    let history = ClipboardHistory(logError: errors.append)
+    history.open(ClipboardStore(directory: directory, key: key))
+    history.record(.text("this session"))
+    errors.messages = []
+    history.resetUnreadableStore()
+    history.flush()
+    #expect(history.isStoreUnreadable)
+    #expect(errors.messages.count == 1)
+    #expect(try Data(contentsOf: list) == unreadableList)
+
+    let reopened = makeHistory(directory: directory, key: key)
+    #expect(reopened.isStoreUnreadable)
+    #expect(reopened.items.isEmpty)
+    #expect(FileManager.default.fileExists(atPath: locked.path))
+
+    try FileManager.default.setAttributes([.immutable: false], ofItemAtPath: locked.path)
+    history.resetUnreadableStore()
+    #expect(!history.isStoreUnreadable)
+    history.flush()
+    #expect(try files(in: directory).map(\.lastPathComponent) == [ClipboardStore.listFileName])
+    #expect(makeHistory(directory: directory, key: key).items.map(\.content) == [.text("this session")])
+}
+
+/// An image file that the list on disk does not name was never saved: opening the store deletes
+/// it, and it does not come back as an entry.
+@MainActor
+@Test func R09__opening_a_store_deletes_image_files_its_list_does_not_name() throws {
+    let directory = try makeDirectory()
+    let key = makeKey()
+    let png = samplePNG(seed: 14)
+    let history = makeHistory(directory: directory, key: key)
+    history.record(.text("on disk"))
+    history.record(try #require(ClipCapture(png: png)))
+    history.flush()
+    let stray = UUID()
+    try ClipboardStore(directory: directory, key: key).saveImage(samplePNG(seed: 15), for: stray)
+
+    let errors = ErrorLog()
+    let reopened = makeHistory(directory: directory, key: key, errors: errors)
+    #expect(reopened.items == history.items)
+    #expect(errors.messages.isEmpty)
+    #expect(!FileManager.default.fileExists(atPath: imageFile(for: stray, in: directory).path))
+    let image = try #require(reopened.items.first { $0.kind == .image })
+    #expect(reopened.imageData(for: image) == png)
+}
+
+/// An entry is saved once its image file and a list that names it are both on disk. Here the
+/// image file is written but the list is not: the entry stays in the history and counts as not
+/// saved until a later flush writes the list, after which a new history on the store restores it.
+@MainActor
+@Test func R09__an_entry_is_unsaved_until_a_list_that_names_it_is_written() throws {
+    let directory = try makeDirectory()
+    let key = makeKey()
+    let fault = WriteFault()
+    let history = ClipboardHistory(logError: { _ in })
+    history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
+    history.record(.text("saved"))
+    history.flush()
+    let saved = try #require(history.items.first)
+    #expect(history.unsavedCount == 0)
+
+    fault.failsList = true
+    let png = samplePNG(seed: 16)
+    history.record(try #require(ClipCapture(png: png)))
+    let image = try #require(history.items.first)
+    history.flush()
+    #expect(FileManager.default.fileExists(atPath: imageFile(for: image.id, in: directory).path))
+    #expect(history.unsavedCount == 1)
+    #expect(try ClipboardStore(directory: directory, key: key).loadList().map(\.id) == [saved.id])
+
+    fault.failsList = false
+    history.flush()
+    #expect(history.unsavedCount == 0)
+    let reloaded = makeHistory(directory: directory, key: key)
+    #expect(reloaded.items == history.items)
+    #expect(reloaded.imageData(for: image) == png)
+}
+
+/// A list that could not be written is kept: the next change writes again, its newer list
+/// winning, and so does the next flush when nothing changed.
+@MainActor
+@Test func R09__a_failed_list_is_written_again_on_the_next_change_or_flush() async throws {
+    let directory = try makeDirectory()
+    let key = makeKey()
+    let fault = WriteFault()
+    let store = ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) }
+    let history = ClipboardHistory(logError: { _ in })
+    history.open(store)
+
+    fault.failsList = true
+    history.record(.text("first"))
+    history.flush()
+    #expect(try store.loadList().isEmpty)
+    #expect(history.unsavedCount == 1)
+
+    // The next change, without a flush.
+    fault.failsList = false
+    history.record(.text("second"))
+    let changed = ContinuousClock.now
+    while try store.loadList().count < 2, ContinuousClock.now - changed < .seconds(2) {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(try store.loadList().map(\.content) == [.text("second"), .text("first")])
+
+    // The next flush, with no change after the failure.
+    fault.failsList = true
+    history.setPinned(true, for: try #require(history.items.last).id)
+    history.flush()
+    #expect(try store.loadList().allSatisfy { !$0.isPinned })
+    fault.failsList = false
+    history.flush()
+    #expect(try store.loadList() == history.items)
+    #expect(history.unsavedCount == 0)
+}
+
+/// Reopening the store, as turning the clipboard feature off and on does, keeps what was saved and
+/// drops what was not: an image whose file could not be written and the entries of a list that
+/// could not be written. The image file that list would have named goes with them.
+@MainActor
+@Test func R09__reopening_drops_unsaved_entries_and_keeps_saved_ones() throws {
+    let directory = try makeDirectory()
+    let key = makeKey()
+    let fault = WriteFault()
+    let errors = ErrorLog()
+    let history = ClipboardHistory(logError: errors.append)
+    history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
+    history.record(.text("saved"))
+    history.flush()
+    let saved = history.items
+
+    fault.failsImages = true
+    let png = samplePNG(seed: 17)
+    history.record(try #require(ClipCapture(png: png)))
+    let withoutFile = try #require(history.items.first)
+    #expect(errors.messages.count == 1)
+    #expect(history.imageData(for: withoutFile) == png)
+    fault.failsImages = false
+    fault.failsList = true
+    history.record(try #require(ClipCapture(png: samplePNG(seed: 18))))
+    let withoutList = try #require(history.items.first)
+    history.record(.text("not saved"))
+    history.flush()
+    #expect(history.items.count == 4)
+    #expect(history.unsavedCount == 3)
+    #expect(!FileManager.default.fileExists(atPath: imageFile(for: withoutFile.id, in: directory).path))
+    #expect(FileManager.default.fileExists(atPath: imageFile(for: withoutList.id, in: directory).path))
+
+    history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
+    #expect(history.items == saved)
+    #expect(history.unsavedCount == 0)
+    #expect(!FileManager.default.fileExists(atPath: imageFile(for: withoutList.id, in: directory).path))
+    #expect(try files(in: directory).count == 1)
+}
+
+/// A reset saves this session under the same rule: an image whose file cannot be written stays in
+/// the history, copyable from memory and counted as not saved, and the list on disk leaves it out.
+/// It is not tried again; reopening the store drops it.
+@MainActor
+@Test func R09__a_reset_keeps_an_image_it_could_not_save_in_memory_only() throws {
     let directory = try makeDirectory()
     let old = makeHistory(directory: directory, key: makeKey())
     old.record(.text("unreadable later"))
@@ -169,8 +343,7 @@ import Testing
     let errors = ErrorLog()
     let history = ClipboardHistory(logError: errors.append)
     history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
-    #expect(history.isStoreUnreadable)
-    let png = samplePNG(seed: 8)
+    let png = samplePNG(seed: 19)
     history.record(try #require(ClipCapture(png: png)))
     history.record(.text("kept after the reset"))
     let image = try #require(history.items.first { $0.kind == .image })
@@ -180,146 +353,24 @@ import Testing
 
     fault.failsImages = true
     history.resetUnreadableStore()
+    history.flush()
     #expect(!history.isStoreUnreadable)
     #expect(history.items == captured)
-    #expect(history.unsavedImageIDs == [image.id])
+    #expect(history.unsavedCount == 1)
     #expect(errors.messages.count == 1)
-    #expect(history.imageData(for: image) == png)
     let pasteboard = makePasteboard()
     defer { pasteboard.releaseGlobally() }
     #expect(history.copy(image, to: pasteboard))
     #expect(pasteboard.data(forType: .png) == png)
-
-    history.flush()
-    let imageFile = directory.appendingPathComponent(image.id.uuidString).appendingPathExtension(ClipboardStore.imageExtension)
-    #expect(!FileManager.default.fileExists(atPath: imageFile.path))
-    let saved = makeHistory(directory: directory, key: key)
-    #expect(!saved.isStoreUnreadable)
-    #expect(saved.items.map(\.content) == [.text("kept after the reset")])
-
-    // A retry while the disk is still full keeps the entry as it is.
-    history.saveUnsavedImages()
-    #expect(history.unsavedImageIDs == [image.id])
-    #expect(history.imageData(for: image) == png)
+    #expect(try ClipboardStore(directory: directory, key: key).loadList().map(\.content) == [.text("kept after the reset")])
 
     fault.failsImages = false
-    history.saveUnsavedImages()
-    #expect(history.unsavedImageIDs.isEmpty)
+    history.record(.link("https://example.com"))
     history.flush()
-    let reloaded = makeHistory(directory: directory, key: key)
-    #expect(reloaded.items == history.items)
-    #expect(reloaded.imageData(for: image) == png)
-
-    // The original has left memory: without its file the image can no longer be read.
-    try FileManager.default.removeItem(at: imageFile)
-    #expect(history.imageData(for: image) == nil)
-}
-
-/// Retrying a reset's unsaved image can write its file and still fail to write the list. The entry
-/// stays unsaved, with its notice and retry, and its original stays in memory until a list that
-/// names it is on disk. The next flush writes the failed list again; after that a new history on
-/// the same store restores the pinned image.
-@MainActor
-@Test func R09__a_retried_image_stays_unsaved_until_a_list_that_names_it_is_written() throws {
-    let directory = try makeDirectory()
-    let old = makeHistory(directory: directory, key: makeKey())
-    old.record(.text("unreadable later"))
-    old.flush()
-
-    let key = makeKey()
-    let fault = WriteFault()
-    let history = ClipboardHistory(logError: { _ in })
-    history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
-    let png = samplePNG(seed: 9)
-    history.record(try #require(ClipCapture(png: png)))
-    history.record(.text("kept after the reset"))
-    let image = try #require(history.items.first { $0.kind == .image })
-    history.setPinned(true, for: image.id)
-    fault.failsImages = true
-    history.resetUnreadableStore()
-    #expect(history.unsavedImageIDs == [image.id])
-
-    // The retry writes the image file, but not the list that would name it.
-    fault.failsImages = false
-    fault.failsList = true
-    history.saveUnsavedImages()
-    let file = imageFile(for: image.id, in: directory)
-    #expect(FileManager.default.fileExists(atPath: file.path))
-    #expect(history.unsavedImageIDs == [image.id])
-    history.flush()
-    #expect(history.unsavedImageIDs == [image.id])
-
-    // The original is still in memory: the image is copyable even without its file.
-    let moved = file.appendingPathExtension("moved")
-    try FileManager.default.moveItem(at: file, to: moved)
-    let pasteboard = makePasteboard()
-    defer { pasteboard.releaseGlobally() }
-    #expect(history.copy(image, to: pasteboard))
-    #expect(pasteboard.data(forType: .png) == png)
-    try FileManager.default.moveItem(at: moved, to: file)
-
-    // Once the list can be written, a flush writes the failed one again.
-    fault.failsList = false
-    history.flush()
-    #expect(history.unsavedImageIDs.isEmpty)
-    let reloaded = makeHistory(directory: directory, key: key)
-    #expect(reloaded.items == history.items)
-    let restored = try #require(reloaded.items.first { $0.id == image.id })
-    #expect(restored.isPinned)
-    #expect(reloaded.imageData(for: restored) == png)
-}
-
-/// A list write that fails after an image file is written leaves the file on disk and out of the
-/// list. Opening the store again, in this session or after a restart, brings the image back as an
-/// unpinned entry instead of deleting the file as unused: the pin was never on disk, the image
-/// was. An image deleted while the list could not be written is gone for good, since no list on
-/// disk named it, and so is one the list on disk marks as removed.
-@MainActor
-@Test func R09__an_image_whose_list_write_failed_comes_back_after_a_restart() throws {
-    let directory = try makeDirectory()
-    let key = makeKey()
-    let fault = WriteFault()
-    let history = ClipboardHistory(logError: { _ in })
-    history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
-    history.record(.text("on disk"))
-    history.flush()
-    let text = try #require(history.items.first)
-
-    fault.failsList = true
-    let png = samplePNG(seed: 10)
-    history.record(try #require(ClipCapture(png: png)))
-    let image = try #require(history.items.first)
-    history.setPinned(true, for: image.id)
-    history.record(try #require(ClipCapture(png: samplePNG(seed: 11))))
-    let deleted = try #require(history.items.first)
-    history.delete(deleted.id)
-    history.flush()
-    #expect(FileManager.default.fileExists(atPath: imageFile(for: image.id, in: directory).path))
-    #expect(!FileManager.default.fileExists(atPath: imageFile(for: deleted.id, in: directory).path))
-
-    // Opening the store again in this session, while the list still cannot be written.
-    history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
-    #expect(history.items.map(\.id) == [image.id, text.id])
-    history.flush()
-
-    // A restart: a new history on the same store, whose list names only the text.
-    let errors = ErrorLog()
-    let restarted = makeHistory(directory: directory, key: key, errors: errors)
-    #expect(errors.messages.isEmpty)
-    #expect(restarted.items.map(\.id) == [image.id, text.id])
-    let recovered = try #require(restarted.items.first)
-    #expect(recovered.content == image.content)
-    #expect(!recovered.isPinned)
-    #expect(restarted.imageData(for: recovered) == png)
-    restarted.flush()
-    #expect(makeHistory(directory: directory, key: key).items == restarted.items)
-
-    let removedID = UUID()
-    let store = ClipboardStore(directory: directory, key: key)
-    try store.saveImage(samplePNG(seed: 12), for: removedID)
-    try store.saveList(StoredList(items: restarted.items, removedImageIDs: [removedID]))
-    #expect(makeHistory(directory: directory, key: key).items == restarted.items)
-    #expect(!FileManager.default.fileExists(atPath: imageFile(for: removedID, in: directory).path))
+    #expect(history.unsavedCount == 1)
+    history.open(ClipboardStore(directory: directory, key: key))
+    #expect(history.items.map(\.content) == [.link("https://example.com"), .text("kept after the reset")])
+    #expect(history.unsavedCount == 0)
 }
 
 /// An image file goes only after a list without its entry is on disk: when that write fails the

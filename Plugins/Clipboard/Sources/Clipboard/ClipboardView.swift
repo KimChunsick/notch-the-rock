@@ -11,24 +11,10 @@ struct ClipboardView: View {
         VStack(spacing: 6) {
             SearchField(query: $query)
             if history.isStoreUnreadable {
-                Label("저장된 기록을 읽지 못했어요. 설정에서 초기화할 수 있어요.", systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.orange)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 8)
+                notice("저장된 기록을 읽지 못했어요. 설정에서 초기화할 수 있어요.")
             }
-            if !history.unsavedImageIDs.isEmpty {
-                HStack(spacing: 6) {
-                    Label("이미지 \(history.unsavedImageIDs.count)개를 저장하지 못했어요. 앱을 끄면 사라져요.", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .lineLimit(2)
-                    Spacer(minLength: 4)
-                    Button("다시 시도") { history.saveUnsavedImages() }
-                        .controlSize(.small)
-                }
-                .font(.system(size: 11))
-                .padding(.horizontal, 8)
+            if history.unsavedCount > 0 {
+                notice("기록 \(history.unsavedCount)개는 저장하지 못했어요. 앱을 종료하거나 클립보드 기능을 끄면 사라져요.")
             }
             let visible = history.matching(query)
             if history.items.isEmpty {
@@ -73,6 +59,15 @@ struct ClipboardView: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 8)
             .padding(.top, 4)
+    }
+
+    private func notice(_ text: String) -> some View {
+        Label(text, systemImage: "exclamationmark.triangle.fill")
+            .font(.system(size: 11))
+            .foregroundStyle(.orange)
+            .lineLimit(2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 8)
     }
 
     private func placeholder(_ text: String) -> some View {
@@ -206,8 +201,7 @@ func relativeTime(from date: Date, to now: Date) -> String {
 }
 
 /// The plugin's section in Settings: how many entries are kept and a button that deletes every
-/// unpinned one. When the stored history cannot be read, a second row offers to reset it; when
-/// images could not be saved, another offers to try again.
+/// unpinned one. When the stored history cannot be read, a second row offers to reset it.
 struct ClipboardSettingsView: View {
     let history: ClipboardHistory
     @State private var isConfirmingClear = false
@@ -238,19 +232,11 @@ struct ClipboardSettingsView: View {
                 .confirmationDialog("디스크에 있는 읽지 못한 기록을 지울까요?", isPresented: $isConfirmingReset) {
                     Button("지우고 새로 저장", role: .destructive) { history.resetUnreadableStore() }
                 } message: {
-                    Text("지우는 건 디스크에 저장돼 있던, 읽지 못한 기록뿐이에요. 지우면 되살릴 수 없어요. 지금 목록에 보이는 기록은 하나도 지우지 않고 새로 저장할게요.")
+                    Text("디스크에 저장돼 있던, 읽지 못한 기록만 지워요. 지운 기록은 되살릴 수 없어요. 지금 목록에 보이는 기록은 그대로 두고, 지운 뒤에 다시 저장해요.")
                 }
             } label: {
                 Text("저장된 기록을 읽지 못했어요")
-                Text("지금은 기록을 저장하지 않아서 앱을 끄면 사라져요. 초기화하면 다시 저장해요.")
-            }
-        }
-        if !history.unsavedImageIDs.isEmpty {
-            LabeledContent {
-                Button("다시 시도") { history.saveUnsavedImages() }
-            } label: {
-                Text("이미지 \(history.unsavedImageIDs.count)개를 저장하지 못했어요")
-                Text("목록에 남아 있어서 다시 복사할 수 있지만, 앱을 끄면 사라져요.")
+                Text("지금은 기록을 저장하지 않아서 앱을 종료하거나 클립보드 기능을 끄면 사라져요. 초기화하면 다시 저장해요.")
             }
         }
     }
