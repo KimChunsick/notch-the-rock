@@ -19,11 +19,14 @@ enum AppEnergyReader {
     /// Two samples a second apart: the first sample's POWER is always 0, the second covers that second.
     static let topArguments = ["-l", "2", "-s", "1", "-stats", "pid,power"]
 
+    /// The two samples take about 1.5 s; a top still running after 5 s has stalled and is terminated.
+    static let topTimeout: Duration = .seconds(5)
+
     /// The apps using the most energy right now, highest first. Takes about 1.5 s; processes outside
     /// an app (daemons, command line tools, top itself) are not counted, and NotchTheRock counts like
     /// any other app.
     static func read() async throws -> [AppEnergy] {
-        let output = try await toolOutput("/usr/bin/top", topArguments, environment: ["LC_ALL": "C"])
+        let output = try await toolOutput("/usr/bin/top", topArguments, environment: ["LC_ALL": "C"], timeout: topTimeout)
         let power = parseTop(String(decoding: output, as: UTF8.self))
         let apps = rank(power) { pid in executablePath(of: pid).flatMap(appBundlePath(forExecutable:)) }
         return Array(apps.prefix(limit))

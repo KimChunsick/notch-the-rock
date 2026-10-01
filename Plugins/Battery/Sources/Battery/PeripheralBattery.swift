@@ -108,8 +108,11 @@ extension PeripheralBattery {
 /// Reads the connected peripherals: the I/O Registry in process, and system_profiler (about 0.2 s)
 /// off the caller's thread.
 enum PeripheralReader {
+    /// A system_profiler still running after 3 s has stalled and is terminated.
+    static let systemProfilerTimeout: Duration = .seconds(3)
+
     static func read() async -> [PeripheralBattery] {
-        let bluetooth = (try? await toolOutput("/usr/sbin/system_profiler", ["-json", "SPBluetoothDataType"]))
+        let bluetooth = (try? await toolOutput("/usr/sbin/system_profiler", ["-json", "SPBluetoothDataType"], timeout: systemProfilerTimeout))
             .map(PeripheralBattery.bluetoothDevices(systemProfilerJSON:)) ?? []
         return PeripheralBattery.merge(hid: registryDevices(), bluetooth: bluetooth)
     }

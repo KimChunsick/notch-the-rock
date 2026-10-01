@@ -28,6 +28,10 @@ final class BatteryModel {
     /// Nil leaves `detail` to whoever sets it (the screen's tests).
     private let sampler: Sampler?
     private let interval: Duration
+    /// The sampling run that may change `detail`: the one that started last. A run whose screen
+    /// closed while it waited for a sample can end after the screen opened again and a newer run
+    /// started; it then leaves the newer run's lists alone.
+    @ObservationIgnored private var currentRun = 0
 
     /// Samples every 5 s, Activity Monitor's default; each top sample itself spans 1 s of that.
     init(sampler: Sampler?, interval: Duration = .seconds(5)) {
@@ -36,16 +40,19 @@ final class BatteryModel {
     }
 
     /// Samples until the calling task is cancelled, i.e. while the screen is shown, then forgets the
-    /// readings so the next visit does not open with old ones.
+    /// readings so the next visit does not open with old ones. Only the current run publishes or
+    /// forgets.
     func sampleWhileShown() async {
         guard let sampler else { return }
-        while !Task.isCancelled {
+        currentRun += 1
+        let run = currentRun
+        while run == currentRun, !Task.isCancelled {
             let sample = await sampler()
-            guard !Task.isCancelled else { break }
+            guard run == currentRun, !Task.isCancelled else { break }
             detail = sample
             try? await Task.sleep(for: interval)
         }
-        detail = BatteryDetail()
+        if run == currentRun { detail = BatteryDetail() }
     }
 }
 
