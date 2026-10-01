@@ -37,6 +37,8 @@ final class HomeModel {
     /// The arrangement shown now.
     private(set) var layout: HomeLayout
     private(set) var isEditing = false
+    /// The plugin whose tile is being dragged in edit mode.
+    private(set) var draggedTile: String?
 
     /// The arrangement saved by the last edit, or loaded at launch.
     @ObservationIgnored private var stored: HomeLayout
@@ -75,8 +77,21 @@ final class HomeModel {
         isEditing = true
     }
 
+    /// Also ends a tile drag: drags only happen in edit mode.
     func finishEditing() {
         isEditing = false
+        draggedTile = nil
+    }
+
+    /// A tile is being dragged in edit mode; the drag holds the notch open until `endDrag(_:)`.
+    func beginDrag(_ pluginID: String) {
+        guard isEditing else { return }
+        draggedTile = pluginID
+    }
+
+    /// The drag of `pluginID`'s tile ended, dropped or cancelled.
+    func endDrag(_ pluginID: String) {
+        if draggedTile == pluginID { draggedTile = nil }
     }
 
     /// Takes a tile off the grid into the list.

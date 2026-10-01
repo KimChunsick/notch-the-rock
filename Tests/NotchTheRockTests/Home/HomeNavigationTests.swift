@@ -83,6 +83,19 @@ struct HomeNavigationTests {
         #expect(!host.home.isEditing)
     }
 
+    /// A drag only happens in edit mode, so finishing editing (also by collapsing) ends it and its hold.
+    @Test func R16__collapsing_or_finishing_editing_ends_a_tile_drag() {
+        defer { fixture.cleanUp() }
+        host.showHome()
+        host.home.beginEditing()
+        host.home.beginDrag("com.example.both")
+        #expect(host.home.draggedTile == "com.example.both")
+        host.setHovering(false)
+        #expect(host.home.draggedTile == nil)
+        host.home.beginDrag("com.example.both")
+        #expect(host.home.draggedTile == nil)
+    }
+
     @Test func R16__plugin_asking_to_expand_opens_its_screen() {
         defer { fixture.cleanUp() }
         host.expand(toTabOf: "com.example.tab")

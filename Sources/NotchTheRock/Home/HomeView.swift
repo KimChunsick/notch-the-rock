@@ -62,11 +62,14 @@ private struct HomeGridView: View {
 }
 
 /// One tile. Tapping it opens the plugin's screen when the plugin has one. In edit mode it shows
-/// a remove button and a size menu, and it can be dragged to another grid place.
+/// a remove button and a size menu, and it can be dragged to another grid place; the home knows
+/// about the drag from its start to its drop or cancellation, so the notch stays open meanwhile.
 private struct TileView: View {
     let host: NotchHostModel
     let tile: HomeTile
     @State private var drag: CGSize = .zero
+    /// Resets when the drag ends, also when it is cancelled.
+    @GestureState private var isDragging = false
 
     private static let snap = Animation.spring(response: 0.3, dampingFraction: 0.8)
 
@@ -139,6 +142,7 @@ private struct TileView: View {
         }
         .gesture(
             DragGesture(minimumDistance: 3)
+                .updating($isDragging) { _, dragging, _ in dragging = true }
                 .onChanged { drag = $0.translation }
                 .onEnded { value in
                     let corner = CGPoint(x: frame.minX + value.translation.width, y: frame.minY + value.translation.height)
@@ -149,6 +153,16 @@ private struct TileView: View {
                 },
             including: editing ? .all : .subviews
         )
+        .onChange(of: isDragging) { _, dragging in
+            if dragging {
+                home.beginDrag(placement.pluginID)
+            } else {
+                home.endDrag(placement.pluginID)
+                // A cancelled drag has no drop: the tile springs back.
+                if drag != .zero { withAnimation(Self.snap) { drag = .zero } }
+            }
+        }
+        .onDisappear { home.endDrag(placement.pluginID) }
     }
 
     static func title(of size: TileSize) -> String {

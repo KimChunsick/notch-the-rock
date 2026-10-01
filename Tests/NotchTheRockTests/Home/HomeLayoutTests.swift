@@ -226,6 +226,24 @@ struct HomeModelTests {
         #expect(home.tiles.map(\.placement) == [TilePlacement(pluginID: "a", size: .small, origin: GridOrigin(column: 0, row: 0))])
     }
 
+    /// Coordinates near `Int.max` are checked without overflowing: the stored layout is unreadable.
+    @Test func R16__stored_tile_with_huge_coordinates_gives_the_default_layout() {
+        defer { fixture.cleanUp() }
+        #expect(!HomeLayout.isInside(.small, at: GridOrigin(column: .max, row: 0)))
+        #expect(!HomeLayout.isInside(.small, at: GridOrigin(column: 0, row: .max)))
+        for (column, row) in [(Int.max, 0), (0, Int.max)] {
+            let json = #"{"tiles":[{"plugin":"a","size":"small","column":\#(column),"row":\#(row)}],"known":["a"]}"#
+            fixture.defaults.set(Data(json.utf8), forKey: HomeLayoutStore.key)
+            #expect(fixture.store.load() == .empty)
+        }
+        let huge = HomeLayout(tiles: [TilePlacement(pluginID: "a", size: .small, origin: GridOrigin(column: .max, row: .max))], known: ["a"])
+        #expect(huge.reconciled(with: [homePlugin("a")]).tiles.isEmpty)
+
+        let home = HomeModel(store: fixture.store)
+        home.plugins = [homePlugin("a")]
+        #expect(home.tiles.map(\.placement) == [TilePlacement(pluginID: "a", size: .small, origin: GridOrigin(column: 0, row: 0))])
+    }
+
     @Test func R16__persistence_round_trip() {
         defer { fixture.cleanUp() }
         let layout = HomeLayout(

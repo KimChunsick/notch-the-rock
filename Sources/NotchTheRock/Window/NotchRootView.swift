@@ -12,8 +12,12 @@ struct NotchRootView: View {
     let host: NotchHostModel
     let notchSize: CGSize
     let openSettings: @MainActor () -> Void
-    /// Told the shape's metrics whenever they change, so pointer tracking follows the drawn shape.
+    /// Told the metrics the shape is heading to whenever they change, so pointer tracking follows it.
     var metricsChanged: @MainActor (NotchLayout.Metrics) -> Void = { _ in }
+    /// Told the shape as drawn, every frame while it springs toward new metrics.
+    var shapeDrawn: @MainActor (NotchLayout.Metrics) -> Void = { _ in }
+    /// Told when a tile drag in the home starts (`true`) and ends, dropped or cancelled (`false`).
+    var dragChanged: @MainActor (Bool) -> Void = { _ in }
 
     /// The measured size of what the current state shows.
     @State private var contentSize: CGSize = .zero
@@ -56,10 +60,12 @@ struct NotchRootView: View {
         }
         .frame(width: NotchLayout.canvasSize.width, height: NotchLayout.canvasSize.height, alignment: .top)
         .ignoresSafeArea()
+        .modifier(DrawnShapeReporter(metrics: metrics, report: shapeDrawn))
         .animation(state == .collapsed ? Self.closeSpring : Self.openSpring, value: metrics)
         .animation(Self.openSpring, value: state)
         .environment(\.colorScheme, .dark)
         .onChange(of: metrics, initial: true) { _, metrics in metricsChanged(metrics) }
+        .onChange(of: host.home.draggedTile != nil) { _, dragging in dragChanged(dragging) }
     }
 
     @ViewBuilder
@@ -116,6 +122,26 @@ struct NotchRootView: View {
         insertion: .opacity.combined(with: .scale(scale: 0.94, anchor: .top)).animation(.easeOut(duration: 0.22).delay(0.1)),
         removal: .opacity.animation(.easeIn(duration: 0.1))
     )
+}
+
+/// Reports the shape's metrics as drawn: animated with the shape, so every frame of a spring is
+/// reported, and the window takes clicks where the shape is now, not only where it is heading.
+private struct DrawnShapeReporter: ViewModifier, Animatable {
+    var metrics: NotchLayout.Metrics
+    let report: @MainActor (NotchLayout.Metrics) -> Void
+
+    nonisolated var animatableData: AnimatablePair<CGSize.AnimatableData, AnimatablePair<CGFloat, CGFloat>> {
+        get { AnimatablePair(metrics.size.animatableData, AnimatablePair(metrics.shoulderRadius, metrics.bottomRadius)) }
+        set {
+            metrics.size.animatableData = newValue.first
+            metrics.shoulderRadius = newValue.second.first
+            metrics.bottomRadius = newValue.second.second
+        }
+    }
+
+    func body(content: Content) -> some View {
+        content.onChange(of: metrics, initial: true) { _, drawn in report(drawn) }
+    }
 }
 
 /// Pulsing accent glow behind the shape while an attention request is shown.

@@ -60,10 +60,11 @@ struct HomeLayout: Equatable {
         tiles.first { $0.pluginID == pluginID }
     }
 
-    /// Whether a tile of `size` at `origin` lies inside the grid and starts on a row.
+    /// Whether a tile of `size` at `origin` lies inside the grid and starts on a row. Any stored
+    /// coordinate is checked without overflowing.
     static func isInside(_ size: TileSize, at origin: GridOrigin) -> Bool {
-        origin.column >= 0 && origin.column + size.columns <= columns
-            && origin.row >= 0 && origin.row + size.rows <= unitRows
+        origin.column >= 0 && origin.column <= columns - size.columns
+            && origin.row >= 0 && origin.row <= unitRows - size.rows
             && origin.row % rowHeight == 0
     }
 
@@ -196,7 +197,7 @@ struct HomeLayoutStore {
 }
 
 /// The JSON form: `{"tiles":[{"plugin":…,"size":"small|wide|large","column":…,"row":…}],"known":[…]}`.
-/// An unknown size name makes the whole layout unreadable.
+/// An unknown size name or a tile outside the grid makes the whole layout unreadable.
 private struct StoredLayout: Codable {
     struct Tile: Codable {
         let plugin: String
@@ -217,8 +218,13 @@ private struct StoredLayout: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         tiles = try container.decode([Tile].self, forKey: .tiles)
         known = try container.decode([String].self, forKey: .known)
-        for tile in tiles where Self.size(named: tile.size) == nil {
-            throw DecodingError.dataCorruptedError(forKey: .tiles, in: container, debugDescription: "unknown tile size \(tile.size)")
+        for tile in tiles {
+            guard let size = Self.size(named: tile.size) else {
+                throw DecodingError.dataCorruptedError(forKey: .tiles, in: container, debugDescription: "unknown tile size \(tile.size)")
+            }
+            guard HomeLayout.isInside(size, at: GridOrigin(column: tile.column, row: tile.row)) else {
+                throw DecodingError.dataCorruptedError(forKey: .tiles, in: container, debugDescription: "tile of \(tile.plugin) outside the grid")
+            }
         }
     }
 
