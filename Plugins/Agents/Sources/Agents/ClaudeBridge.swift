@@ -80,7 +80,7 @@ final class ClaudeBridge {
     func decide(_ message: HookMessage) async -> HookDecision? {
         let sessionID = message.payload["session_id"]?.string ?? ""
         record(sessionID, message)
-        let waiting = track(sessionID, message)
+        let waits = track(sessionID, message)
         let title = projectName(sessionID, message)
         let decision: HookDecision?
         switch message.event {
@@ -93,8 +93,8 @@ final class ClaudeBridge {
         }
         // Answered in the notch, or in the terminal (the hook went away and cancelled this task).
         // Released or timed out, the terminal asks now, so the session still waits.
-        if let waiting, decision != nil || Task.isCancelled {
-            screen.sessions.answered(Key(agent: .claude, id: sessionID), waiting: waiting)
+        if waits, decision != nil || Task.isCancelled {
+            screen.sessions.answered(Key(agent: .claude, id: sessionID))
         }
         return decision
     }
@@ -272,17 +272,16 @@ final class ClaudeBridge {
         sessions[sessionID] = record
     }
 
-    /// Moves the session's row on the Agents screen. Returns the waiting state a request put the
-    /// session in.
+    /// Moves the session's row on the Agents screen. True when a request made the session wait.
     @discardableResult
-    private func track(_ sessionID: String, _ message: HookMessage) -> AgentSessionState? {
-        guard !sessionID.isEmpty else { return nil }
+    private func track(_ sessionID: String, _ message: HookMessage) -> Bool {
+        guard !sessionID.isEmpty else { return false }
         let key = Key(agent: .claude, id: sessionID)
         let state: AgentSessionState?
         switch message.event {
         case .sessionEnd:
             screen.sessions.remove(key)
-            return nil
+            return false
         case .sessionStart, .stop:
             state = .idle
         case .userPromptSubmit:
@@ -299,7 +298,7 @@ final class ClaudeBridge {
             key, folder: projectName(sessionID, message), state: state,
             terminal: sessions[sessionID]?.terminal, pid: message.context.claudePID
         )
-        return state == .idle || state == .working ? nil : state
+        return state == .awaitingApproval || state == .awaitingAnswer
     }
 
     private typealias Key = AgentSession.Key

@@ -120,8 +120,8 @@ final class AgentSessionList {
 
     /// A request of `key`'s session was answered: it goes back to work unless another event moved
     /// it on meanwhile.
-    func answered(_ key: AgentSession.Key, waiting: AgentSessionState) {
-        guard byKey[key]?.state == waiting else { return }
+    func answered(_ key: AgentSession.Key) {
+        guard let state = byKey[key]?.state, state == .awaitingApproval || state == .awaitingAnswer else { return }
         byKey[key]?.state = .working
         byKey[key]?.changed = now()
     }

@@ -139,6 +139,8 @@ final class CodexBridge {
             request.task.cancel()
         }
         pending.removeAll()
+        // Without a connection nothing tells how the sessions go on; the next one lists them again.
+        screen.sessions.removeAll(.codex)
     }
 
     /// Closes the connection's state, then tells the link why it should drop the connection.
@@ -228,6 +230,8 @@ final class CodexBridge {
             if let cwd = result["thread"]?["cwd"]?.string ?? result["cwd"]?.string {
                 threads[thread] = cwd
             }
+            // A thread in the middle of a turn is working; any other loaded thread waits for the user.
+            track(thread, result["thread"]?["status"]?["type"]?.string == "active" ? .working : .idle, findTerminal: true)
         }
     }
 
@@ -271,6 +275,7 @@ final class CodexBridge {
         case "thread/started":
             guard let thread = params["thread"], let id = thread["id"]?.string else { return nil }
             if let cwd = thread["cwd"]?.string { threads[id] = cwd }
+            track(id, .idle, findTerminal: true)
             resume(id)
         case "item/started" where params["item"]?["type"]?.string == "fileChange":
             if let item = params["item"], let id = item["id"]?.string {
@@ -286,8 +291,17 @@ final class CodexBridge {
             if let id = params["requestId"] {
                 pending.removeValue(forKey: id)?.task.cancel()
             }
+            // Answered elsewhere, in the TUI for one.
+            if let thread = params["threadId"]?.string {
+                screen.sessions.answered(AgentSession.Key(agent: .codex, id: thread))
+            }
+        case "turn/started":
+            if let thread = params["threadId"]?.string { track(thread, .working) }
+        case "thread/closed":
+            if let thread = params["threadId"]?.string { screen.sessions.remove(AgentSession.Key(agent: .codex, id: thread)) }
         case "turn/completed":
             guard let thread = params["threadId"]?.string else { return nil }
+            track(thread, .idle)
             switch params["turn"]?["status"]?.string {
             case "completed": return notify(thread, message: "Codex가 작업을 마쳤어요.")
             case "failed": return notify(thread, message: "Codex 작업이 오류로 멈췄어요.")
@@ -310,6 +324,15 @@ final class CodexBridge {
         if let older = pending.removeValue(forKey: id) {
             older.task.cancel()
             context.log.error("codex app-server reused the request id \(Self.encode(id)); the older request was withdrawn")
+        }
+        // The session waits for the user whether or not the notch takes the request.
+        let thread = params["threadId"]?.string
+        if let thread {
+            switch method {
+            case "item/commandExecution/requestApproval", "item/fileChange/requestApproval": track(thread, .awaitingApproval)
+            case "item/tool/requestUserInput": track(thread, .awaitingAnswer)
+            default: break
+            }
         }
         let ask: @MainActor () async -> JSONValue?
         switch method {
@@ -340,6 +363,7 @@ final class CodexBridge {
             let current = !Task.isCancelled && self.connection == connection && self.pending[id]?.number == number
             if current, let result {
                 self.send?(.object(["id": id, "result": result]))
+                if let thread { self.screen.sessions.answered(AgentSession.Key(agent: .codex, id: thread)) }
             }
             if self.pending[id]?.number == number {
                 self.pending[id] = nil
@@ -469,6 +493,17 @@ final class CodexBridge {
     }
 
     // MARK: Notices and the terminal
+
+    /// Moves the thread's row on the Agents screen. The terminal is looked up only when the thread
+    /// joins: the lookup walks the running processes.
+    private func track(_ thread: String, _ state: AgentSessionState, findTerminal: Bool = false) {
+        let cwd = threads[thread]
+        let folder = cwd.flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0).lastPathComponent } ?? "Codex"
+        screen.sessions.update(
+            AgentSession.Key(agent: .codex, id: thread), folder: folder, state: state,
+            terminal: findTerminal ? terminal(cwd) : nil
+        )
+    }
 
     private func notify(_ thread: String, message: String) -> Task<Void, Never> {
         notices[thread]?.task.cancel()
