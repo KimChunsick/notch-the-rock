@@ -112,6 +112,12 @@ final class PerlHelperLauncher: HelperLauncher {
 /// the item (title, artist, album), the source app or the image, the fresh line goes to the plugin and
 /// the long-lived helper is replaced; the replacement is not an exit.
 ///
+/// A check asked for is never dropped: one check runs at a time, so a request meanwhile waits and runs
+/// as soon as that check ends, and a long-lived line during a check (which makes its answer unusable)
+/// asks again. A check that ends without a usable answer (no answer in time, an exit, an answer that is
+/// no state, or a fresh helper that cannot start) stays asked for, and the periodic schedule, kept while
+/// a request waits, tries again; a new line or request tries at once. Only the end of the stream drops it.
+///
 /// A `none` line waits `nothingHold` and is dropped when another line comes first, so a track change
 /// that reports nothing for a moment does not take the item away.
 @MainActor
@@ -158,6 +164,8 @@ final class VerifiedStream: StreamHandle {
     /// What the long-lived helper says now; nil before its first line.
     private var reported: Reported?
     private var check: Check?
+    /// A check was asked for and has not started yet.
+    private var isCheckPending = false
     private var checksStarted = 0
     private var heldNothing: Task<Void, Never>?
     private var nextCheck: Task<Void, Never>?
@@ -188,7 +196,7 @@ final class VerifiedStream: StreamHandle {
         commandCheck?.cancel()
         commandCheck = after(Self.checkAfterCommand) { stream in
             stream.commandCheck = nil
-            stream.runCheck()
+            stream.requestCheck()
         }
     }
 
@@ -207,7 +215,11 @@ final class VerifiedStream: StreamHandle {
             onLine(line)
             return
         }
-        check?.isOvertaken = true
+        if check != nil {
+            // The running check's answer may predate this line; what the line says is checked next.
+            check?.isOvertaken = true
+            isCheckPending = true
+        }
         heldNothing?.cancel()
         heldNothing = nil
         switch parsed {
@@ -221,13 +233,13 @@ final class VerifiedStream: StreamHandle {
             reported = Self.reported(info, artwork, after: reported)
             onLine(line)
             if info.isPlaying, info.rate == 0 {
-                runCheck()
+                isCheckPending = true
             }
         case .unavailable:
             reported = nil
             onLine(line)
         }
-        scheduleNextCheck()
+        runPendingCheck()
     }
 
     private func helperEnded(_ status: Int32, from current: Int) {
@@ -240,21 +252,21 @@ final class VerifiedStream: StreamHandle {
     private func end() {
         generation += 1
         helper = nil
+        isCheckPending = false
         for task in [heldNothing, nextCheck, commandCheck] {
             task?.cancel()
         }
         heldNothing = nil
         nextCheck = nil
         commandCheck = nil
-        if let check {
-            endCheck(check.id)
-        }
+        endCheck()
     }
 
-    /// While the long-lived helper says the item plays (as the model shows it), a check every
-    /// `checkInterval`. Playing at rate 0 counts as paused here too; its line asks once, at once.
+    /// A check every `checkInterval` while the long-lived helper says the item plays (as the model shows
+    /// it; playing at rate 0 counts as paused here too, and its line asks at once) or a check waits.
     private func scheduleNextCheck() {
-        guard case .item(_, _, _, _, true, _)? = reported else {
+        let isPlaying = if case .item(_, _, _, _, true, _)? = reported { true } else { false }
+        guard helper != nil, isPlaying || isCheckPending else {
             nextCheck?.cancel()
             nextCheck = nil
             return
@@ -262,54 +274,69 @@ final class VerifiedStream: StreamHandle {
         guard nextCheck == nil else { return }
         nextCheck = after(Self.checkInterval) { stream in
             stream.nextCheck = nil
-            stream.runCheck()
-            stream.scheduleNextCheck()
+            stream.requestCheck()
         }
     }
 
-    /// Asks a fresh helper for the state now, unless one is asking already.
-    private func runCheck() {
-        guard helper != nil, reported != nil, check == nil else { return }
-        checksStarted += 1
-        let id = checksStarted
-        // A fresh helper that cannot start leaves the long-lived one as it is; a later check tries again.
-        guard let fresh = try? start(
-            { [weak self] line in self?.checkAnswered(line, by: id) },
-            { [weak self] _ in self?.endCheck(id) }
-        ) else { return }
-        check = Check(id: id, helper: fresh)
-        check?.timeout = after(Self.checkTimeout) { $0.endCheck(id) }
+    private func requestCheck() {
+        isCheckPending = true
+        runPendingCheck()
     }
 
-    private func endCheck(_ id: Int) {
-        guard let check, check.id == id else { return }
+    /// Starts the check asked for, unless one runs (it starts when that one ends) or the long-lived
+    /// helper has said nothing yet (it starts with the first line); then keeps the periodic schedule.
+    private func runPendingCheck() {
+        if isCheckPending, helper != nil, reported != nil, check == nil {
+            startCheck()
+        }
+        scheduleNextCheck()
+    }
+
+    /// Asks a fresh helper for the state now. One that cannot start leaves the request waiting.
+    private func startCheck() {
+        checksStarted += 1
+        let id = checksStarted
+        guard let fresh = try? start(
+            { [weak self] line in self?.checkAnswered(line, by: id) },
+            { [weak self] _ in self?.checkFailed(id) }
+        ) else { return }
+        isCheckPending = false
+        check = Check(id: id, helper: fresh)
+        check?.timeout = after(Self.checkTimeout) { $0.checkFailed(id) }
+    }
+
+    private func endCheck() {
+        guard let check else { return }
         self.check = nil
         check.timeout?.cancel()
         check.helper.stop()
+    }
+
+    /// Check `id` ended without a usable answer: it timed out, exited, said no state or was overtaken.
+    /// A request made meanwhile (an overtaking line makes one) runs now; otherwise this one waits for the
+    /// periodic schedule, so a fresh helper that cannot answer is not restarted over and over.
+    private func checkFailed(_ id: Int) {
+        guard let check, check.id == id else { return }
+        endCheck()
+        guard !isCheckPending else { return runPendingCheck() }
+        isCheckPending = true
+        scheduleNextCheck()
     }
 
     /// The fresh helper's first line is the state now. When it differs from what the long-lived helper
     /// says, the plugin gets it and the long-lived helper is replaced.
     private func checkAnswered(_ line: String, by id: Int) {
         guard let answered = check, answered.id == id else { return }
-        endCheck(id)
-        guard !answered.isOvertaken, let parsed = HelperLine(line) else { return }
-        let fresh: Reported
-        switch parsed {
-        case .nothing:
-            fresh = .nothing
-        case .info(let info, let artwork):
-            fresh = Self.reported(info, artwork, after: nil)
-        case .unavailable:
-            return
+        guard !answered.isOvertaken, let fresh = Self.reported(by: line) else { return checkFailed(id) }
+        endCheck()
+        if fresh != reported {
+            heldNothing?.cancel()
+            heldNothing = nil
+            reported = fresh
+            onLine(line)
+            replaceHelper()
         }
-        guard fresh != reported else { return }
-        heldNothing?.cancel()
-        heldNothing = nil
-        reported = fresh
-        onLine(line)
-        replaceHelper()
-        scheduleNextCheck()
+        runPendingCheck()
     }
 
     /// A new long-lived helper is a new client. Its start failing ends the stream like an exit.
@@ -330,6 +357,18 @@ final class VerifiedStream: StreamHandle {
             do { try await elapsed() } catch { return }
             guard !Task.isCancelled, let self else { return }
             action(self)
+        }
+    }
+
+    /// What a fresh helper's first line says; nil for a line that is no state.
+    private static func reported(by line: String) -> Reported? {
+        switch HelperLine(line) {
+        case .nothing:
+            .nothing
+        case .info(let info, let artwork):
+            reported(info, artwork, after: nil)
+        case .unavailable, nil:
+            nil
         }
     }
 

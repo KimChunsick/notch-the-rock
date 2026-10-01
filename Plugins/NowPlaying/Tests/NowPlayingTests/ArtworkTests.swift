@@ -82,6 +82,8 @@ private final class FakeProcesses {
     var sendStatus: Int32 = 0
     /// Further stream helpers cannot start.
     var refusesStart = false
+    /// The most helpers running at once, counted at each start.
+    private(set) var mostRunning = 0
 
     struct Refused: Error {}
 
@@ -89,6 +91,7 @@ private final class FakeProcesses {
         if refusesStart { throw Refused() }
         let stream = FakeStream(onLine: onLine, onExit: onExit)
         started.append(stream)
+        mostRunning = max(mostRunning, started.count(where: { !$0.isStopped }))
         return stream
     }
 
@@ -187,9 +190,9 @@ private let cover = samplePNG(hue: 0.6)
 }
 
 /// While the long-lived helper says playing, a fresh helper checks it every 12 s, and not while it
-/// says paused. One check runs at a time: a rate-0 line during a check starts no second one (and the
-/// check's answer, overtaken by that line, changes nothing). A check that never answers is stopped
-/// after 5 s, and later checks still run.
+/// says paused. One check runs at a time: a rate-0 line during a check starts no second one while it
+/// runs; the check's answer, overtaken by that line, is not used, and the check the line asked for
+/// runs as soon as it ends. A check that never answers is stopped after 5 s, and later checks still run.
 @MainActor
 @Test func R08__checks_repeat_while_playing_one_at_a_time() async throws {
     let clock = ManualClock()
@@ -209,22 +212,26 @@ private let cover = samplePNG(hue: 0.6)
     first.emit(infoLine(rate: 0, playing: false))
     #expect(first.isStopped)
     #expect(!helper.isStopped)
-    #expect(processes.started.count == 2)
+    let asked = try processes.process(2)
+    asked.emit(infoLine(rate: 0, playing: false))
+    #expect(asked.isStopped)
+    #expect(!helper.isStopped)
+    #expect(processes.started.count == 3)
 
     helper.emit(infoLine(rate: 0, playing: false))
     await advance(clock, by: .seconds(30))
-    #expect(processes.started.count == 2)
+    #expect(processes.started.count == 3)
 
     helper.emit(infoLine())
     await advance(clock, by: .seconds(12))
-    await waitUntil { processes.started.count == 3 }
-    let silent = try processes.process(2)
+    await waitUntil { processes.started.count == 4 }
+    let silent = try processes.process(3)
     await advance(clock, by: .seconds(5))
     await waitUntil { silent.isStopped }
     #expect(silent.isStopped)
     await advance(clock, by: .seconds(7))
-    await waitUntil { processes.started.count == 4 }
-    #expect(processes.started.count == 4)
+    await waitUntil { processes.started.count == 5 }
+    #expect(processes.started.count == 5)
     handle.stop()
     #expect(processes.started.allSatisfy { $0.isStopped })
 }
@@ -367,9 +374,11 @@ func R08__a_fresh_helper_that_shows_another_playing_state_or_album_corrects_the_
     let staleLine = infoLine(rate: change.staleRate, playing: true, artwork: artworkObject(cover))
     stale.emit(staleLine)
     // A rate-0 line asks a fresh helper at once; otherwise the command asks a second later.
-    launcher.send(.pause) { _ in }
-    await advance(clock, by: .seconds(1))
-    await waitUntil { processes.started.count == 2 }
+    if change.staleRate != 0 {
+        launcher.send(.pause) { _ in }
+        await advance(clock, by: .seconds(1))
+        await waitUntil { processes.started.count == 2 }
+    }
     let fresh = try processes.process(1)
 
     let freshLine = infoLine(
@@ -460,6 +469,170 @@ func R08__a_fresh_helper_that_shows_another_playing_state_or_album_corrects_the_
     #expect(exits == [-1])
     #expect(processes.started.count == 2)
     handle.stop()
+}
+
+/// Round 090: a periodic check runs when the long-lived helper writes a stale playing-at-rate-0 line,
+/// which shows as paused. The line overtakes the check, so its answer (playing) is not used, and the check
+/// the line asks for cannot start while that one runs. With nothing more from the helper or the user, the
+/// asked-for check still runs as soon as the overtaken one ends: the notch shows playing again within one
+/// check cycle, the stale helper is replaced once without an exit, and no helper is left running.
+@MainActor
+@Test func R08__a_check_asked_for_during_another_runs_after_it() async throws {
+    let clock = ManualClock()
+    let processes = FakeProcesses()
+    var lines: [String] = []
+    var exits: [Int32] = []
+    let handle = try makeLauncher(processes, clock: clock).startStream(onLine: { lines.append($0) }, onExit: { exits.append($0) })
+    let stale = try processes.process(0)
+    let playing = infoLine(rate: 1, playing: true)
+    stale.emit(playing)
+    await advance(clock, by: VerifiedStream.checkInterval)
+    await waitUntil { processes.started.count == 2 }
+    let periodic = try processes.process(1)
+
+    stale.emit(infoLine(rate: 0, playing: true))
+    #expect(processes.started.count == 2)
+    periodic.emit(playing)
+    #expect(periodic.isStopped)
+    #expect(!stale.isStopped)
+
+    // Silence: no more lines, no command. Every fresh helper says playing.
+    var waited = Duration.zero
+    while processes.started.count < 3, waited < VerifiedStream.checkInterval {
+        await advance(clock, by: .seconds(1))
+        waited += .seconds(1)
+    }
+    try processes.process(2).emit(playing)
+    #expect(stale.isStopped)
+    let replacement = try processes.process(3)
+    #expect(!replacement.isStopped)
+    #expect(exits.isEmpty)
+
+    let model = NowPlayingModel()
+    for line in lines {
+        model.apply(try #require(HelperLine(line)))
+    }
+    #expect(model.track?.isPlaying == true)
+    handle.stop()
+    #expect(processes.started.allSatisfy { $0.isStopped })
+    #expect(processes.mostRunning <= 2)
+}
+
+/// SplitMix64: the same seed gives the same sequence on every run.
+private struct SeededGenerator: RandomNumberGenerator {
+    var state: UInt64
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+}
+
+/// Lets queued main-actor work and woken timers run: a few turns of the main actor, then, unless
+/// `wait` is zero, a short real wait for timers woken on another thread. Much shorter than `advance`'s
+/// 20 ms waits; a timer that runs later only moves its action to a later step.
+@MainActor
+private func settle(wait: Duration = .zero) async {
+    for _ in 0..<3 {
+        await Task.yield()
+    }
+    if wait > .zero {
+        try? await Task.sleep(for: wait)
+        await Task.yield()
+    }
+}
+
+/// Random sequences of long-lived lines (true, stale at rate 0, stale playing), commands that change
+/// what plays, clock moves (ticks, timeouts, the 1 s waits), and fresh helpers that answer, answer
+/// nothing usable, exit without answering or cannot start. After the sequence the helpers go quiet and
+/// every fresh helper tells what plays. Then the notch shows what a fresh client says, at most one check
+/// ran at a time, no helper is left running, and no exit was reported.
+@MainActor
+@Test func R08__no_check_request_is_lost_in_random_sequences() async throws {
+    // Elapsed time, sample time and length are the same in every line, so two models that show the same
+    // are equal.
+    let stalled = infoLine(rate: 0, playing: true)
+    let states = [infoLine(), infoLine(rate: 0, playing: false), infoLine(title: "So What"), #"{"type":"none"}"#]
+    let steps: [Duration] = [.milliseconds(500), .seconds(1), .seconds(5), .seconds(12)]
+    for seed in UInt64(1)...240 {
+        var generator = SeededGenerator(state: seed)
+        func pick(_ count: Int) -> Int { Int.random(in: 0..<count, using: &generator) }
+        let clock = ManualClock()
+        let processes = FakeProcesses()
+        let launcher = makeLauncher(processes, clock: clock)
+        var lines: [String] = []
+        var exits: [Int32] = []
+        let handle = try launcher.startStream(onLine: { lines.append($0) }, onExit: { exits.append($0) })
+        var longLived = try processes.process(0)
+        /// What a fresh client says now.
+        var truth = states[pick(states.count)]
+        longLived.emit(truth)
+
+        func runningCheck() -> FakeStream? {
+            processes.started.last(where: { !$0.isStopped && $0 !== longLived })
+        }
+        /// A replacement, if the answer brings one, is the first helper started meanwhile.
+        func answer(_ check: FakeStream, with line: String) {
+            let before = processes.started.count
+            check.emit(line)
+            if longLived.isStopped, processes.started.count > before {
+                longLived = processes.started[before]
+            }
+        }
+
+        for _ in 0..<(12 + pick(12)) {
+            let move = pick(10)
+            processes.refusesStart = move < 6 && pick(8) == 0
+            switch move {
+            case 0..<3:
+                let roll = pick(10)
+                longLived.emit(roll < 5 ? truth : roll < 8 ? stalled : states[pick(2) * 2])
+            case 3:
+                truth = states[pick(states.count)]
+                launcher.send(.pause) { _ in }
+            case 4, 5:
+                await settle()
+                clock.advance(by: steps[pick(steps.count)])
+                await settle()
+            case 6:
+                runningCheck()?.exit(0)
+            default:
+                guard let check = runningCheck() else { break }
+                let roll = pick(10)
+                answer(check, with: roll < 7 ? truth : roll < 9 ? #"{"type":"unavailable","reason":"x"}"# : "not json")
+            }
+        }
+
+        // Quiet: no more lines or commands, and every fresh helper tells what plays. Each round lets every
+        // timer fire (a waiting request, a tick, a held nothing, a command's wait) and answers the checks.
+        processes.refusesStart = false
+        for round in 0...4 {
+            for _ in 0..<10 {
+                guard let check = runningCheck() else { break }
+                answer(check, with: truth)
+            }
+            guard round < 4 else { break }
+            await settle()
+            clock.advance(by: VerifiedStream.checkInterval + .seconds(1))
+            await settle(wait: round < 3 ? .milliseconds(1) : .milliseconds(10))
+        }
+
+        let shown = NowPlayingModel()
+        for line in lines {
+            if let parsed = HelperLine(line) { shown.apply(parsed) }
+        }
+        let fresh = NowPlayingModel()
+        fresh.apply(try #require(HelperLine(truth)))
+        #expect(shown.state == fresh.state, "seed \(seed)")
+        #expect(processes.mostRunning <= 2, "seed \(seed)")
+        #expect(runningCheck() == nil, "seed \(seed)")
+        #expect(exits.isEmpty, "seed \(seed)")
+        handle.stop()
+        #expect(processes.started.allSatisfy { $0.isStopped }, "seed \(seed)")
+    }
 }
 
 /// The reader hands each line over as soon as the helper writes it, not once 64 KiB have gathered or
