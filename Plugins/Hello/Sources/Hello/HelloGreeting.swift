@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// When the greeting writes, holds and fades, in seconds from the moment it appears. The takeover
-/// lasts `total`, so the notch collapses as the fade ends.
+/// When the greeting writes its word, shows the phrase under it, holds and fades, in seconds from
+/// the moment it appears. The takeover lasts `total`, so the notch collapses as the fade ends.
 enum HelloTimeline {
     struct Frame: Equatable {
         /// Fraction of the stroke written, 0...1.
@@ -9,16 +9,20 @@ enum HelloTimeline {
         var opacity: Double
         /// Strength of the glow around the ink, 0...1.
         var glow: Double
-        /// How far outlined letters have filled in, 0...1.
-        var fill: Double
+        /// Opacity of the phrase under the word, before the whole greeting fades.
+        var subtitle: Double
     }
 
     /// The notch finishes opening before the pen starts.
     static let drawStart: TimeInterval = 0.2
     static let drawEnd: TimeInterval = 2.0
-    /// The finished word holds from `drawEnd` until the fade starts.
-    static let fadeStart: TimeInterval = 2.65
-    static let total: TimeInterval = 3.0
+    /// The phrase fades in under the word as the pen lands.
+    static let subtitleStart: TimeInterval = 1.9
+    static let subtitleEnd: TimeInterval = 2.35
+    /// The finished word and its phrase hold from `subtitleEnd` until the fade starts, long enough
+    /// to read the phrase.
+    static let fadeStart: TimeInterval = 3.05
+    static let total: TimeInterval = 3.4
     static var duration: Duration { .milliseconds(Int((total * 1000).rounded())) }
 
     static func frame(at elapsed: TimeInterval) -> Frame {
@@ -32,8 +36,7 @@ enum HelloTimeline {
             drawn: drawn,
             opacity: 1 - fraction(of: elapsed, from: fadeStart, to: total),
             glow: 0.65 + 0.35 * swell - 0.15 * settle,
-            // Outlined letters fill in as the last outline lands and are solid before the fade.
-            fill: fraction(of: elapsed, from: drawEnd - 0.2, to: drawEnd + 0.35)
+            subtitle: fraction(of: elapsed, from: subtitleStart, to: subtitleEnd)
         )
     }
 
@@ -44,22 +47,43 @@ enum HelloTimeline {
 
 /// The takeover content: writes the greeting from the moment it appears.
 struct HelloGreetingView: View {
-    let artwork: HelloArtwork
+    let greeting: HelloGreeting
     @State private var start: Date?
 
     var body: some View {
         TimelineView(.animation) { timeline in
             let elapsed = start.map { timeline.date.timeIntervalSince($0) } ?? 0
-            HelloLetteringView(artwork: artwork, frame: HelloTimeline.frame(at: elapsed))
+            HelloGreetingFrame(greeting: greeting, frame: HelloTimeline.frame(at: elapsed))
         }
         .padding(8)
         .onAppear { start = .now }
     }
 }
 
-/// One frame of the greeting: the written part of the stroke in a soft gradient, a blurred glow
-/// beneath it, a bright pen tip while writing and, for outlined letters, the fill at the end.
-/// It is the artwork's own size and shrinks to fit when offered less.
+/// One frame of the greeting: the handwritten word with one small line under it for the time and
+/// day, centred. A phrase wider than the greeting's maximum width wraps at word boundaries.
+struct HelloGreetingFrame: View {
+    let greeting: HelloGreeting
+    let frame: HelloTimeline.Frame
+
+    var body: some View {
+        VStack(spacing: 2) {
+            HelloLetteringView(artwork: greeting.word, frame: frame)
+            Text(greeting.subtitle)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.7))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: HelloGreeting.maxWidth)
+                .opacity(frame.subtitle)
+        }
+        .opacity(frame.opacity)
+    }
+}
+
+/// The handwritten word in one frame: the written part of the stroke in a soft gradient, a blurred
+/// glow beneath it and a bright pen tip while writing. It is the artwork's own size and shrinks to
+/// fit when offered less.
 struct HelloLetteringView: View {
     let artwork: HelloArtwork
     let frame: HelloTimeline.Frame
@@ -84,9 +108,6 @@ struct HelloLetteringView: View {
                 written.stroke(gradient, style: Self.pen(width * 1.7))
                     .blur(radius: width * 0.7)
                     .opacity(0.85 * frame.glow)
-                if artwork.fillsWhenWritten {
-                    artwork.fill(gradient).opacity(frame.fill)
-                }
                 written.stroke(gradient, style: Self.pen(width))
                 written.stroke(Color.white.opacity(0.45), style: Self.pen(width * 0.3))
                 if frame.drawn > 0, frame.drawn < 1,
@@ -104,7 +125,6 @@ struct HelloLetteringView: View {
             idealWidth: artwork.size.width, maxWidth: artwork.size.width,
             idealHeight: artwork.size.height, maxHeight: artwork.size.height
         )
-        .opacity(frame.opacity)
     }
 
     private static func pen(_ width: CGFloat) -> StrokeStyle {

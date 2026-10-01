@@ -1,9 +1,9 @@
 import NotchKit
 import SwiftUI
 
-/// Greets the user each time the app starts: the notch opens, writes a greeting that suits the time
-/// and day stroke by stroke and collapses about three seconds later. The greeting can be turned off
-/// in Settings.
+/// Greets the user each time the app starts: the notch opens, writes "hello" or "안녕하세요" in one
+/// handwritten stroke, shows a phrase that suits the time and day under it and collapses about three
+/// and a half seconds later. The greeting can be turned off in Settings.
 @MainActor
 public final class HelloPlugin: NotchPlugin {
     public static let manifest = PluginManifest(
@@ -28,9 +28,9 @@ public final class HelloPlugin: NotchPlugin {
     public func activate() {
         guard preferences.showsGreeting else { return }
         var random = SystemRandomNumberGenerator()
-        let artwork = HelloArtwork(phrase: HelloPhrases.phrase(for: Date(), calendar: .current, using: &random))
+        let greeting = HelloGreeting.random(for: Date(), calendar: .current, using: &random)
         context.present(Takeover(duration: HelloTimeline.duration) {
-            HelloGreetingView(artwork: artwork)
+            HelloGreetingView(greeting: greeting)
         })
     }
 
