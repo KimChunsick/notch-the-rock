@@ -2,9 +2,11 @@ import NotchKit
 import SwiftUI
 
 extension VolumeState {
-    /// A crossed-out speaker when muted or silent, otherwise one to three waves by level.
+    /// A crossed-out speaker only when the device is muted; otherwise a speaker without waves at 0
+    /// (a device without a mute switch) and one to three waves by level.
     var symbol: String {
-        if isMuted || level == 0 { return "speaker.slash.fill" }
+        if isMuted { return "speaker.slash.fill" }
+        if level == 0 { return "speaker.fill" }
         if level < 1.0 / 3 { return "speaker.wave.1.fill" }
         if level < 2.0 / 3 { return "speaker.wave.2.fill" }
         return "speaker.wave.3.fill"
