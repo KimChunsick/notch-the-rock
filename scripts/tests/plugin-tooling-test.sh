@@ -1,9 +1,8 @@
 #!/bin/bash
 # R03: a plugin scaffolded by new-plugin.sh builds with build-plugin.sh into a .notchplugin that
 # links the shared NotchKit exactly once, carries its SwiftPM resources where the installed plugin
-# finds them, notchkit-probe loads it and rejects a wrong SDK major, and check-plugin-deps.sh rejects
-# plugins that depend on anything but NotchKit, ignoring imports inside comments and strings.
-# Requires bash 3.2 or later.
+# finds them, and notchkit-probe loads it and rejects a wrong SDK major. check-plugin-deps.sh has
+# its own checks in check-plugin-deps-test.sh. Requires bash 3.2 or later.
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd -P)
@@ -126,99 +125,11 @@ EOF
     contains "$output" 'expandedTab: greeting-from-resources' || fail "the installed plugin did not read its resource"
 }
 
-# write_fixture <plugins-dir> <Name> <extra package dependency or ""> <extra target dependency or ""> <import or "">
-write_fixture() {
-    local dir="$1/$2"
-    mkdir -p "$dir/Sources/$2"
-    cat >"$dir/Package.swift" <<EOF
-// swift-tools-version: 6.0
-import PackageDescription
-let package = Package(
-    name: "$2",
-    platforms: [.macOS(.v14)],
-    products: [.library(name: "$2", type: .dynamic, targets: ["$2"])],
-    dependencies: [.package(path: "$ROOT/SDK/NotchKit")$3],
-    targets: [
-        .target(name: "$2Core"),
-        .target(name: "$2", dependencies: [.product(name: "NotchKit", package: "NotchKit"), "$2Core"$4]),
-    ]
-)
-EOF
-    printf 'import NotchKit\n%s\n' "$5" >"$dir/Sources/$2/$2.swift"
-}
-
-R03__check_plugin_deps_accepts_clean_plugins() {
-    current=${FUNCNAME[0]}
-    "$ROOT/scripts/check-plugin-deps.sh" || fail "check-plugin-deps.sh failed on the repository's Plugins/"
-    write_fixture "$WORK/good" Good "" "" ""
-    "$ROOT/scripts/check-plugin-deps.sh" "$WORK/good" || fail "check-plugin-deps.sh rejected a NotchKit-only plugin"
-}
-
-R03__check_plugin_deps_rejects_app_and_plugin_dependencies() {
-    current=${FUNCNAME[0]}
-    local output status
-    write_fixture "$WORK/bad" Good "" "" ""
-    # SwiftPM names a path dependency after its folder, so the app package is referred to by that name.
-    write_fixture "$WORK/bad" UsesApp ", .package(path: \"$ROOT\")" ", .product(name: \"NotchTheRock\", package: \"$(basename "$ROOT")\")" ""
-    write_fixture "$WORK/bad" UsesPlugin ", .package(path: \"../Good\")" ", .product(name: \"Good\", package: \"Good\")" ""
-    write_fixture "$WORK/bad" ImportsApp "" "" "import NotchTheRock"
-    output=$("$ROOT/scripts/check-plugin-deps.sh" "$WORK/bad" 2>&1)
-    status=$?
-    printf '%s\n(exit %s)\n' "$output" "$status"
-    [ "$status" -ne 0 ] || fail "check-plugin-deps.sh passed plugins that depend on the app or another plugin"
-    contains "$output" 'UsesApp' || fail "UsesApp is not named"
-    ! contains "$output" "UsesApp: Package.swift" || fail "UsesApp fixture manifest is invalid, so the dependency rule was not exercised"
-    contains "$output" 'UsesPlugin' || fail "UsesPlugin is not named"
-    contains "$output" 'ImportsApp' || fail "ImportsApp is not named"
-    ! contains "$output" 'Good:' || fail "the clean plugin was reported"
-}
-
-R03__check_plugin_deps_ignores_imports_in_comments_and_strings() {
-    current=${FUNCNAME[0]}
-    local output status
-    write_fixture "$WORK/quoted" Quoted "" "" ""
-    cat >>"$WORK/quoted/Quoted/Sources/Quoted/Quoted.swift" <<'EOF'
-/*
-import NotchTheRock
-/* a nested comment
-import NotchTheRock
-*/
-import NotchTheRock
-*/
-let example = """
-import NotchTheRock
-"""
-let raw = #"""
-"\(not an interpolation)"
-import NotchTheRock
-"""#
-EOF
-    "$ROOT/scripts/check-plugin-deps.sh" "$WORK/quoted" || fail "imports inside comments or strings were treated as dependencies"
-    # Real imports right after a string with an interpolation and after a line comment still count.
-    write_fixture "$WORK/quoted-bad" Other "" "" ""
-    write_fixture "$WORK/quoted-bad" Sneaky "" "" ""
-    cat >>"$WORK/quoted-bad/Sneaky/Sources/Sneaky/Sneaky.swift" <<'EOF'
-let text = "\("a" + "\"") /* not a comment"
-import NotchTheRock
-// a /* in a line comment opens nothing
-import Other
-EOF
-    output=$("$ROOT/scripts/check-plugin-deps.sh" "$WORK/quoted-bad" 2>&1)
-    status=$?
-    printf '%s\n(exit %s)\n' "$output" "$status"
-    [ "$status" -ne 0 ] || fail "real imports after a string and a line comment were missed"
-    contains "$output" ': NotchTheRock' || fail "the import after the string literal is not named"
-    contains "$output" ': Other' || fail "the import after the line comment is not named"
-}
-
 R03__new_plugin_scaffolds_and_builds
 R03__plugin_links_single_shared_notchkit
 R03__probe_loads_plugin_with_one_notchkit
 R03__probe_rejects_wrong_major_sdk
 R03__installed_plugin_finds_its_resources
-R03__check_plugin_deps_accepts_clean_plugins
-R03__check_plugin_deps_rejects_app_and_plugin_dependencies
-R03__check_plugin_deps_ignores_imports_in_comments_and_strings
 
 if [ "$failures" -ne 0 ]; then
     printf '%d check(s) failed\n' "$failures"

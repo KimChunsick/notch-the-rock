@@ -58,6 +58,37 @@ struct NotchHostWithdrawTests {
         #expect(host.state == .hud)
     }
 
+    /// Every waiting request of the withdrawn plugin is cancelled, not only its first, and the other
+    /// plugin's requests stay queued in order and answerable. Queue checks use `#require`, so a
+    /// request left behind fails the test instead of hanging it on an unanswered request.
+    @Test(.timeLimit(.minutes(1)))
+    func R03__withdraw_cancels_every_interleaved_request_of_that_plugin() async throws {
+        let a1 = Task { await host.requestAttention(AttentionRequest(title: "A1", message: ""), from: a) }
+        await settle { host.attention != nil }
+        let b1 = Task { await host.requestAttention(AttentionRequest(title: "B1", message: ""), from: b) }
+        await Task.yield()
+        let a2 = Task { await host.requestAttention(AttentionRequest(title: "A2", message: ""), from: a) }
+        await Task.yield()
+        let b2 = Task { await host.requestAttention(AttentionRequest(title: "B2", message: ""), from: b) }
+        await Task.yield()
+        #expect(host.attention?.request.title == "A1")
+
+        host.withdraw(from: a)
+
+        let first = try #require(host.attention)
+        try #require(first.request.title == "B1")
+        host.respond(.dismissed, to: first.id)
+        #expect(await b1.value == .dismissed)
+        let second = try #require(host.attention)
+        try #require(second.request.title == "B2")
+        host.respond(.released, to: second.id)
+        #expect(await b2.value == .released)
+        #expect(host.attention == nil)
+        #expect(host.state == .collapsed)
+        #expect(await a1.value == .cancelled)
+        #expect(await a2.value == .cancelled)
+    }
+
     @Test func R03__withdraw_removes_the_plugins_hud() {
         host.post(activity("b"), from: b)
         host.showHUD(hud("A"), duration: .seconds(5), from: a)
