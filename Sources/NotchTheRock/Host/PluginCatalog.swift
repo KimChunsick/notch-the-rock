@@ -94,10 +94,14 @@ final class PluginCatalog {
 
     private(set) var records: [PluginRecord] = []
 
+    /// A loaded plugin with what the home shows of it: the manifest's name and symbol, and the tab
+    /// and tile read once when it loaded.
     private struct Running {
         let pluginID: String
+        let manifest: PluginManifest
         let plugin: any NotchPlugin
         let tab: PluginTab?
+        let tile: PluginTile?
         var isEnabled: Bool
     }
 
@@ -107,7 +111,7 @@ final class PluginCatalog {
     @ObservationIgnored private let consents: PluginConsentStore
     @ObservationIgnored private let snapshots: PluginSnapshots
     @ObservationIgnored private let open: PluginOpener
-    /// Loaded plugins by record id, and the order they were loaded in (the tab bar order).
+    /// Loaded plugins by record id, and the order they were loaded in (the home's order).
     @ObservationIgnored private var running: [String: Running] = [:]
     @ObservationIgnored private var loadOrder: [String] = []
     /// Fingerprints of user bundles whose code is in the process, loaded or failed after opening.
@@ -190,9 +194,9 @@ final class PluginCatalog {
     }
 
     /// Turns a listed plugin on or off and remembers it across launches. Turning off calls
-    /// `deactivate()` and removes its tab and everything it shows; turning on activates it again,
-    /// loading it first when it was never loaded. A refused bundle does not own its identifier, so
-    /// it cannot turn off the plugin that does.
+    /// `deactivate()` and takes it out of the home with everything it shows; turning on activates it
+    /// again, loading it first when it was never loaded. A refused bundle does not own its
+    /// identifier, so it cannot turn off the plugin that does.
     func setEnabled(_ enabled: Bool, for id: PluginRecord.ID) {
         guard let index = records.firstIndex(where: { $0.id == id }),
               let key = records[index].key
@@ -328,19 +332,26 @@ final class PluginCatalog {
         if let fingerprint { openedFingerprints[bundleURL.path] = fingerprint }
         let context = NotchContext(pluginID: info.identifier, bundleURL: loadable.bundleURL, host: host, storage: storage)
         let plugin = opened.type.init(context: context)
-        running[bundleURL.path] = Running(pluginID: info.identifier, plugin: plugin, tab: plugin.expandedTab, isEnabled: false)
+        running[bundleURL.path] = Running(
+            pluginID: info.identifier,
+            manifest: opened.manifest,
+            plugin: plugin,
+            tab: plugin.expandedTab,
+            tile: plugin.tile,
+            isEnabled: false
+        )
         loadOrder.append(bundleURL.path)
         logger.notice("loaded \(info.identifier, privacy: .public) \(opened.manifest.version, privacy: .public) from \(loadable.bundleURL.path, privacy: .public)")
         activate(bundleURL.path)
         return record(.on)
     }
 
-    /// The tab goes in before `activate()`, so a plugin can expand to its own tab right away.
+    /// The plugin joins the home before `activate()`, so it can expand to its own tab right away.
     private func activate(_ id: String) {
         guard var entry = running[id], !entry.isEnabled else { return }
         entry.isEnabled = true
         running[id] = entry
-        updateTabs()
+        updateHome()
         entry.plugin.activate()
         logger.notice("activated \(entry.pluginID, privacy: .public)")
     }
@@ -349,16 +360,24 @@ final class PluginCatalog {
         guard var entry = running[id], entry.isEnabled else { return }
         entry.isEnabled = false
         running[id] = entry
-        updateTabs()
+        updateHome()
         entry.plugin.deactivate()
         host.withdraw(from: entry.pluginID)
         logger.notice("deactivated \(entry.pluginID, privacy: .public)")
     }
 
-    private func updateTabs() {
-        host.tabs = loadOrder.compactMap { id in
-            guard let entry = running[id], entry.isEnabled, let tab = entry.tab else { return nil }
-            return NotchHostModel.Tab(pluginID: entry.pluginID, tab: tab)
+    /// Hands the host every running, enabled plugin in load order. The home leaves out the ones with
+    /// neither a tab nor a tile (`HomePlugin.isInHome`).
+    private func updateHome() {
+        host.plugins = loadOrder.compactMap { id in
+            guard let entry = running[id], entry.isEnabled else { return nil }
+            return HomePlugin(
+                pluginID: entry.pluginID,
+                name: entry.manifest.name,
+                symbol: entry.manifest.symbol,
+                tab: entry.tab,
+                tile: entry.tile
+            )
         }
     }
 
