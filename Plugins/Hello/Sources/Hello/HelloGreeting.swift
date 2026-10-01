@@ -1,46 +1,54 @@
 import SwiftUI
 
-/// When the greeting writes its word, shows the phrase under it, holds and fades, in seconds from
-/// the moment it appears. The takeover lasts `total`, so the notch collapses as the fade ends.
-enum HelloTimeline {
+/// When the greeting writes its phrase, holds it and fades, in seconds from the moment it appears.
+/// The takeover lasts `total`, so the notch collapses as the fade ends.
+struct HelloTimeline: Equatable {
     struct Frame: Equatable {
-        /// Fraction of the stroke written, 0...1.
-        var drawn: Double
+        /// Fraction of the writing time gone, 0...1. Each hand moves its pen through it its own way.
+        var writing: Double
         var opacity: Double
         /// Strength of the glow around the ink, 0...1.
         var glow: Double
-        /// Opacity of the phrase under the word, before the whole greeting fades.
-        var subtitle: Double
     }
 
     /// The notch finishes opening before the pen starts.
     static let drawStart: TimeInterval = 0.2
-    static let drawEnd: TimeInterval = 2.0
-    /// The phrase fades in under the word as the pen lands.
-    static let subtitleStart: TimeInterval = 1.9
-    static let subtitleEnd: TimeInterval = 2.35
-    /// The finished word and its phrase hold from `subtitleEnd` until the fade starts, long enough
-    /// to read the phrase.
-    static let fadeStart: TimeInterval = 3.05
-    static let total: TimeInterval = 3.4
-    static var duration: Duration { .milliseconds(Int((total * 1000).rounded())) }
+    let drawEnd: TimeInterval
+    /// The finished phrase holds from `drawEnd` until the fade starts.
+    let fadeStart: TimeInterval
+    let total: TimeInterval
 
-    static func frame(at elapsed: TimeInterval) -> Frame {
-        let writing = fraction(of: elapsed, from: drawStart, to: drawEnd)
-        // Half linear, half smoothstep: the pen starts and lands gently without rushing the middle.
-        let drawn = 0.5 * writing + 0.5 * writing * writing * (3 - 2 * writing)
-        // The glow swells as the last letter lands, then settles while the word holds.
+    /// "hello": written in 1.8 s and held for about a second.
+    static let hello = HelloTimeline(drawEnd: 2.0, fadeStart: 3.05, total: 3.4)
+
+    private init(drawEnd: TimeInterval, fadeStart: TimeInterval, total: TimeInterval) {
+        self.drawEnd = drawEnd
+        self.fadeStart = fadeStart
+        self.total = total
+    }
+
+    /// A phrase the pen writes in `writing` seconds, held a second and a little more for each of its
+    /// `syllables` so it can be read, then faded out.
+    init(writing: TimeInterval, syllables: Int) {
+        drawEnd = Self.drawStart + writing
+        fadeStart = drawEnd + 1.0 + 0.06 * Double(syllables)
+        total = fadeStart + 0.35
+    }
+
+    var duration: Duration { .milliseconds(Int((total * 1000).rounded())) }
+
+    func frame(at elapsed: TimeInterval) -> Frame {
+        // The glow swells as the last stroke lands, then settles while the phrase holds.
         let swell = fraction(of: elapsed, from: drawEnd - 0.3, to: drawEnd + 0.15)
         let settle = fraction(of: elapsed, from: drawEnd + 0.15, to: fadeStart)
         return Frame(
-            drawn: drawn,
+            writing: fraction(of: elapsed, from: Self.drawStart, to: drawEnd),
             opacity: 1 - fraction(of: elapsed, from: fadeStart, to: total),
-            glow: 0.65 + 0.35 * swell - 0.15 * settle,
-            subtitle: fraction(of: elapsed, from: subtitleStart, to: subtitleEnd)
+            glow: 0.65 + 0.35 * swell - 0.15 * settle
         )
     }
 
-    private static func fraction(of elapsed: TimeInterval, from start: TimeInterval, to end: TimeInterval) -> Double {
+    private func fraction(of elapsed: TimeInterval, from start: TimeInterval, to end: TimeInterval) -> Double {
         min(max((elapsed - start) / (end - start), 0), 1)
     }
 }
@@ -53,29 +61,24 @@ struct HelloGreetingView: View {
     var body: some View {
         TimelineView(.animation) { timeline in
             let elapsed = start.map { timeline.date.timeIntervalSince($0) } ?? 0
-            HelloGreetingFrame(greeting: greeting, frame: HelloTimeline.frame(at: elapsed))
+            HelloGreetingFrame(greeting: greeting, frame: greeting.timeline.frame(at: elapsed))
         }
-        .padding(8)
+        .padding(HelloGreeting.padding)
         .onAppear { start = .now }
     }
 }
 
-/// One frame of the greeting: the handwritten word with one small line under it for the time and
-/// day, centred. A phrase wider than the greeting's maximum width wraps at word boundaries.
+/// One frame of the greeting: the phrase as far as the pen has written it, and nothing else.
 struct HelloGreetingFrame: View {
     let greeting: HelloGreeting
     let frame: HelloTimeline.Frame
 
     var body: some View {
-        VStack(spacing: 2) {
-            HelloLetteringView(artwork: greeting.word, frame: frame)
-            Text(greeting.subtitle)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(Color.white.opacity(0.7))
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: HelloGreeting.maxWidth)
-                .opacity(frame.subtitle)
+        Group {
+            switch greeting.writing {
+            case .hello: HelloLetteringView(artwork: .hello, frame: frame)
+            case .hangul(let handwriting): HangulHandwritingView(handwriting: handwriting, frame: frame)
+            }
         }
         .opacity(frame.opacity)
     }
@@ -95,11 +98,18 @@ struct HelloLetteringView: View {
         Color(red: 1.00, green: 0.77, blue: 0.52),
     ])
 
+    /// Fraction of the stroke written once `writing` of the writing time has gone: half linear, half
+    /// smoothstep, so the pen starts and lands gently without rushing the middle.
+    static func drawn(at writing: Double) -> Double {
+        0.5 * writing + 0.5 * writing * writing * (3 - 2 * writing)
+    }
+
     var body: some View {
         GeometryReader { proxy in
             let bounds = CGRect(origin: .zero, size: proxy.size)
             let width = artwork.penWidth * artwork.scale(toFit: bounds)
-            let written = artwork.trim(from: 0, to: frame.drawn)
+            let drawn = Self.drawn(at: frame.writing)
+            let written = artwork.trim(from: 0, to: drawn)
             let gradient = LinearGradient(gradient: Self.ink, startPoint: .leading, endPoint: .trailing)
             ZStack {
                 written.stroke(gradient, style: Self.pen(width * 3.2))
@@ -110,8 +120,8 @@ struct HelloLetteringView: View {
                     .opacity(0.85 * frame.glow)
                 written.stroke(gradient, style: Self.pen(width))
                 written.stroke(Color.white.opacity(0.45), style: Self.pen(width * 0.3))
-                if frame.drawn > 0, frame.drawn < 1,
-                   let tip = artwork.path(in: bounds).trimmedPath(from: 0, to: frame.drawn).currentPoint {
+                if drawn > 0, drawn < 1,
+                   let tip = artwork.path(in: bounds).trimmedPath(from: 0, to: drawn).currentPoint {
                     Circle()
                         .fill(Color.white)
                         .frame(width: width * 1.8, height: width * 1.8)
@@ -128,6 +138,37 @@ struct HelloLetteringView: View {
     }
 
     private static func pen(_ width: CGFloat) -> StrokeStyle {
+        StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round)
+    }
+}
+
+/// A Korean phrase in one frame: the strokes written so far in thin white ink with round ends, a
+/// faint white glow under them so they read on black, and a soft pen tip while the pen is down.
+struct HangulHandwritingView: View {
+    let handwriting: HangulHandwriting
+    let frame: HelloTimeline.Frame
+
+    var body: some View {
+        let pen = handwriting.pen(at: frame.writing * handwriting.duration)
+        let ink = handwriting.ink(for: pen)
+        let width = HangulHandwriting.penWidth
+        ZStack {
+            ink.stroke(Color.white, style: Self.style(width * 1.8))
+                .blur(radius: width * 0.9)
+                .opacity(0.16 * frame.glow)
+            ink.stroke(Color.white, style: Self.style(width))
+            if frame.writing > 0, frame.writing < 1, let tip = handwriting.tip(for: pen) {
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: width * 1.6, height: width * 1.6)
+                    .blur(radius: width * 0.5)
+                    .position(tip)
+            }
+        }
+        .frame(width: handwriting.size.width, height: handwriting.size.height)
+    }
+
+    private static func style(_ width: CGFloat) -> StrokeStyle {
         StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round)
     }
 }
