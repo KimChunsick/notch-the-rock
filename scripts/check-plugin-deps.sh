@@ -13,17 +13,22 @@
 #     debug, with SWIFT_LOADED_MODULE_TRACE_FILE set: the compiler records every Swift module it
 #     loads for each module it compiles, under the build's own language mode, defines, traits,
 #     `#if` conditions and search paths. A loaded module passes only when it lies in the active SDK or
-#     in the toolchain's lib/swift, or when it is NotchKit or one of the plugin's own targets in the
-#     build's Modules folder; anything else fails and is named with the module that loaded it. A
-#     build that fails fails the check, and so does a build whose trace holds none of the plugin's
-#     modules. The app and every plugin are Swift modules, which the trace lists. Test targets are
-#     not part of the product; the manifest rules above cover them.
+#     in the toolchain's lib/swift, or when it lies in the Modules folder of the plugin's own build
+#     and is NotchKit or one of the plugin's targets that this build compiled, as the trace names
+#     them. A declared target that the product does not build, such as a test target, does not
+#     count. Anything else fails and is named with the module that loaded it. A build that fails
+#     fails the check, and so does a build whose trace holds none of the plugin's modules. The app
+#     and every plugin are Swift modules, which the trace lists. Test targets are not part of the
+#     product; the manifest rules above cover them.
 # A plugin that depends on another package is not built: the build would fetch or build that
-# package. All plugins of one run share one scratch folder in a temporary directory, which is
-# deleted afterwards, so NotchKit is built once per configuration and Plugins/*/.build is neither
-# read nor written. A plugin that imports another one without depending on it therefore compiles
-# here and the trace names that plugin; in its own build it would not compile. Both fail the check.
-# Takes about two minutes for two plugins, mostly building NotchKit twice.
+# package. Every plugin builds in a scratch folder of its own in a temporary directory, which is
+# deleted afterwards, so Plugins/*/.build is neither read nor written. NotchKit is built alone once
+# per configuration; before each plugin the scratch folder is deleted and made again as a copy of
+# that build, so it holds NotchKit and this plugin's build and nothing another plugin built. A plugin
+# that imports another one without depending on it therefore does not compile and fails the check.
+# The copy keeps the folder's path because the compiler's module cache records it: a copy at
+# another path would build NotchKit again for every plugin.
+# Takes about two and a half minutes for three plugins, mostly building NotchKit twice.
 # Requires bash 3.2 or later, swift, xcrun and python3 (part of the Command Line Tools).
 set -euo pipefail
 shopt -s nullglob
@@ -51,10 +56,22 @@ toolchain_lib="$(dirname "$(xcrun --find swiftc)")/../lib/swift"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 scratch="$work/build"
+notchkit_build="$work/notchkit-build"
+printf 'check-plugin-deps: NotchKit을 빌드해요.\n' >&2
+for configuration in release debug; do
+    if ! swift build -c "$configuration" --package-path "$SDK_DIR" --product NotchKit --scratch-path "$scratch" >"$work/notchkit.log" 2>&1; then
+        printf 'check-plugin-deps: NotchKit %s 빌드에 실패해서 플러그인을 확인하지 못했어요.\n%s\n' "$configuration" "$(tail -n 20 "$work/notchkit.log")"
+        exit 1
+    fi
+done
+mv "$scratch" "$notchkit_build"
 offenders=0
 for package in "${packages[@]}"; do
     name=$(basename "$package")
     dump="$work/$name.json"
+    # This plugin's own scratch folder: only NotchKit's build, at the path it was built in.
+    rm -rf "$scratch"
+    cp -cR "$notchkit_build" "$scratch"
     if ! swift package dump-package --package-path "$package" --scratch-path "$scratch" >"$dump" 2>&1; then
         printf '%s: Package.swift를 읽지 못했어요.\n%s\n' "$name" "$(cat "$dump")"
         offenders=$((offenders + 1))
@@ -112,7 +129,6 @@ def inside(path, folder):
     return path == folder or path.startswith(folder + os.sep)
 
 own_modules = {module_of(target) for target in own_targets}
-built_modules = own_modules | {"NotchKit"}
 system_folders = [os.path.realpath(sdk_root), os.path.realpath(toolchain_lib)]
 real_scratch = os.path.realpath(scratch)
 # (compiled module, loaded module, path) -> the configurations whose build loaded it
@@ -136,9 +152,13 @@ else:
         if os.path.exists(trace):
             with open(trace) as file:
                 records = [json.loads(line) for line in file if line.strip()]
-        if not any(record["name"] in own_modules for record in records):
+        # The plugin's targets this build compiled. A declared target the product does not build
+        # is not among them, so a module of that name in the Modules folder is not the plugin's.
+        built_modules = own_modules & {record["name"] for record in records}
+        if not built_modules:
             problems.append(f"{configuration} 빌드 기록에 이 플러그인의 모듈이 없어서 불러오는 모듈을 확인하지 못했어요.")
             continue
+        allowed_modules = built_modules | {"NotchKit"}
         # Every record counts, not only those of the own targets: the manifest's and NotchKit's
         # records load only SDK and toolchain modules.
         for record in records:
@@ -147,7 +167,7 @@ else:
                 module, folder = loaded_module(real)
                 if any(inside(real, system) for system in system_folders):
                     continue
-                if module in built_modules and os.path.basename(folder) == "Modules" and inside(folder, real_scratch):
+                if module in allowed_modules and os.path.basename(folder) == "Modules" and inside(folder, real_scratch):
                     continue
                 configurations = foreign.setdefault((record["name"], module, path), [])
                 if configuration not in configurations:
