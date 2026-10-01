@@ -296,7 +296,7 @@ final class ClaudeBridge {
         context.expand()
     }
 
-    private static func appIcon(_ terminal: TerminalLocation) -> Image? {
+    static func appIcon(_ terminal: TerminalLocation) -> Image? {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: terminal.bundleID) else { return nil }
         return Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
     }

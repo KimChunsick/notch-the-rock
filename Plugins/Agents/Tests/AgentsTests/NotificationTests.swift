@@ -113,7 +113,11 @@ import Testing
             context: try makeContext(host: host, directory: directory),
             socketPath: paths.socket,
             settingsURL: directory.appendingPathComponent("settings.json"),
-            activator: activator
+            activator: activator,
+            codexEndpoint: CodexEndpoint(home: directory),
+            codexInstall: nil,
+            codexLauncher: FakeLauncher(socketPath: ""),
+            codexTerminal: { _ in nil }
         )
         plugin.activate()
         host.responses = [Self.jump]
@@ -160,7 +164,7 @@ import Testing
     let renderDefaults = UserDefaults(suiteName: isolatedDefaultsSuite(in: try! makeDirectory("agents-render")))!
 
     func settingsPage(_ model: ClaudeHooksModel) -> some View {
-        Form { AgentsSettingsView(model: model, defaults: renderDefaults) }
+        Form { AgentsSettingsView(model: model, codex: CodexModel(defaults: renderDefaults, install: nil, start: {}, stop: {}), defaults: renderDefaults) }
             .formStyle(.grouped)
             .frame(width: 560, height: 360)
     }

@@ -22,6 +22,9 @@ public final class AgentsPlugin: NotchPlugin {
 
     let bridge: ClaudeBridge
     let hooks: ClaudeHooksModel
+    let codexBridge: CodexBridge
+    let codexLink: CodexLink
+    let codex: CodexModel
     private let context: NotchContext
     private let socketPath: String
     private var server: HookServer?
@@ -32,11 +35,24 @@ public final class AgentsPlugin: NotchPlugin {
             context: context,
             socketPath: HookSocket.defaultPath(home: home),
             settingsURL: home.appendingPathComponent(".claude/settings.json"),
-            activator: SystemTerminalActivator(log: { [log = context.log] in log.error($0) })
+            activator: SystemTerminalActivator(log: { [log = context.log] in log.error($0) }),
+            codexEndpoint: .current(home: home),
+            codexInstall: CodexInstall.detect(candidates: CodexInstall.candidates(home: home)),
+            codexLauncher: SystemCodexLauncher(),
+            codexTerminal: CodexTerminals.systemTerminal(forCwd:)
         )
     }
 
-    init(context: NotchContext, socketPath: String, settingsURL: URL, activator: any TerminalActivating) {
+    init(
+        context: NotchContext,
+        socketPath: String,
+        settingsURL: URL,
+        activator: any TerminalActivating,
+        codexEndpoint: CodexEndpoint,
+        codexInstall: CodexInstall?,
+        codexLauncher: any CodexLaunching,
+        codexTerminal: @escaping @MainActor (String?) -> TerminalLocation?
+    ) {
         self.context = context
         self.socketPath = socketPath
         let defaults = context.storage.defaults
@@ -48,6 +64,19 @@ public final class AgentsPlugin: NotchPlugin {
             recordURL: context.storage.directory.appendingPathComponent("claude-install.json"),
             entries: HookEntry.claude(helper: context.bundleURL.appendingPathComponent("Contents/Helpers/notch-hook"))
         ))
+        let codexBridge = CodexBridge(context: context, activator: activator, screen: bridge.screen, terminal: codexTerminal) {
+            .seconds(ApprovalWait.seconds(in: defaults))
+        }
+        let link = CodexLink(
+            supervisor: CodexSupervisor(endpoint: codexEndpoint, executable: codexInstall?.executable, launcher: codexLauncher),
+            bridge: codexBridge,
+            log: { [log = context.log] in log.error($0) }
+        )
+        let codex = CodexModel(defaults: defaults, install: codexInstall, start: { link.start() }, stop: { link.stop() })
+        link.onState = { codex.state = $0 }
+        self.codexBridge = codexBridge
+        codexLink = link
+        self.codex = codex
     }
 
     public func activate() {
@@ -66,12 +95,17 @@ public final class AgentsPlugin: NotchPlugin {
             // Hooks find no socket and leave Claude Code as it is; the next activation tries again.
             log.error("The Claude Code socket is not available: \(error)")
         }
+        if codex.enabled {
+            codexLink.start()
+        }
     }
 
     public func deactivate() {
         server?.stop()
         server = nil
         bridge.cancelAll()
+        codexLink.stop()
+        codexBridge.cancelAll()
     }
 
     /// Requests too long for the notch, shown in full where they are answered.
@@ -82,7 +116,7 @@ public final class AgentsPlugin: NotchPlugin {
     }
 
     public var settingsView: AnyView? {
-        AnyView(AgentsSettingsView(model: hooks, defaults: context.storage.defaults))
+        AnyView(AgentsSettingsView(model: hooks, codex: codex, defaults: context.storage.defaults))
     }
 }
 

@@ -76,7 +76,7 @@ struct OperationDetail: Equatable {
         self.notchText = notchText
     }
 
-    private static func fitsNotch(_ text: String) -> Bool {
+    static func fitsNotch(_ text: String) -> Bool {
         text.count <= notchCharacters
             && text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count <= notchLines
     }
