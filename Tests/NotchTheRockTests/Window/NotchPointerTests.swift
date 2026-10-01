@@ -218,6 +218,79 @@ struct NotchPointerTests {
         #expect(missed.handle(.floorEnded, at: nearLowRow, now: t0 + .milliseconds(600)) == .leave)
     }
 
+    /// Plugin screens smaller than `detail`: `inSmaller` is on `smaller`; `offSmaller` is on `detail`,
+    /// off `smaller`.
+    var smaller: NotchLayout.Metrics { NotchLayout.metrics(for: .expanded, notch: notchRect.size, content: CGSize(width: 191, height: 20)) }
+    var smallest: NotchLayout.Metrics { NotchLayout.metrics(for: .expanded, notch: notchRect.size, content: CGSize(width: 191, height: 0)) }
+    var inSmaller: CGPoint { CGPoint(x: notchRect.midX, y: 900) }
+    var offSmaller: CGPoint { CGPoint(x: notchRect.midX, y: 850) }
+
+    @Test func R41__a_second_shrink_in_the_kept_region_closes_after_entering_and_leaving_the_new_shape() {
+        var pointer = NotchPointer(notchRect: notchRect, metrics: home)
+        #expect(pointer.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
+        #expect(pointer.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0) == nil)
+        #expect(pointer.handle(.shapeDrawn(detail), at: lowRow, now: t0 + .milliseconds(400)) == nil)
+        #expect(pointer.handle(.floorEnded, at: lowRow, now: t0 + .milliseconds(600)) == nil)
+        // The plugin screen shrinks again while the pointer rests in the home's frame; it enters the
+        // new shape, goes back out onto the plugin screen still drawn around it and stops there.
+        #expect(pointer.handle(.shapeChanged(smaller, expanded: true), at: lowRow, now: t0 + .seconds(1)) == nil)
+        #expect(pointer.handle(.pointerMoved, at: inSmaller, now: t0 + .milliseconds(1100)) == nil)
+        #expect(pointer.handle(.pointerMoved, at: offSmaller, now: t0 + .milliseconds(1200)) == nil)
+        #expect(pointer.handle(.shapeDrawn(smaller), at: offSmaller, now: t0 + .milliseconds(1400)) == .leave)
+    }
+
+    @Test func R41__every_shrink_in_the_kept_region_keeps_it_and_restarts_the_floor() {
+        var pointer = NotchPointer(notchRect: notchRect, metrics: home)
+        #expect(pointer.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
+        #expect(pointer.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0) == nil)
+        #expect(pointer.handle(.shapeDrawn(detail), at: lowRow, now: t0 + .milliseconds(400)) == nil)
+        #expect(pointer.handle(.floorEnded, at: lowRow, now: t0 + .milliseconds(600)) == nil)
+        // Second shrink, the pointer in the home's frame beyond the plugin screen's.
+        #expect(pointer.handle(.pointerMoved, at: nearLowRow, now: t0 + .seconds(1)) == nil)
+        #expect(pointer.handle(.shapeChanged(smaller, expanded: true), at: nearLowRow, now: t0 + .seconds(2)) == nil)
+        #expect(pointer.keepOpenFloorEnd == t0 + .seconds(2) + NotchPointer.shrinkFloor)
+        #expect(pointer.handle(.shapeDrawn(smaller), at: nearLowRow, now: t0 + .milliseconds(2400)) == nil)
+        #expect(pointer.handle(.floorEnded, at: nearLowRow, now: t0 + .milliseconds(2600)) == nil)
+        // Third shrink, the pointer where the plugin screen was, beyond the last shape's frame.
+        #expect(pointer.handle(.pointerMoved, at: offSmaller, now: t0 + .seconds(3)) == nil)
+        #expect(pointer.handle(.shapeChanged(smallest, expanded: true), at: offSmaller, now: t0 + .seconds(4)) == nil)
+        #expect(pointer.keepOpenFloorEnd == t0 + .seconds(4) + NotchPointer.shrinkFloor)
+        #expect(pointer.handle(.shapeDrawn(smallest), at: offSmaller, now: t0 + .milliseconds(4400)) == nil)
+        #expect(pointer.handle(.floorEnded, at: offSmaller, now: t0 + .milliseconds(4600)) == nil)
+        // Anywhere in the frames kept open, still open; away from the notch, closed.
+        #expect(pointer.handle(.pointerMoved, at: lowRow, now: t0 + .seconds(5)) == nil)
+        #expect(pointer.handle(.pointerMoved, at: away, now: t0 + .seconds(6)) == .leave)
+    }
+
+    @Test func R41__a_shrink_with_the_pointer_on_the_larger_shape_still_drawn_keeps_it_open() {
+        // Opened by the hotkey over the home and shrinking to the plugin screen: nothing is kept. The
+        // pointer then enters on the home still drawn, beyond the plugin screen's frame, and the
+        // screen shrinks again before it settles: open while the pointer stays in the frame drawn.
+        var pointer = NotchPointer(notchRect: notchRect, metrics: collapsed)
+        _ = pointer.handle(.shapeChanged(home, expanded: true), at: away, now: t0)
+        _ = pointer.handle(.shapeDrawn(home), at: away, now: t0 + .milliseconds(300))
+        #expect(pointer.handle(.shapeChanged(detail, expanded: true), at: away, now: t0 + .seconds(1)) == nil)
+        #expect(pointer.handle(.shapeDrawn(halfway), at: away, now: t0 + .milliseconds(1100)) == nil)
+        #expect(pointer.handle(.pointerMoved, at: nearLowRow, now: t0 + .milliseconds(1150)) == .enter)
+        #expect(pointer.handle(.shapeChanged(smaller, expanded: true), at: nearLowRow, now: t0 + .milliseconds(1200)) == nil)
+        #expect(pointer.handle(.shapeDrawn(smaller), at: nearLowRow, now: t0 + .milliseconds(1500)) == nil)
+        #expect(pointer.handle(.floorEnded, at: nearLowRow, now: t0 + .milliseconds(1800)) == nil)
+        #expect(pointer.handle(.pointerMoved, at: lowRow, now: t0 + .seconds(3)) == nil)
+        #expect(pointer.handle(.pointerMoved, at: away, now: t0 + .seconds(4)) == .leave)
+
+        // The same, then into the new shape and back onto the home still drawn: the settled shape closes it.
+        var reentered = NotchPointer(notchRect: notchRect, metrics: collapsed)
+        _ = reentered.handle(.shapeChanged(home, expanded: true), at: away, now: t0)
+        _ = reentered.handle(.shapeDrawn(home), at: away, now: t0 + .milliseconds(300))
+        #expect(reentered.handle(.shapeChanged(detail, expanded: true), at: away, now: t0 + .seconds(1)) == nil)
+        #expect(reentered.handle(.shapeDrawn(halfway), at: away, now: t0 + .milliseconds(1100)) == nil)
+        #expect(reentered.handle(.pointerMoved, at: nearLowRow, now: t0 + .milliseconds(1150)) == .enter)
+        #expect(reentered.handle(.shapeChanged(smaller, expanded: true), at: nearLowRow, now: t0 + .milliseconds(1200)) == nil)
+        #expect(reentered.handle(.pointerMoved, at: inSmaller, now: t0 + .milliseconds(1250)) == nil)
+        #expect(reentered.handle(.pointerMoved, at: nearLowRow, now: t0 + .milliseconds(1300)) == nil)
+        #expect(reentered.handle(.shapeDrawn(smaller), at: nearLowRow, now: t0 + .milliseconds(1500)) == .leave)
+    }
+
     @Test func R16__escape_belongs_to_the_notch_only_while_its_window_is_key() {
         #expect(NotchWindowController.handlesEscape(keyCode: 53, inNotchWindow: true, notchIsKey: true, state: .expanded))
         // Settings or any other window is key: its Esc stays its own, even with the notch expanded by hover.
