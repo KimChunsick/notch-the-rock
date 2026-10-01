@@ -27,8 +27,11 @@ struct MediaKeysView: View {
                     HStack(spacing: 10) {
                         MuteToggle(model: model, volume: volume)
                             .frame(width: 28)
-                        Slider(value: Binding(get: { volume.level }, set: { model.setVolumeLevel($0) }), in: 0...1)
-                            .frame(width: 200)
+                        Slider(value: Binding(get: { volume.level }, set: { model.setVolumeLevel($0) }), in: 0...1) {
+                            Text("볼륨")
+                        }
+                        .labelsHidden()
+                        .frame(width: 200)
                         Text(percentText(volume.level))
                             .monospacedDigit()
                             .frame(width: 40, alignment: .trailing)
@@ -43,8 +46,11 @@ struct MediaKeysView: View {
                     HStack(spacing: 10) {
                         Image(systemName: "sun.max.fill")
                             .frame(width: 28)
-                        Slider(value: Binding(get: { brightness }, set: { model.setBrightness($0) }), in: 0...1)
-                            .frame(width: 200)
+                        Slider(value: Binding(get: { brightness }, set: { model.setBrightness($0) }), in: 0...1) {
+                            Text("밝기")
+                        }
+                        .labelsHidden()
+                        .frame(width: 200)
                         Text(percentText(brightness))
                             .monospacedDigit()
                             .frame(width: 40, alignment: .trailing)

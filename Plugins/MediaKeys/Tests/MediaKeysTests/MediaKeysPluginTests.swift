@@ -1,3 +1,5 @@
+import AppKit
+import CoreAudio
 import CoreGraphics
 import Foundation
 import NotchKit
@@ -30,21 +32,64 @@ private final class FakeHost: NotchHost {
     func log(_ level: LogLevel, _ message: String, from pluginID: String) {}
 }
 
+/// Output devices by id, the default output being `defaultDevice`. A device without a state is gone
+/// or has no volume the app can set.
 @MainActor
 private final class FakeVolume: VolumeControl {
-    var state: VolumeState?
+    var devices: [AudioObjectID: VolumeState] = [:]
+    var defaultDevice: AudioObjectID = 1
+    var refusesLevel = false
+    var refusesMute = false
+    /// Runs once right after the next read, between an adjustment's read and its writes.
+    var afterRead: (@MainActor () -> Void)?
+    /// The device of every read and write, in order.
+    var touched: [AudioObjectID] = []
+
     init(_ state: VolumeState?) { self.state = state }
-    func read() -> VolumeState? { state }
-    func setLevel(_ level: Double) { state?.level = level }
-    func setMuted(_ muted: Bool) { state?.isMuted = muted }
+
+    /// The default output's state.
+    var state: VolumeState? {
+        get { devices[defaultDevice] }
+        set { devices[defaultDevice] = newValue }
+    }
+
+    func defaultOutputDevice() -> AudioObjectID? { defaultDevice }
+
+    func read(_ device: AudioObjectID) -> VolumeState? {
+        touched.append(device)
+        let state = devices[device]
+        let hook = afterRead
+        afterRead = nil
+        hook?()
+        return state
+    }
+
+    func setLevel(_ level: Double, on device: AudioObjectID) -> Bool {
+        touched.append(device)
+        guard !refusesLevel, devices[device] != nil else { return false }
+        devices[device]?.level = level
+        return true
+    }
+
+    func setMuted(_ muted: Bool, on device: AudioObjectID) -> Bool {
+        touched.append(device)
+        guard !refusesMute, devices[device] != nil else { return false }
+        devices[device]?.isMuted = muted
+        return true
+    }
 }
 
 @MainActor
 private final class FakeBrightness: BrightnessControl {
     var value: Double?
+    var refuses = false
     init(_ value: Double?) { self.value = value }
     func read() -> Double? { value }
-    func set(_ value: Double) { self.value = value }
+    func set(_ value: Double) -> Bool {
+        guard !refuses, self.value != nil else { return false }
+        self.value = value
+        return true
+    }
 }
 
 @MainActor
@@ -253,6 +298,129 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     #expect(h.send(3, down) == false)
     #expect(h.send(3, up) == false)
     #expect(h.host.huds.isEmpty)
+}
+
+@MainActor
+@Test func R12__a_refused_write_shows_what_the_device_holds_and_the_system_keeps_the_key() throws {
+    let h = try Harness(volume: VolumeState(level: 0.5, isMuted: true, canMute: true))
+    h.plugin.activate()
+
+    // Volume up unmutes first; the level the device refuses leaves it unmuted at 0.5.
+    h.volume.refusesLevel = true
+    #expect(h.send(0, down) == false)
+    #expect(h.send(0, up) == false)
+    #expect(h.volume.state == VolumeState(level: 0.5, isMuted: false, canMute: true))
+    #expect(h.plugin.model.volume == h.volume.state)
+
+    h.volume.refusesMute = true
+    #expect(h.send(7, down) == false)
+    #expect(h.send(7, up) == false)
+    #expect(h.volume.state?.isMuted == false)
+
+    h.brightness.refuses = true
+    #expect(h.send(2, down) == false)
+    #expect(h.send(2, up) == false)
+    #expect(h.brightness.value == 0.5)
+    #expect(h.plugin.model.brightness == 0.5)
+
+    #expect(h.host.huds == [
+        "speaker.wave.2.fill 볼륨 0.5 바꿀 수 없어요",
+        "speaker.wave.2.fill 음소거 0.5 바꿀 수 없어요",
+    ])
+}
+
+@MainActor
+@Test func R12__sliders_snap_back_to_what_a_refusing_device_holds() throws {
+    let h = try Harness()
+    let model = h.plugin.model
+    model.refresh()
+    h.volume.refusesLevel = true
+    h.volume.refusesMute = true
+    h.brightness.refuses = true
+
+    h.volume.state?.level = 0.25  // changed elsewhere since the last refresh
+    model.setVolumeLevel(0.9)
+    #expect(model.volume == VolumeState(level: 0.25, isMuted: false, canMute: true))
+    model.setMuted(true)
+    #expect(model.volume == VolumeState(level: 0.25, isMuted: false, canMute: true))
+
+    h.brightness.value = 0.75
+    model.setBrightness(0.1)
+    #expect(model.brightness == 0.75)
+}
+
+@MainActor
+@Test func R12__one_adjustment_reads_and_writes_the_device_it_started_with() throws {
+    // Headphones (1) muted at 0.5, speakers (2) at 0.2.
+    let h = try Harness(volume: VolumeState(level: 0.5, isMuted: true, canMute: true))
+    let volume = h.volume
+    volume.devices[2] = VolumeState(level: 0.2, isMuted: false, canMute: true)
+    h.plugin.activate()
+
+    // The speakers become the default output between the read and the writes of one key press.
+    volume.afterRead = { volume.defaultDevice = 2 }
+    volume.touched = []
+    #expect(h.send(0, down) == true)
+    #expect(volume.touched == [1, 1, 1])
+    #expect(volume.devices[1] == VolumeState(level: 0.5625, isMuted: false, canMute: true))
+    #expect(volume.devices[2] == VolumeState(level: 0.2, isMuted: false, canMute: true))
+
+    // The next press starts from the new default output.
+    volume.touched = []
+    #expect(h.send(1, down) == true)
+    #expect(volume.touched == [2, 2])
+    #expect(volume.devices[2]?.level == 0.125)
+
+    // The slider and the mute toggle as well.
+    volume.afterRead = { volume.defaultDevice = 1 }
+    volume.touched = []
+    h.plugin.model.setVolumeLevel(0.75)
+    #expect(volume.touched == [2, 2])
+    #expect(volume.devices[2]?.level == 0.75)
+    volume.afterRead = { volume.defaultDevice = 2 }
+    volume.touched = []
+    h.plugin.model.setMuted(true)
+    #expect(volume.touched == [1, 1])
+    #expect(volume.devices[1]?.isMuted == true)
+    #expect(volume.devices[2]?.isMuted == false)
+
+    // A device that disappears between the read and the write fails the press; the system gets it.
+    volume.afterRead = {
+        volume.devices[2] = nil
+        volume.defaultDevice = 1
+    }
+    volume.touched = []
+    #expect(h.send(1, down) == false)
+    #expect(volume.touched == [2, 2, 2])
+    #expect(volume.devices[1] == VolumeState(level: 0.5625, isMuted: true, canMute: true))
+    #expect(h.host.huds == [
+        "speaker.wave.2.fill 볼륨 0.5625 56%",
+        "speaker.wave.1.fill 볼륨 0.125 13%",
+        "speaker.slash.fill 볼륨 - 바꿀 수 없어요",
+    ])
+}
+
+/// The labels of every slider under `element`, in order.
+@MainActor
+private func sliderLabels(in element: Any) -> [String] {
+    guard let element = element as? NSAccessibilityProtocol else { return [] }
+    let own = element.accessibilityRole() == .slider ? [element.accessibilityLabel() ?? ""] : []
+    return own + (element.accessibilityChildren() ?? []).flatMap { sliderLabels(in: $0) }
+}
+
+@MainActor
+@Test func R12__both_sliders_carry_an_accessibility_label() throws {
+    let h = try Harness()
+    h.plugin.model.refresh()
+    let tab = try #require(h.plugin.expandedTab)
+    let view = NSHostingView(rootView: tab.content)
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200), styleMask: [.borderless], backing: .buffered, defer: true)
+    window.contentView = view
+    // SwiftUI builds its accessibility tree only for an assistive client; this asks as one would.
+    NSApplication.shared.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
+    RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+    #expect(sliderLabels(in: view) == ["볼륨", "밝기"])
 }
 
 @MainActor

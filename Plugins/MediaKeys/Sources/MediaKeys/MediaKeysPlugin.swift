@@ -116,29 +116,36 @@ public final class MediaKeysPlugin: NotchPlugin {
     }
 
     /// Applies a key press (or its auto-repeat) and shows the HUD. False leaves the key to the
-    /// system: a device without settable volume or mute gets a HUD saying so, a display whose
-    /// brightness cannot be changed gets nothing.
+    /// system: a volume or mute change the device cannot make or refuses gets a HUD saying so with
+    /// what the device holds, a brightness change the display cannot make or refuses gets nothing.
     private func perform(_ key: MediaKey, steps: Int) -> Bool {
         switch key {
         case .soundUp, .soundDown:
-            guard let state = model.stepVolume(by: key == .soundUp ? 1 : -1, steps: steps) else {
-                showHUD(.volumeUnavailable)
-                return false
-            }
-            showHUD(.volume(state))
+            return show(model.stepVolume(by: key == .soundUp ? 1 : -1, steps: steps), title: "볼륨")
         case .mute:
-            guard let state = model.toggleMute() else {
-                showHUD(.muteUnavailable)
-                return false
-            }
-            showHUD(.volume(state))
+            return show(model.toggleMute(), title: "음소거")
         case .brightnessUp, .brightnessDown:
             guard let value = model.stepBrightness(by: key == .brightnessUp ? 1 : -1, steps: steps) else {
                 return false
             }
             showHUD(.brightness(value))
+            return true
         }
-        return true
+    }
+
+    /// Shows what became of a volume or mute key under `title`: true when the device took the change.
+    private func show(_ adjustment: VolumeAdjustment, title: String) -> Bool {
+        switch adjustment {
+        case .changed(let state):
+            showHUD(.volume(state))
+            return true
+        case .refused(let actual):
+            showHUD(.unchangeable(title, actual))
+            return false
+        case .unavailable:
+            showHUD(.unchangeable(title, nil))
+            return false
+        }
     }
 
     private func showHUD(_ hud: HUD) {
@@ -204,12 +211,12 @@ extension HUD {
         HUD(symbol: "sun.max.fill", title: "밝기", value: value, detail: percentText(value))
     }
 
-    static var volumeUnavailable: HUD {
-        HUD(symbol: "speaker.slash.fill", title: "볼륨", detail: "바꿀 수 없어요")
-    }
-
-    static var muteUnavailable: HUD {
-        HUD(symbol: "speaker.slash.fill", title: "음소거", detail: "바꿀 수 없어요")
+    /// A volume or mute key the device did not take, with the state the device holds when known.
+    static func unchangeable(_ title: String, _ state: VolumeState?) -> HUD {
+        guard let state else {
+            return HUD(symbol: "speaker.slash.fill", title: title, detail: "바꿀 수 없어요")
+        }
+        return HUD(symbol: state.symbol, title: title, value: state.isMuted ? 0 : state.level, detail: "바꿀 수 없어요")
     }
 }
 

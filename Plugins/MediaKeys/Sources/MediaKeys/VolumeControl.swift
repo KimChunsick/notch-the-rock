@@ -1,7 +1,7 @@
 import AudioToolbox
 import CoreAudio
 
-/// The default output device's level and mute switch.
+/// An output device's level and mute switch.
 struct VolumeState: Equatable, Sendable {
     /// From 0 to 1.
     var level: Double
@@ -10,21 +10,27 @@ struct VolumeState: Equatable, Sendable {
     var canMute: Bool
 }
 
-/// The volume of the default output device. The plugin uses `SystemVolume`; tests use a fake so
-/// they never touch the user's volume.
+/// The volume of the output devices. The plugin uses `SystemVolume`; tests use a fake so they never
+/// touch the user's volume. Reads and writes name their device, so one adjustment looks the default
+/// output up once and cannot read one device and write another when the default output switches
+/// in between.
 @MainActor
 protocol VolumeControl: AnyObject {
-    /// The current state, or nil when there is no default output device or its volume cannot be set.
-    func read() -> VolumeState?
-    /// Best effort: a device that refuses keeps its value, and the next `read()` shows it.
-    func setLevel(_ level: Double)
-    func setMuted(_ muted: Bool)
+    /// The default output device, or nil when there is none.
+    func defaultOutputDevice() -> AudioObjectID?
+    /// The device's state, or nil when the device is gone or its volume cannot be set.
+    func read(_ device: AudioObjectID) -> VolumeState?
+    /// False when the device refused the value or is gone.
+    func setLevel(_ level: Double, on device: AudioObjectID) -> Bool
+    /// False when the device refused the value or is gone.
+    func setMuted(_ muted: Bool, on device: AudioObjectID) -> Bool
 }
 
-/// The default output device through CoreAudio: AudioToolbox's `VirtualMainVolume` for the level,
-/// read and set with the `AudioObject` calls that replaced the deprecated `AudioHardwareService`
-/// ones, and `kAudioDevicePropertyMute` for the mute switch. The device is looked up on every call,
-/// so a new default output (headphones plugged in) applies from the next key press.
+/// The output devices through CoreAudio: AudioToolbox's `VirtualMainVolume` for the level, read and
+/// set with the `AudioObject` calls that replaced the deprecated `AudioHardwareService` ones, and
+/// `kAudioDevicePropertyMute` for the mute switch. The model looks the default output up at the start
+/// of every adjustment, so a new default output (headphones plugged in) applies from the next key
+/// press.
 final class SystemVolume: VolumeControl {
     private static let volumeAddress = AudioObjectPropertyAddress(
         mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
@@ -37,8 +43,7 @@ final class SystemVolume: VolumeControl {
         mElement: kAudioObjectPropertyElementMain
     )
 
-    func read() -> VolumeState? {
-        guard let device = Self.defaultOutputDevice() else { return nil }
+    func read(_ device: AudioObjectID) -> VolumeState? {
         var volumeAddress = Self.volumeAddress
         var volumeSettable: DarwinBoolean = false
         var level: Float32 = 0
@@ -61,21 +66,19 @@ final class SystemVolume: VolumeControl {
         return VolumeState(level: Double(min(max(level, 0), 1)), isMuted: hasMute && muted != 0, canMute: canMute)
     }
 
-    func setLevel(_ level: Double) {
-        guard let device = Self.defaultOutputDevice() else { return }
+    func setLevel(_ level: Double, on device: AudioObjectID) -> Bool {
         var address = Self.volumeAddress
         var value = Float32(min(max(level, 0), 1))
-        _ = AudioObjectSetPropertyData(device, &address, 0, nil, UInt32(MemoryLayout<Float32>.size), &value)
+        return AudioObjectSetPropertyData(device, &address, 0, nil, UInt32(MemoryLayout<Float32>.size), &value) == noErr
     }
 
-    func setMuted(_ muted: Bool) {
-        guard let device = Self.defaultOutputDevice() else { return }
+    func setMuted(_ muted: Bool, on device: AudioObjectID) -> Bool {
         var address = Self.muteAddress
         var value: UInt32 = muted ? 1 : 0
-        _ = AudioObjectSetPropertyData(device, &address, 0, nil, UInt32(MemoryLayout<UInt32>.size), &value)
+        return AudioObjectSetPropertyData(device, &address, 0, nil, UInt32(MemoryLayout<UInt32>.size), &value) == noErr
     }
 
-    private static func defaultOutputDevice() -> AudioObjectID? {
+    func defaultOutputDevice() -> AudioObjectID? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,

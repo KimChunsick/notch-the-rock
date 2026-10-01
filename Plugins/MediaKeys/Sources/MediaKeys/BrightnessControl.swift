@@ -7,8 +7,8 @@ import Darwin
 protocol BrightnessControl: AnyObject {
     /// From 0 to 1, or nil when there is no built-in display or its brightness cannot be changed.
     func read() -> Double?
-    /// Best effort: the next `read()` shows what the display holds.
-    func set(_ value: Double)
+    /// False when the display refused the value or is gone.
+    func set(_ value: Double) -> Bool
 }
 
 /// The built-in display through the private DisplayServices framework. The framework is opened at
@@ -43,9 +43,9 @@ final class DisplayServicesBrightness: BrightnessControl {
         return Double(min(max(value, 0), 1))
     }
 
-    func set(_ value: Double) {
-        guard let functions, let display = Self.builtInDisplay() else { return }
-        _ = functions.set(display, Float(min(max(value, 0), 1)))
+    func set(_ value: Double) -> Bool {
+        guard let functions, let display = Self.builtInDisplay() else { return false }
+        return functions.set(display, Float(min(max(value, 0), 1))) == 0
     }
 
     private static func resolve() -> Functions? {
