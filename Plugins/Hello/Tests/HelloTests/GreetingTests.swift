@@ -95,6 +95,48 @@ func writePNG(_ view: some View, scale: CGFloat, to url: URL) throws {
     try data.write(to: url)
 }
 
+/// The image's pixels as premultiplied RGBA bytes, top row first.
+func rgba(of image: CGImage) -> [UInt8] {
+    let width = image.width, height = image.height
+    var pixels = [UInt8](repeating: 0, count: width * height * 4)
+    let context = CGContext(
+        data: &pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    )!
+    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    return pixels
+}
+
+/// Mean red and blue (0...255) of the opaque ink (alpha at least 230) of `view` in the leftmost and
+/// the rightmost fifth of the ink's width; nil without ink.
+@MainActor
+func inkEnds(of view: some View) -> (left: (red: Double, blue: Double), right: (red: Double, blue: Double))? {
+    let image = render(view)
+    let width = image.width, height = image.height
+    let pixels = rgba(of: image)
+    var minX = width, maxX = -1
+    for y in 0..<height {
+        for x in 0..<width where pixels[(y * width + x) * 4 + 3] >= 230 {
+            minX = min(minX, x)
+            maxX = max(maxX, x)
+        }
+    }
+    guard maxX >= 0 else { return nil }
+    let fifth = (maxX - minX + 1) / 5
+    func mean(_ columns: ClosedRange<Int>) -> (red: Double, blue: Double) {
+        var red = 0, blue = 0, count = 0
+        for y in 0..<height {
+            for x in columns where pixels[(y * width + x) * 4 + 3] >= 230 {
+                red += Int(pixels[(y * width + x) * 4])
+                blue += Int(pixels[(y * width + x) * 4 + 2])
+                count += 1
+            }
+        }
+        return (Double(red) / Double(max(count, 1)), Double(blue) / Double(max(count, 1)))
+    }
+    return (mean(minX...minX + fifth), mean(maxX - fifth...maxX))
+}
+
 extension HelloTimeline.Frame {
     /// The pen `writing` of the way through its time, fully opaque, with the glow it has while writing.
     static func writing(_ writing: Double) -> Self {
@@ -399,5 +441,46 @@ extension HelloTimeline.Frame {
             }.padding(12)
             try writePNG(frames, scale: 2, to: folder.appendingPathComponent("R21-render-frames-\(name)-\(tag).png"))
         }
+    }
+
+    /// R39: the Korean hand writes in hello's ink, sky blue at the leading end to peach at the
+    /// trailing end across the whole phrase (both lines when it wraps), as hello is.
+    @Test func R39__korean_ink_is_hellos_gradient_across_the_phrase() throws {
+        let finished = HelloTimeline.Frame(writing: 1, opacity: 1, glow: 0)
+        let longest = HangulHandwriting("즐거운 주말 저녁 보내세요")
+        try #require(longest.lines.count == 2)
+        let views: [(String, AnyView)] = [
+            ("hello", AnyView(HelloLetteringView(artwork: .hello, frame: finished))),
+            ("안녕하세요", AnyView(HangulHandwritingView(handwriting: HangulHandwriting("안녕하세요"), frame: finished))),
+            ("즐거운 주말 저녁 보내세요", AnyView(HangulHandwritingView(handwriting: longest, frame: finished))),
+        ]
+        for (name, view) in views {
+            let ends = try #require(inkEnds(of: view), "no ink in \(name)")
+            print("R39 \(name): leading red \(ends.left.red) blue \(ends.left.blue), trailing red \(ends.right.red) blue \(ends.right.blue)")
+            #expect(ends.left.blue - ends.left.red >= 40, "\(name): the leading end is not sky blue: \(ends)")
+            #expect(ends.right.red - ends.right.blue >= 40, "\(name): the trailing end is not peach: \(ends)")
+        }
+    }
+
+    /// R39: colouring the Korean ink keeps its strokes. With the glow off, the finished phrase
+    /// covers exactly the pixels its ink stroked in plain white at the hand's pen width covers.
+    @Test(arguments: ["안녕하세요", "좋은 아침이에요", "즐거운 주말 저녁 보내세요"])
+    func R39__korean_strokes_keep_their_paths_and_widths(phrase: String) {
+        let handwriting = HangulHandwriting(phrase)
+        let ink = handwriting.ink(for: handwriting.pen(at: handwriting.duration))
+        let plain = render(
+            ink.stroke(Color.white, style: StrokeStyle(lineWidth: HangulHandwriting.penWidth, lineCap: .round, lineJoin: .round))
+                .frame(width: handwriting.size.width, height: handwriting.size.height)
+        )
+        let coloured = render(HangulHandwritingView(handwriting: handwriting, frame: HelloTimeline.Frame(writing: 1, opacity: 1, glow: 0)))
+        #expect(plain.width == coloured.width && plain.height == coloured.height)
+        let a = rgba(of: plain), b = rgba(of: coloured)
+        var inked = 0, differing = 0
+        for i in stride(from: 3, to: min(a.count, b.count), by: 4) {
+            if a[i] >= 128 { inked += 1 }
+            if (a[i] >= 128) != (b[i] >= 128) { differing += 1 }
+        }
+        print("R39 \(phrase): \(inked) inked pixels, \(differing) differing")
+        #expect(inked > 0 && differing == 0, "\(phrase): \(differing) of \(inked) ink pixels moved")
     }
 }

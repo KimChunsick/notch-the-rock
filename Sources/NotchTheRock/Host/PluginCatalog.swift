@@ -373,8 +373,8 @@ final class PluginCatalog {
         logger.notice("deactivated \(entry.pluginID, privacy: .public)")
     }
 
-    /// Hands the host every running, enabled plugin in load order. The home leaves out the ones with
-    /// neither a tab nor a tile (`HomePlugin.isInHome`).
+    /// Hands the host every running, enabled plugin in load order; each one is in the home, as a
+    /// tile or a strip icon (`HomePlugin`).
     private func updateHome() {
         host.plugins = loadOrder.compactMap { id in
             guard let entry = running[id], entry.isEnabled else { return nil }

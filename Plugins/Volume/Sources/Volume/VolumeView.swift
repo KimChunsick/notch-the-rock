@@ -2,9 +2,11 @@ import NotchKit
 import SwiftUI
 
 extension VolumeState {
-    /// A crossed-out speaker when muted or silent, otherwise one to three waves by level.
+    /// A crossed-out speaker only when the device is muted; otherwise a speaker without waves at 0
+    /// (a device without a mute switch) and one to three waves by level.
     var symbol: String {
-        if isMuted || level == 0 { return "speaker.slash.fill" }
+        if isMuted { return "speaker.slash.fill" }
+        if level == 0 { return "speaker.fill" }
         if level < 1.0 / 3 { return "speaker.wave.1.fill" }
         if level < 2.0 / 3 { return "speaker.wave.2.fill" }
         return "speaker.wave.3.fill"
@@ -88,16 +90,71 @@ struct VolumeTile: View {
     }
 }
 
-/// The volume as a slider. A level the device refuses snaps it back.
+/// The volume as a thin capsule track filled from the left with the notch's volume bar gradient,
+/// and a round knob. A click or a drag sets the volume where the pointer is, live while dragging; a
+/// value the device refuses snaps it back. Focused from the keyboard, the arrow keys step it as the
+/// volume keys do, and so does VoiceOver's adjust.
 private struct VolumeSlider: View {
+    /// Pale ice blue to a calm blue, as the notch's volume bar fills: keep it equal to
+    /// `HUDBar.volume` in the app's Sources/NotchTheRock/Window/NotchRootView.swift.
+    static let colors = [Color(red: 0.74, green: 0.87, blue: 1), Color(red: 0.36, green: 0.64, blue: 1)]
+    static let height: CGFloat = 16
+    static let thickness: CGFloat = 6
+    static let knob: CGFloat = 14
+
     let model: VolumeModel
     let volume: VolumeState
 
     var body: some View {
-        Slider(value: Binding(get: { volume.level }, set: { model.setVolumeLevel($0) }), in: 0...1) {
-            Text("볼륨")
+        GeometryReader { proxy in
+            // The knob's centre travels the track, which keeps half a knob from either end.
+            let length = max(proxy.size.width - Self.knob, 0)
+            let filled = length * volume.level
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(.white.opacity(0.18))
+                    .frame(width: length, height: Self.thickness)
+                    .offset(x: Self.knob / 2)
+                Capsule()
+                    .fill(LinearGradient(colors: Self.colors, startPoint: .leading, endPoint: .trailing))
+                    .frame(width: filled, height: Self.thickness)
+                    .offset(x: Self.knob / 2)
+                Circle()
+                    .fill(.white)
+                    .frame(width: Self.knob, height: Self.knob)
+                    .offset(x: filled)
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .leading)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
+                guard length > 0 else { return }
+                model.setVolumeLevel(Double((drag.location.x - Self.knob / 2) / length))
+            })
         }
-        .labelsHidden()
+        .frame(height: Self.height)
+        // Keyboard navigation only: a focus taken by the pointer would swallow its click and drag.
+        .focusable(interactions: .activate)
+        .onMoveCommand { direction in
+            switch direction {
+            case .left, .down: step(-1)
+            case .right, .up: step(1)
+            @unknown default: break
+            }
+        }
+        .accessibilityElement()
+        .accessibilityLabel("볼륨")
+        .accessibilityValue(percentText(volume.level))
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: step(1)
+            case .decrement: step(-1)
+            @unknown default: break
+            }
+        }
+    }
+
+    private func step(_ delta: Int) {
+        _ = model.stepVolume(by: delta, steps: VolumePlugin.steps)
     }
 }
 

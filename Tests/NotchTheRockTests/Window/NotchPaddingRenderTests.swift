@@ -18,8 +18,8 @@ import Testing
     /// Blue like the menu bar around the shape, so its edges stand out from the black.
     static let backdrop = Color(red: 0, green: 0.2, blue: 1)
     static let margin: CGFloat = 20
-    /// The margin the host keeps between a screen and the shape's left, right and bottom edges (D-47).
-    nonisolated static let edgePadding: CGFloat = 20
+    /// The margin the host keeps between a screen and the shape's left, right and bottom edges (D-58).
+    nonisolated static let edgePadding: CGFloat = 18
 
     struct Gaps: CustomStringConvertible {
         var content: CGSize
@@ -194,6 +194,14 @@ import Testing
         expectEqualPadding(gaps, "home")
     }
 
+    /// The host's screen for a plugin without one (Hello): the card spreads across the width the
+    /// band offers, with the gear for its settings page.
+    @Test func R35__the_fallback_screen_keeps_the_same_padding_on_every_side() async throws {
+        let plugin = HomePlugin(pluginID: "com.example.hello", name: "인사", symbol: "hand.wave", tab: nil, tile: nil, hasSettings: true)
+        let gaps = try await measureScreen("fallback-screen", "인사", hasSettings: true, DefaultScreen(plugin: plugin, openSettings: { _ in }))
+        expectScreenPadding(gaps, "fallback-screen")
+    }
+
     @Test func R15__the_battery_screen_keeps_the_same_padding_on_every_side() async throws {
         let gaps = try await measureScreen("battery", "배터리", hasSettings: false, BatteryStandIn())
         expectScreenPadding(gaps, "battery")
@@ -329,8 +337,7 @@ private struct VolumeStandIn: View {
             Toggle(isOn: .constant(false)) { Image(systemName: "speaker.wave.1.fill") }
                 .toggleStyle(.button)
                 .frame(width: 28)
-            Slider(value: .constant(0.06), in: 0...1) { Text("볼륨") }
-                .labelsHidden()
+            SliderStandIn(value: 0.06)
                 .frame(minWidth: 200, idealWidth: 200, maxWidth: .infinity)
             Text("6%")
                 .monospacedDigit()
@@ -344,13 +351,30 @@ private struct BrightnessStandIn: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "sun.max.fill")
-            Slider(value: .constant(0.5), in: 0...1) { Text("밝기") }
-                .labelsHidden()
+            SliderStandIn(value: 0.5)
                 .frame(minWidth: 200, idealWidth: 200, maxWidth: .infinity)
             Text("50%")
                 .monospacedDigit()
                 .frame(width: 40, alignment: .trailing)
         }
+    }
+}
+
+/// The volume and brightness screens' slider: a 6 pt track filled up to a 14 pt knob, 16 pt high.
+private struct SliderStandIn: View {
+    let value: Double
+
+    var body: some View {
+        GeometryReader { proxy in
+            let length = max(proxy.size.width - 14, 0)
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.18)).frame(width: length, height: 6).offset(x: 7)
+                Capsule().fill(.white).frame(width: length * value, height: 6).offset(x: 7)
+                Circle().fill(.white).frame(width: 14, height: 14).offset(x: length * value)
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .leading)
+        }
+        .frame(height: 16)
     }
 }
 

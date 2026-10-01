@@ -46,15 +46,26 @@ final class VolumeModel {
         }
     }
 
-    /// Moves the volume by `delta` steps; a step up also unmutes.
-    func stepVolume(by delta: Int, steps: Int) -> VolumeAdjustment {
-        adjustVolume { state in
-            var state = state
-            state.level = Self.stepped(state.level, by: delta, steps: steps)
-            if delta > 0, state.canMute {
+    /// `state` at `level`. On a device with a mute switch, reaching 0 also mutes, as the system's
+    /// volume keys do: a zero level alone still plays faintly on the built-in speakers. A raise
+    /// (`raising`) unmutes.
+    nonisolated static func moved(_ state: VolumeState, to level: Double, raising: Bool) -> VolumeState {
+        var state = state
+        state.level = level
+        if state.canMute {
+            if level == 0 {
+                state.isMuted = true
+            } else if raising {
                 state.isMuted = false
             }
-            return state
+        }
+        return state
+    }
+
+    /// Moves the volume by `delta` steps; reaching 0 mutes and a step up unmutes.
+    func stepVolume(by delta: Int, steps: Int) -> VolumeAdjustment {
+        adjustVolume { state in
+            Self.moved(state, to: Self.stepped(state.level, by: delta, steps: steps), raising: delta > 0)
         }
     }
 
@@ -68,12 +79,12 @@ final class VolumeModel {
         }
     }
 
-    /// The volume slider. A refused value snaps the slider back to what the device holds.
+    /// The volume slider: 0 mutes and a raise unmutes, as with the keys. A refused value snaps the
+    /// slider back to what the device holds.
     func setVolumeLevel(_ level: Double) {
+        let level = min(max(level, 0), 1)
         _ = adjustVolume { state in
-            var state = state
-            state.level = min(max(level, 0), 1)
-            return state
+            Self.moved(state, to: level, raising: level > state.level)
         }
     }
 

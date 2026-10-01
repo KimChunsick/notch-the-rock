@@ -1,9 +1,10 @@
 import NotchKit
 import SwiftUI
 
-/// The home: the plugin tile grid and, below it, one row per plugin without a grid place, or the
-/// quick search while it is open. Always as wide as the grid; as tall as the rows in use and the
-/// list. The keyboard's focus ring (`HomeKeyboard.focus`) is drawn around its tile or row.
+/// The home: the plugin tile grid and, below it, a strip of round icons for the plugins without a
+/// grid place, or the quick search while it is open. Always as wide as the grid; as tall as the rows
+/// in use and the strip. The keyboard's focus ring (`HomeKeyboard.focus`) is drawn around its tile
+/// or icon.
 struct HomeView: View {
     let host: NotchHostModel
 
@@ -25,7 +26,12 @@ struct HomeView: View {
                 HomeGridView(host: host, tiles: tiles)
             }
             if !list.isEmpty {
-                HomeList(host: host, plugins: list)
+                HomeStrip(host: host, plugins: list)
+            }
+            if home.isEditing, let notice = home.notice {
+                Text(notice)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.7))
             }
             if tiles.isEmpty && list.isEmpty && !home.isEditing {
                 Text("아직 켠 플러그인이 없어요")
@@ -71,7 +77,8 @@ private struct HomeGridView: View {
     }
 }
 
-/// One tile. Tapping it opens the plugin's screen when the plugin has one. In edit mode it shows
+/// One tile: the plugin's own, or the host's default tile (`DefaultTile`) for a plugin without one.
+/// Tapping it opens the plugin's screen. In edit mode it shows
 /// a remove button and a size menu, and it can be dragged to another grid place; the home knows
 /// about the drag from its start to its drop or cancellation, so the notch stays open meanwhile.
 private struct TileView: View {
@@ -92,7 +99,7 @@ private struct TileView: View {
         ZStack {
             // Opaque, so the free slots drawn in edit mode do not show through.
             shape.fill(Color(white: editing ? 0.15 : 0.11))
-            tile.plugin.tile?.content(placement.size)
+            (tile.plugin.tile?.content(placement.size) ?? AnyView(DefaultTile(plugin: tile.plugin)))
                 .frame(width: frame.width, height: frame.height)
                 .clipShape(shape)
                 .allowsHitTesting(!editing)
@@ -111,7 +118,7 @@ private struct TileView: View {
                         .foregroundStyle(.black, .white.opacity(0.85))
                 }
                 .buttonStyle(.plain)
-                .help("목록으로 옮기기")
+                .help("위젯에서 빼기")
                 .offset(x: -5, y: -5)
             }
         }
@@ -148,9 +155,7 @@ private struct TileView: View {
         .offset(drag)
         .zIndex(drag == .zero ? 0 : 1)
         .offset(x: frame.minX, y: frame.minY)
-        .onTapGesture {
-            if !editing, tile.plugin.tab != nil { host.open(pluginID: placement.pluginID) }
-        }
+        .onTapGesture { host.tapHomePlugin(placement.pluginID) }
         .gesture(
             DragGesture(minimumDistance: 3)
                 .updating($isDragging) { _, dragging, _ in dragging = true }
@@ -186,87 +191,204 @@ private struct TileView: View {
     }
 }
 
-/// One row per plugin without a grid place. Long lists scroll after six rows, and to the row with
-/// the keyboard's focus ring (`NotchHostModel.listScrollTarget`).
-private struct HomeList: View {
+/// The host's tile for a plugin without one of its own: the plugin's symbol over its name.
+private struct DefaultTile: View {
+    let plugin: HomePlugin
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: plugin.symbol)
+                .font(.system(size: 24, weight: .medium))
+            Text(plugin.name)
+                .font(.system(size: 12, weight: .semibold))
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+        }
+        .foregroundStyle(.white)
+        .padding(8)
+    }
+}
+
+/// The host's screen for a plugin without one of its own: the plugin's symbol and name on a card as
+/// wide as the host offers and, when the plugin has a settings page, a button that opens it. Like
+/// any plugin's screen it adds no padding of its own.
+struct DefaultScreen: View {
+    let plugin: HomePlugin
+    let openSettings: @MainActor (_ pluginID: String?) -> Void
+
+    /// What 설정 열기 does; nil for a plugin without a settings page, which has no button.
+    var settingsAction: (@MainActor () -> Void)? {
+        guard plugin.hasSettings else { return nil }
+        return { [openSettings, plugin] in openSettings(plugin.pluginID) }
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: plugin.symbol)
+                .font(.system(size: 28, weight: .medium))
+            Text(plugin.name)
+                .font(.system(size: 15, weight: .semibold))
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+            if let settingsAction {
+                Button(action: settingsAction) {
+                    Text("설정 열기")
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.vertical, 6)
+                        .padding(.horizontal, 14)
+                        .background(Capsule().fill(.white.opacity(0.14)))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.vertical, 20)
+        .frame(maxWidth: .infinity)
+        .background(RoundedRectangle(cornerRadius: HomeGrid.cornerRadius, style: .continuous).fill(Color(white: 0.11)))
+    }
+}
+
+/// The plugins without a grid place as one row of round icons, as wide as the grid. It scrolls
+/// sideways when they are more than the grid holds, and to the icon with the keyboard's focus ring
+/// (`NotchHostModel.listScrollTarget`). In edit mode the icons carry a + badge, with room above and
+/// after them. The name of the icon under the pointer or the focus shows in a bubble over it, drawn
+/// outside the scroll view so the strip does not clip it.
+private struct HomeStrip: View {
     let host: NotchHostModel
     let plugins: [HomePlugin]
 
-    static let rowHeight: CGFloat = 28
-    static let spacing: CGFloat = 4
-    static let visibleRows = 6
+    static let badgeRoom: CGFloat = 4
 
     var body: some View {
-        if plugins.count > Self.visibleRows {
-            ScrollViewReader { proxy in
-                ScrollView { rows }
-                    .scrollIndicators(.never)
-                    .frame(height: CGFloat(Self.visibleRows) * Self.rowHeight + CGFloat(Self.visibleRows - 1) * Self.spacing)
-                    // The focus also outlives a visit to a plugin's screen, where the list is gone.
-                    .onAppear { if let target = host.listScrollTarget { proxy.scrollTo(target) } }
-                    .onChange(of: host.listScrollTarget) { _, target in
-                        if let target { proxy.scrollTo(target) }
+        let room = host.home.isEditing ? Self.badgeRoom : 0
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal) {
+                HStack(spacing: HomeGrid.gap) {
+                    ForEach(plugins, id: \.pluginID) { plugin in
+                        StripIcon(host: host, plugin: plugin)
+                            .id(plugin.pluginID)
                     }
+                }
+                .padding(.top, room)
+                .padding(.trailing, room)
             }
-        } else {
-            rows
-        }
-    }
-
-    private var rows: some View {
-        VStack(spacing: Self.spacing) {
-            ForEach(plugins, id: \.pluginID) { plugin in
-                HomeRow(host: host, plugin: plugin)
-                    .id(plugin.pluginID)
+            .scrollIndicators(.never)
+            .frame(width: HomeGrid.size.width, height: HomeGrid.stripIcon + room, alignment: .leading)
+            .overlayPreferenceValue(StripBubbleKey.self) { bubble in
+                if let bubble {
+                    GeometryReader { proxy in
+                        BubblePlacement(icon: proxy[bubble.icon]) { StripBubble(name: bubble.name) }
+                    }
+                    .allowsHitTesting(false)
+                }
+            }
+            // The focus also outlives a visit to a plugin's screen, where the strip is gone.
+            .onAppear { if let target = host.listScrollTarget { proxy.scrollTo(target) } }
+            .onChange(of: host.listScrollTarget) { _, target in
+                if let target { proxy.scrollTo(target) }
             }
         }
     }
 }
 
-/// The plugin's icon and name. It opens the plugin's screen; in edit mode a plugin with a tile has
-/// a button that puts the tile on the grid.
-private struct HomeRow: View {
+/// A plugin's symbol on a circle, with its name in a bubble while the pointer or the keyboard's
+/// focus is on it, and as the VoiceOver label. It opens the plugin's screen; in edit mode it puts the
+/// plugin on the grid (`NotchHostModel.tapHomePlugin(_:)`).
+private struct StripIcon: View {
     let host: NotchHostModel
     let plugin: HomePlugin
 
     var body: some View {
-        let home = host.home
-        let editing = home.isEditing
-        HStack(spacing: 8) {
+        let editing = host.home.isEditing
+        let hovered = host.home.hoveredIcon == plugin.pluginID
+        let showsName = hovered || (!editing && host.keyboard.focus == plugin.pluginID)
+        let size = HomeGrid.stripIcon
+        Button {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { host.tapHomePlugin(plugin.pluginID) }
+        } label: {
             Image(systemName: plugin.symbol)
-                .frame(width: 20)
-            Text(plugin.name)
-                .lineLimit(1)
-            Spacer(minLength: 0)
-            if editing {
-                if plugin.tile != nil {
-                    Button {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { _ = home.add(plugin.pluginID) }
-                    } label: {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.system(size: 16))
-                            .symbolRenderingMode(.palette)
-                            .foregroundStyle(.white, .green)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!home.canAdd(plugin.pluginID))
-                    .help("격자에 넣기")
-                }
-            } else if plugin.tab != nil {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.45))
+                .font(.system(size: 15, weight: .medium))
+                .frame(width: size, height: size)
+                .background(Circle().fill(.white.opacity(0.12)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        // Inside the circle: the strip clips what lies outside it.
+        .overlay {
+            if !editing && host.keyboard.focus == plugin.pluginID {
+                Circle().strokeBorder(.white.opacity(0.9), lineWidth: 2).allowsHitTesting(false)
             }
         }
-        .font(.system(size: 13, weight: .medium))
-        .padding(.horizontal, 10)
-        .frame(maxWidth: .infinity, minHeight: HomeList.rowHeight, maxHeight: HomeList.rowHeight)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.white.opacity(0.08)))
-        .homeFocusRing(!editing && host.keyboard.focus == plugin.pluginID, cornerRadius: 8)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if !editing, plugin.tab != nil { host.open(pluginID: plugin.pluginID) }
+        .overlay(alignment: .topTrailing) {
+            if editing {
+                Image(systemName: "plus.circle.fill")
+                    .font(.system(size: 14))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, .green)
+                    .offset(x: HomeStrip.badgeRoom, y: -HomeStrip.badgeRoom)
+                    .allowsHitTesting(false)
+            }
         }
+        .onHover { host.home.setHovering($0, icon: plugin.pluginID) }
+        .onDisappear { host.home.setHovering(false, icon: plugin.pluginID) }
+        .anchorPreference(key: StripBubbleKey.self, value: .bounds) { icon in
+            showsName ? StripBubbleKey.Bubble(name: plugin.name, icon: icon, isHovered: hovered) : nil
+        }
+        .accessibilityLabel(plugin.name)
+        .accessibilityHint(editing ? "위젯으로 올려요" : "")
+    }
+}
+
+/// The strip icon whose name shows, the one under the pointer before the one with the focus.
+private struct StripBubbleKey: PreferenceKey {
+    struct Bubble {
+        let name: String
+        let icon: Anchor<CGRect>
+        let isHovered: Bool
+    }
+
+    static var defaultValue: Bubble? { nil }
+
+    static func reduce(value: inout Bubble?, nextValue: () -> Bubble?) {
+        guard let next = nextValue(), value == nil || (next.isHovered && value?.isHovered == false) else { return }
+        value = next
+    }
+}
+
+/// A strip icon's name on a small light capsule, on one line: a name wider than the width it is
+/// offered ends in an ellipsis (the icon's VoiceOver label keeps all of it).
+private struct StripBubble: View {
+    let name: String
+
+    var body: some View {
+        Text(name)
+            .font(.system(size: 11, weight: .semibold))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .foregroundStyle(.black)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(.white.opacity(0.92)))
+    }
+}
+
+/// Places its one subview, the bubble, just above `icon`: centred on it, but no wider than the
+/// strip and kept within its width so it stays inside the notch.
+private struct BubblePlacement: Layout {
+    let icon: CGRect
+
+    static let gap: CGFloat = 4
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        proposal.replacingUnspecifiedDimensions()
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let bubble = subviews.first else { return }
+        let size = bubble.sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+        let x = max(min(icon.midX - size.width / 2, bounds.width - size.width), 0)
+        bubble.place(at: CGPoint(x: bounds.minX + x, y: bounds.minY + icon.minY - Self.gap - size.height), proposal: ProposedViewSize(size))
     }
 }
 
