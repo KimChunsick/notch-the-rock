@@ -342,7 +342,7 @@ struct KeyboardTests {
         defer { fixture.cleanUp() }
         let host = sampleHost()
         let notchRect = CGRect(x: 646, y: 924, width: 179, height: 32)
-        let home = NotchLayout.metrics(for: .expanded, notch: notchRect.size, hasActivity: false, content: CGSize(width: 390, height: 200))
+        let home = NotchLayout.metrics(for: .expanded, notch: notchRect.size, content: CGSize(width: 390, height: 200))
         var pointer = NotchPointer(notchRect: notchRect, metrics: home)
         let away = CGPoint(x: 100, y: 300)
         let inside = CGPoint(x: notchRect.midX, y: 800)
