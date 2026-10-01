@@ -18,8 +18,8 @@ import Testing
     /// Blue like the menu bar around the shape, so its edges stand out from the black.
     static let backdrop = Color(red: 0, green: 0.2, blue: 1)
     static let margin: CGFloat = 20
-    /// The margin the host keeps between a screen and the shape's left, right and bottom edges (D-47).
-    nonisolated static let edgePadding: CGFloat = 20
+    /// The margin the host keeps between a screen and the shape's left, right and bottom edges (D-58).
+    nonisolated static let edgePadding: CGFloat = 18
 
     struct Gaps: CustomStringConvertible {
         var content: CGSize
