@@ -123,7 +123,7 @@ enum SampleFixture {
         let content = try #require(host.tabs.first?.tab.content)
         let ideal = NSHostingView(rootView: content).fittingSize
         for width in [ideal.width, ideal.width + 80] {
-            let insets = try inkInsets(content.frame(width: width))
+            let insets = try await inkInsets(content.frame(width: width))
             print("R15 template screen at \(width) pt (ideal \(ideal)): ink insets left \(insets.left) right \(insets.right) pt")
             #expect(insets.left <= 2 && insets.right <= 2, "the template screen does not reach both edges of \(width) pt: \(insets)")
         }
@@ -132,23 +132,32 @@ enum SampleFixture {
 
     /// How far the outermost ink of `view` (any channel at least 14 over black, as the end-to-end
     /// capture counts it) stays from its left and right edges, drawn offscreen at its fitting size.
-    private func inkInsets(_ view: some View) throws -> (left: CGFloat, right: CGFloat) {
+    /// It sleeps instead of running the main run loop and scans the pixels off the main actor, so
+    /// other suites' main-actor tests keep their deadlines meanwhile.
+    private func inkInsets(_ view: some View) async throws -> (left: CGFloat, right: CGFloat) {
         let hosting = NSHostingView(rootView: view.environment(\.colorScheme, .dark))
         let window = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
         window.appearance = NSAppearance(named: .darkAqua)
         window.contentView = hosting
         window.setContentSize(hosting.fittingSize)
         hosting.layoutSubtreeIfNeeded()
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        try await Task.sleep(for: .milliseconds(50))
         let rep = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
         hosting.cacheDisplay(in: hosting.bounds, to: rep)
         let image = try #require(rep.cgImage)
+        let ink = try #require(await Task.detached { Self.inkColumns(image) }.value, "no ink in \(hosting.bounds.size)")
+        let scale = CGFloat(image.width) / hosting.bounds.width
+        return (CGFloat(ink.lowerBound) / scale, CGFloat(image.width - 1 - ink.upperBound) / scale)
+    }
+
+    /// The leftmost and rightmost pixel columns holding ink; nil without any.
+    nonisolated private static func inkColumns(_ image: CGImage) -> ClosedRange<Int>? {
         let width = image.width, height = image.height
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        let context = try #require(CGContext(
+        guard let context = CGContext(
             data: &pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ))
+        ) else { return nil }
         context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
         var minX = width, maxX = -1
         for y in 0..<height {
@@ -160,8 +169,6 @@ enum SampleFixture {
                 }
             }
         }
-        try #require(maxX >= 0, "no ink in \(hosting.bounds.size)")
-        let scale = CGFloat(width) / hosting.bounds.width
-        return (CGFloat(minX) / scale, CGFloat(width - 1 - maxX) / scale)
+        return maxX >= 0 ? minX...maxX : nil
     }
 }

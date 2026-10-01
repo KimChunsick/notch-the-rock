@@ -41,7 +41,7 @@ import Testing
         host.open(pluginID: plugin.pluginID)
         #expect(host.screen == .detail(pluginID: plugin.pluginID))
         let canvas = NotchLayout.canvasSize
-        let image = try await NotchActivityRenderTests().settledCapture(NotchRootView(host: host, notchSize: Self.notch, openSettings: { _ in }), size: canvas)
+        let image = try await NotchActivityRenderTests().settledCapture(host: host, notchSize: Self.notch)
         let scale = CGFloat(image.width) / canvas.width
         let scan = try #require(await Task.detached { Self.scan(image, scale: scale) }.value, "no shape in \(name)")
         if let directory = ProcessInfo.processInfo.environment["NOTCH_RENDER_DIR"] {

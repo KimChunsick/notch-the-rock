@@ -35,14 +35,14 @@ import Testing
     }
 
     /// Draws the root view collapsed with `leading` and `trailing` posted as a live activity, until
-    /// two captures in a row are the same (the shape springs to the measured wings), and measures
-    /// the ink. Writes `R22-render-<name>-T88.png` (the top of the canvas) when NOTCH_RENDER_DIR is set.
+    /// the shape has sprung to the measured wings and settled, and measures the ink. Writes
+    /// `R22-render-<name>-T88.png` (the top of the canvas) when NOTCH_RENDER_DIR is set.
     func measure(_ name: String, notchHeight: CGFloat, leading: some View, trailing: some View) async throws -> Insets {
         let notch = CGSize(width: Self.notchWidth, height: notchHeight)
         let host = NotchHostModel()
         host.post(LiveActivity(id: "stand-in") { leading } trailing: { trailing }, from: "com.example.activity")
         let canvas = NotchLayout.canvasSize
-        let image = try await settledCapture(NotchRootView(host: host, notchSize: notch, openSettings: { _ in }), size: canvas)
+        let image = try await settledCapture(host: host, notchSize: notch)
         let scale = CGFloat(image.width) / canvas.width
         let top = try #require(image.cropping(to: CGRect(x: 0, y: 0, width: image.width, height: Int((notchHeight + 12) * scale))))
         if let directory = ProcessInfo.processInfo.environment["NOTCH_RENDER_DIR"] {
@@ -54,11 +54,21 @@ import Testing
         return insets
     }
 
-    /// Draws `view` offscreen in a borderless window that is never shown, again until two captures in
-    /// a row are the same (at most 2 s). It sleeps between captures instead of running the main run
-    /// loop, so other suites' main-actor tests keep their deadlines meanwhile.
-    func settledCapture(_ view: some View, size: CGSize) async throws -> CGImage {
-        let hosting = NSHostingView(rootView: view.background(Self.backdrop).environment(\.colorScheme, .dark))
+    /// Draws the root view for `host` offscreen in a borderless window that is never shown, until the
+    /// shape has settled (at most 40 captures). Two identical captures alone do not show that: while
+    /// other suites hold the main actor no update may run between them, and both are the frame from
+    /// before the host measured what it shows. The shape has settled once its first target (wings and
+    /// content still unmeasured, at zero) has given way to a later one, the shape as drawn has reached
+    /// the newest target, and the capture then is the same as the one before. It sleeps between
+    /// captures instead of running the main run loop, so other suites' main-actor tests keep their
+    /// deadlines meanwhile.
+    func settledCapture(host: NotchHostModel, notchSize: CGSize) async throws -> CGImage {
+        var targets: [NotchLayout.Metrics] = []
+        var drawn: NotchLayout.Metrics?
+        let root = NotchRootView(host: host, notchSize: notchSize, openSettings: { _ in },
+                                 metricsChanged: { targets.append($0) }, shapeDrawn: { drawn = $0 })
+        let size = NotchLayout.canvasSize
+        let hosting = NSHostingView(rootView: root.background(Self.backdrop).environment(\.colorScheme, .dark))
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: true)
         window.appearance = NSAppearance(named: .darkAqua)
         window.contentView = hosting
@@ -72,7 +82,7 @@ import Testing
             hosting.cacheDisplay(in: hosting.bounds, to: capture)
             let data = capture.tiffRepresentation
             rep = capture
-            if data != nil && data == previous { break }
+            if targets.count > 1 && drawn == targets.last && data != nil && data == previous { break }
             previous = data
         }
         return try #require(rep?.cgImage)
