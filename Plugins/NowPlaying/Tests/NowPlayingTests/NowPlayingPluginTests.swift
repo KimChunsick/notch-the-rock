@@ -55,6 +55,27 @@ private func makePlugin(launcher: FakeLauncher, clock: VirtualClock = VirtualClo
     #expect(model.artwork == nil)
 }
 
+/// A 4000 × 4000 cover is decoded as a thumbnail no larger than `artworkMaxPixelSize`. A payload over
+/// `maxArtworkBytes` is refused before decoding even when it holds a valid image: the rest of the
+/// line applies and the placeholder shows instead of the previous cover.
+@MainActor
+@Test func R08__large_artwork_is_downsampled_and_oversized_payloads_are_refused() throws {
+    let model = NowPlayingModel()
+    model.apply(try #require(HelperLine(infoLine(artwork: artworkObject(solidPNG(side: 4000))))))
+    let cover = try #require(model.artwork)
+    #expect(max(cover.width, cover.height) == NowPlayingModel.artworkMaxPixelSize)
+    #expect(cover.width == cover.height)
+
+    var oversized = samplePNG()
+    oversized.append(Data(count: HelperLine.maxArtworkBytes))
+    let line = try #require(HelperLine(infoLine(title: "Huge cover", artwork: artworkObject(oversized))))
+    guard case .info(_, let artwork) = line else { Issue.record("not an info line: \(line)"); return }
+    #expect(artwork == .removed)
+    model.apply(line)
+    #expect(model.track?.title == "Huge cover")
+    #expect(model.artwork == nil)
+}
+
 /// The wings appear while an item plays (priority 100) or is paused (priority 0) and go away when
 /// nothing plays or the plugin is deactivated. A line that changes neither keeps the posted
 /// activity, whose views follow the model; a line the plugin cannot read changes nothing.

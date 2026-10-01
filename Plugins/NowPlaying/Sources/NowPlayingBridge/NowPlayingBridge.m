@@ -99,8 +99,14 @@ static NSString *stringValue(id value) {
     return [value isKindOfClass:NSString.class] && [value length] > 0 ? value : nil;
 }
 
-static void putNumber(NSMutableDictionary *line, NSString *key, id value) {
-    if ([value isKindOfClass:NSNumber.class] && isfinite([value doubleValue])) line[key] = value;
+// The ranges the plugin's reader takes (TrackInfo.secondsRange and rateRange in HelperLine.swift):
+// up to a week for a length or position, -4...4 for a rate. A value outside is left out of the line.
+static const double MaxSeconds = 604800, MaxRate = 4;
+
+static void putNumber(NSMutableDictionary *line, NSString *key, id value, double min, double max) {
+    if (![value isKindOfClass:NSNumber.class]) return;
+    double number = [value doubleValue];
+    if (isfinite(number) && number >= min && number <= max) line[key] = value;
 }
 
 static NSString *sourceBundleIdentifier(CFTypeRef client) {
@@ -129,9 +135,9 @@ static void writeState(NSDictionary *info, BOOL playing, NSString *bundleIdentif
     NSMutableDictionary *line = [NSMutableDictionary dictionaryWithDictionary:@{@"type": @"info", @"title": title}];
     if (stringValue(info[KeyArtist])) line[@"artist"] = info[KeyArtist];
     if (stringValue(info[KeyAlbum])) line[@"album"] = info[KeyAlbum];
-    putNumber(line, @"duration", info[KeyDuration]);
-    putNumber(line, @"elapsed", info[KeyElapsed]);
-    putNumber(line, @"rate", info[KeyRate]);
+    putNumber(line, @"duration", info[KeyDuration], 0, MaxSeconds);
+    putNumber(line, @"elapsed", info[KeyElapsed], 0, MaxSeconds);
+    putNumber(line, @"rate", info[KeyRate], -MaxRate, MaxRate);
     // The app's own sample time; without one, now is when the elapsed time was read.
     NSDate *sampled = [info[KeyTimestamp] isKindOfClass:NSDate.class] ? info[KeyTimestamp] : [NSDate date];
     line[@"timestamp"] = @(sampled.timeIntervalSince1970);

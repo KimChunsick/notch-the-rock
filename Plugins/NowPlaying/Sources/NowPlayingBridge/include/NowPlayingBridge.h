@@ -23,7 +23,8 @@
 ///      "artwork":{"mime":"image/jpeg","data":"<base64>"}}
 ///
 /// `none` means nothing is playing. In `info` only `type`, `title`, `timestamp` and `playing` are
-/// always present; `elapsed` was sampled at `timestamp` (seconds since 1970). `artwork` is present
+/// always present; `elapsed` was sampled at `timestamp` (seconds since 1970). `duration` and
+/// `elapsed` are left out unless within 0...604800 s, `rate` unless within -4...4. `artwork` is present
 /// only when it changed since the previous line: an object with the new image, or null when the
 /// image went away.
 void nowplaying_stream(void *interpreter, void *cv) __attribute__((noreturn));

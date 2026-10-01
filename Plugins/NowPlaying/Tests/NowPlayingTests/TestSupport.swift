@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ImageIO
 import NotchKit
 import os
 import SwiftUI
@@ -185,4 +186,19 @@ func samplePNG(side: Int = 120, hue: Double = 0.6) -> Data {
         }
     }
     return rep.representation(using: .png, properties: [:])!
+}
+
+/// A PNG of one colour, quick to make at any size.
+func solidPNG(side: Int) -> Data {
+    let context = CGContext(
+        data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    )!
+    context.setFillColor(CGColor(red: 0.8, green: 0.3, blue: 0.2, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: side, height: side))
+    let data = NSMutableData()
+    let destination = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil)!
+    CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+    CGImageDestinationFinalize(destination)
+    return data as Data
 }

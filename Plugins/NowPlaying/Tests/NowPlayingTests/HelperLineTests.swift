@@ -93,6 +93,65 @@ func R08__malformed_lines_are_ignored(line: String) {
     #expect(timeText(3723) == "1:02:03")
 }
 
+private func trackOf(_ line: HelperLine?) -> TrackInfo? {
+    if case .info(let info, _) = line { info } else { nil }
+}
+
+/// A duration or elapsed time outside 0…604 800 s, or a rate outside −4…4, is dropped from the line,
+/// and the rest of the line still applies. The limits themselves are kept.
+@Test func R08__out_of_range_numbers_are_dropped_from_the_line() throws {
+    let longDuration = try #require(trackOf(HelperLine(infoLine(duration: 1e20))))
+    #expect(longDuration.duration == nil)
+    #expect(longDuration.title == "Blue in Green" && longDuration.elapsed == 12 && longDuration.rate == 1)
+    #expect(try #require(trackOf(HelperLine(infoLine(duration: -1e20)))).duration == nil)
+    #expect(try #require(trackOf(HelperLine(infoLine(duration: 604_800.5)))).duration == nil)
+
+    let longElapsed = try #require(trackOf(HelperLine(infoLine(elapsed: 1e300))))
+    #expect(longElapsed.elapsed == nil)
+    #expect(longElapsed.duration == 337.5)
+    #expect(try #require(trackOf(HelperLine(infoLine(elapsed: -1)))).elapsed == nil)
+
+    let fast = try #require(trackOf(HelperLine(infoLine(rate: 1e9))))
+    #expect(fast.rate == nil)
+    #expect(fast.duration == 337.5 && fast.elapsed == 12)
+    #expect(try #require(trackOf(HelperLine(infoLine(rate: -1e9)))).rate == nil)
+
+    let limits = try #require(trackOf(HelperLine(infoLine(duration: 604_800, elapsed: 0, rate: -4))))
+    #expect(limits.duration == 604_800 && limits.elapsed == 0 && limits.rate == -4)
+    #expect(try #require(trackOf(HelperLine(infoLine(elapsed: 604_800, rate: 4)))).rate == 4)
+
+    // NaN- and infinity-like strings are not numbers: dropped too.
+    let words = try #require(trackOf(HelperLine(
+        #"{"type":"info","title":"t","timestamp":1,"playing":true,"duration":"NaN","elapsed":"Infinity","rate":"nan"}"#
+    )))
+    #expect(words.duration == nil && words.elapsed == nil && words.rate == nil)
+}
+
+/// At the limits the elapsed time stays within the item (or within a week when the app gives no
+/// length), even when the rate times a far-off sample time overflows, and the time text never traps.
+@Test func R08__elapsed_time_math_stays_in_range_at_the_limits() {
+    let sampled = Date(timeIntervalSince1970: 1_790_000_000)
+    let week = TrackInfo(title: "t", duration: 604_800, elapsed: 604_800, sampledAt: sampled, rate: 4, isPlaying: true)
+    #expect(week.elapsed(at: sampled + 1e9) == 604_800)
+    #expect(week.progress(at: sampled + 1e9) == 1)
+    var rewinding = week
+    rewinding.rate = -4
+    #expect(rewinding.elapsed(at: sampled + 1e9) == 0)
+    #expect(rewinding.progress(at: sampled + 1e9) == 0)
+
+    // 4 × (now − a sample time 1e308 s back) is infinite.
+    let farPast = TrackInfo(title: "t", elapsed: 604_800, sampledAt: Date(timeIntervalSince1970: -1e308), rate: 4, isPlaying: true)
+    #expect(farPast.elapsed(at: sampled) == 604_800)
+    let farFuture = TrackInfo(title: "t", elapsed: 0, sampledAt: Date(timeIntervalSince1970: 1e308), rate: 4, isPlaying: true)
+    #expect(farFuture.elapsed(at: sampled) == 0)
+
+    #expect(timeText(604_800) == "168:00:00")
+    #expect(timeText(1e20) == "168:00:00")
+    #expect(timeText(.infinity) == "168:00:00")
+    #expect(timeText(-1e20) == "0:00")
+    #expect(timeText(.nan) == "0:00")
+}
+
 /// Play/pause asks for the state the button shows, and every command reaches the helper as
 /// `/usr/bin/perl -e <driver> -- <library> send <command>`. (That the driver calls the matching entry
 /// point is checked with real perl runs in NowPlayingPluginTests.)
