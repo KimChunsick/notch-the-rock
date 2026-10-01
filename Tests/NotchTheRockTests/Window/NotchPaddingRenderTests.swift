@@ -194,6 +194,14 @@ import Testing
         expectEqualPadding(gaps, "home")
     }
 
+    /// The host's screen for a plugin without one (Hello): the card spreads across the width the
+    /// band offers, with the gear for its settings page.
+    @Test func R35__the_fallback_screen_keeps_the_same_padding_on_every_side() async throws {
+        let plugin = HomePlugin(pluginID: "com.example.hello", name: "인사", symbol: "hand.wave", tab: nil, tile: nil, hasSettings: true)
+        let gaps = try await measureScreen("fallback-screen", "인사", hasSettings: true, DefaultScreen(plugin: plugin, openSettings: { _ in }))
+        expectScreenPadding(gaps, "fallback-screen")
+    }
+
     @Test func R15__the_battery_screen_keeps_the_same_padding_on_every_side() async throws {
         let gaps = try await measureScreen("battery", "배터리", hasSettings: false, BatteryStandIn())
         expectScreenPadding(gaps, "battery")

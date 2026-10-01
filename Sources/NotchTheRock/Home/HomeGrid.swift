@@ -31,11 +31,15 @@ enum HomeGrid {
         )
     }
 
+    /// Width and height of an icon in the strip under the grid.
+    static let stripIcon: CGFloat = 36
+
     /// The grid place nearest to a tile of `size` whose top-left corner is at `point`: the nearest
-    /// column and the nearest row, kept inside the grid.
+    /// cell's column and the nearest row, kept inside the grid.
     static func origin(nearest point: CGPoint, for size: TileSize) -> GridOrigin {
         let step = unit + gap
-        let column = Int((point.x / step).rounded())
+        let cell = step * CGFloat(HomeLayout.columnStep)
+        let column = Int((point.x / cell).rounded()) * HomeLayout.columnStep
         let row = Int((point.y / (step * CGFloat(HomeLayout.rowHeight))).rounded()) * HomeLayout.rowHeight
         return GridOrigin(
             column: min(max(column, 0), HomeLayout.columns - size.columns),

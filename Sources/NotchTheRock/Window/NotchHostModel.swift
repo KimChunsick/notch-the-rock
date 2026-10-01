@@ -26,7 +26,7 @@ enum NotchState: Equatable {
 /// priority tie the most recently posted one wins. Time-bound items are removed by `expireDue()`,
 /// which the model schedules itself for the next deadline.
 ///
-/// The expanded notch shows the home (`screen`): plugin tiles and a list, see `HomeModel`. API for
+/// The expanded notch shows the home (`screen`): plugin tiles and a strip of icons, see `HomeModel`. API for
 /// the keyboard and URL plans (P17, P18): `showHome()`, `open(pluginID:)`, `back()`, `escape()` and
 /// the read-only `homeEntries`.
 ///
@@ -92,12 +92,12 @@ final class NotchHostModel: NotchHost {
         get { home.plugins }
         set {
             home.plugins = newValue
-            if case .detail(let pluginID) = screen, home.plugin(pluginID)?.tab == nil { screen = .home }
+            if case .detail(let pluginID) = screen, home.plugin(pluginID) == nil { screen = .home }
         }
     }
 
     /// The plugin tabs, in load order. `PluginCatalog` still hands over tabs only, so setting them
-    /// makes tab-only plugins named by their tab title: list rows without tiles. Once the catalog
+    /// makes tab-only plugins named by their tab title: strip icons without tiles. Once the catalog
     /// sets `plugins` with each plugin's tile and manifest name and symbol, this goes away.
     var tabs: [Tab] {
         get { plugins.compactMap { plugin in plugin.tab.map { Tab(pluginID: plugin.pluginID, tab: $0) } } }
@@ -106,7 +106,7 @@ final class NotchHostModel: NotchHost {
         }
     }
 
-    /// The home in the order it is shown, grid tiles then list rows, with each plugin's name.
+    /// The home in the order it is shown, grid tiles then strip icons, with each plugin's name.
     var homeEntries: [HomeEntry] { home.entries }
 
     private var activities: [ActivityKey: PostedActivity] = [:]
@@ -197,13 +197,25 @@ final class NotchHostModel: NotchHost {
         holdUnlessHovered()
     }
 
-    /// Expands the notch on the plugin's screen. A plugin that is not running or has no screen
-    /// (unknown id, display-only tile) opens the home instead.
+    /// Expands the notch on the plugin's screen: its own tab, or the host's fallback screen
+    /// (`DefaultScreen`) for a plugin without one. A plugin that is not running opens the home instead.
     func open(pluginID: String) {
-        screen = home.plugin(pluginID)?.tab == nil ? .home : .detail(pluginID: pluginID)
+        screen = home.plugin(pluginID) == nil ? .home : .detail(pluginID: pluginID)
         keyboard.query = nil
         setExpanded(true)
         holdUnlessHovered()
+    }
+
+    /// A click on a plugin's tile or strip icon in the home. Outside edit mode it opens the plugin's
+    /// screen (`open(pluginID:)`); in edit mode a strip icon puts the plugin on the grid
+    /// (`HomeModel.add(_:)`), while a tile is moved, resized or removed with its own controls.
+    func tapHomePlugin(_ pluginID: String) {
+        guard home.plugin(pluginID) != nil else { return }
+        if home.isEditing {
+            if home.layout.tile(for: pluginID) == nil { home.add(pluginID) }
+        } else {
+            open(pluginID: pluginID)
+        }
     }
 
     private func holdUnlessHovered() {

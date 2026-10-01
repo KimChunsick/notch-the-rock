@@ -1,5 +1,5 @@
-/// Arrow-key movement of the focus ring over the home: spatially between grid tiles, up and down
-/// the list, and from the grid's bottom into the list and back.
+/// Arrow-key movement of the focus ring over the home: spatially between grid tiles, left and right
+/// along the strip under the grid, and from the grid's bottom into the strip and back.
 enum HomeDirection {
     case up
     case down
@@ -9,7 +9,7 @@ enum HomeDirection {
 
 struct HomeFocusMap {
     let tiles: [TilePlacement]
-    /// The list rows from top to bottom.
+    /// The strip's icons from left to right.
     let list: [String]
 
     /// The entry an arrow moves the focus to. With no focus (or a focus on an entry that is gone)
@@ -19,9 +19,10 @@ struct HomeFocusMap {
         guard let current else { return ordered.first?.pluginID ?? list.first }
         if let index = list.firstIndex(of: current) {
             switch direction {
-            case .down: return list[min(index + 1, list.count - 1)]
-            case .up: return index > 0 ? list[index - 1] : (bottomTile(ordered)?.pluginID ?? current)
-            case .left, .right: return current
+            case .right: return list[min(index + 1, list.count - 1)]
+            case .left: return list[max(index - 1, 0)]
+            case .up: return bottomTile(ordered)?.pluginID ?? current
+            case .down: return current
             }
         }
         guard let tile = ordered.first(where: { $0.pluginID == current }) else {
@@ -54,7 +55,7 @@ struct HomeFocusMap {
         return scored.min { ($0.1, $0.2, $0.3) < ($1.1, $1.2, $1.3) }?.0
     }
 
-    /// The lowest tile, leftmost first: where Up from the list's first row goes.
+    /// The lowest tile, leftmost first: where Up from the strip goes.
     private func bottomTile(_ ordered: [TilePlacement]) -> TilePlacement? {
         ordered.min { (-Cells($0).maxY, $0.origin.column) < (-Cells($1).maxY, $1.origin.column) }
     }

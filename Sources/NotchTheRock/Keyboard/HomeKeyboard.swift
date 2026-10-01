@@ -6,7 +6,7 @@ import Observation
 @MainActor
 @Observable
 final class HomeKeyboard {
-    /// The plugin whose tile or row has the focus ring; nil until the hotkey or an arrow key.
+    /// The plugin whose tile or strip icon has the focus ring; nil until the hotkey or an arrow key.
     var focus: String?
     /// The quick search text while the search is open (possibly empty); nil when it is closed.
     var query: String? {
@@ -29,11 +29,11 @@ final class HomeKeyboard {
 }
 
 extension NotchHostModel {
-    /// Plugins whose name matches the quick search, in home order. Only plugins with a screen are
-    /// listed: a display-only tile has nothing to open.
+    /// Plugins whose name matches the quick search, in home order. Each opens its screen, the host's
+    /// fallback screen for a plugin without one of its own.
     var searchResults: [HomeEntry] {
         guard let query = keyboard.query else { return [] }
-        return homeEntries.filter { $0.opensDetail && PluginNameSearch.matches(name: $0.name, query: query) }
+        return homeEntries.filter { PluginNameSearch.matches(name: $0.name, query: query) }
     }
 
     var selectedResult: HomeEntry? {
@@ -66,8 +66,8 @@ extension NotchHostModel {
         case .left: moveFocus(.left)
         case .right: moveFocus(.right)
         case .enter:
-            guard let focus = keyboard.focus, let entry = homeEntries.first(where: { $0.pluginID == focus }) else { return false }
-            if entry.opensDetail { open(pluginID: entry.pluginID) }
+            guard let focus = keyboard.focus, homeEntries.contains(where: { $0.pluginID == focus }) else { return false }
+            open(pluginID: focus)
         case .escape:
             escape()
         case .text:
@@ -99,8 +99,8 @@ extension NotchHostModel {
         return true
     }
 
-    /// The list row to scroll into view: the focused plugin when it is a list row. The list shows
-    /// six rows at a time, so a focus further down would otherwise be out of sight.
+    /// The strip icon to scroll into view: the focused plugin when it is in the strip, which shows as
+    /// many icons as the grid is wide, so a focus further right would otherwise be out of sight.
     var listScrollTarget: String? {
         guard let focus = keyboard.focus, home.list.contains(where: { $0.pluginID == focus }) else { return nil }
         return focus

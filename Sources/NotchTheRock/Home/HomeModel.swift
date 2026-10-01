@@ -1,7 +1,8 @@
 import NotchKit
 import Observation
 
-/// One item of the home in the order it is shown: grid tiles row by row, then the list.
+/// One item of the home in the order it is shown: grid tiles row by row, then the strip's icons
+/// (`row`).
 struct HomeEntry: Equatable {
     enum Kind: Equatable {
         case tile(TileSize)
@@ -12,8 +13,6 @@ struct HomeEntry: Equatable {
     let name: String
     let symbol: String
     let kind: Kind
-    /// Whether choosing the entry opens the plugin's screen (the plugin has a tab).
-    let opensDetail: Bool
 }
 
 /// A tile on the grid with the plugin it shows.
@@ -39,6 +38,13 @@ final class HomeModel {
     private(set) var isEditing = false
     /// The plugin whose tile is being dragged in edit mode.
     private(set) var draggedTile: String?
+    /// Why the last add in edit mode put nothing on the grid; cleared by the next edit and when
+    /// editing ends.
+    private(set) var notice: String?
+    /// The strip icon under the pointer, whose name shows in a bubble over it.
+    private(set) var hoveredIcon: String?
+
+    static let fullGridNotice = "빈 칸이 없어서 위젯으로 올릴 수 없어요"
 
     /// The arrangement saved by the last edit, or loaded at launch.
     @ObservationIgnored private var stored: HomeLayout
@@ -57,10 +63,10 @@ final class HomeModel {
             .compactMap { placement in plugin(placement.pluginID).map { HomeTile(placement: placement, plugin: $0) } }
     }
 
-    /// Home plugins not on the grid, in load order: rows that open a plugin screen, and
-    /// display-only tiles taken off the grid, which edit mode can add back.
+    /// Plugins not on the grid, in load order: the icons of the strip under it, which edit mode
+    /// puts on the grid.
     var list: [HomePlugin] {
-        plugins.filter { $0.isInHome && layout.tile(for: $0.pluginID) == nil }
+        plugins.filter { layout.tile(for: $0.pluginID) == nil }
     }
 
     var entries: [HomeEntry] {
@@ -69,6 +75,16 @@ final class HomeModel {
 
     func plugin(_ pluginID: String) -> HomePlugin? {
         plugins.first { $0.pluginID == pluginID }
+    }
+
+    /// The pointer entered (`true`) or left a strip icon. A leave reported after the pointer
+    /// entered the next icon does not clear that one.
+    func setHovering(_ hovering: Bool, icon pluginID: String) {
+        if hovering {
+            hoveredIcon = pluginID
+        } else if hoveredIcon == pluginID {
+            hoveredIcon = nil
+        }
     }
 
     // MARK: Edit mode
@@ -81,6 +97,7 @@ final class HomeModel {
     func finishEditing() {
         isEditing = false
         draggedTile = nil
+        notice = nil
     }
 
     /// A tile is being dragged in edit mode; the drag holds the notch open until `endDrag(_:)`.
@@ -94,7 +111,7 @@ final class HomeModel {
         if draggedTile == pluginID { draggedTile = nil }
     }
 
-    /// Takes a tile off the grid into the list.
+    /// Takes a tile off the grid into the strip.
     func remove(_ pluginID: String) {
         edit { layout in
             layout.remove(pluginID)
@@ -103,15 +120,18 @@ final class HomeModel {
     }
 
     func canAdd(_ pluginID: String) -> Bool {
-        guard let tile = plugin(pluginID)?.tile, layout.tile(for: pluginID) == nil else { return false }
-        return layout.firstFit(tile.defaultSize) != nil
+        guard let plugin = plugin(pluginID), layout.tile(for: pluginID) == nil else { return false }
+        return layout.firstFit(plugin.tileSizes[0]) != nil
     }
 
-    /// Puts a listed plugin's tile on the grid at the first fit, at its default size.
+    /// Puts a plugin from the strip on the grid at the first fit, at its default size: its own tile's
+    /// first size, or the default tile's. When nothing fits nothing moves, and `notice` says why.
     @discardableResult
     func add(_ pluginID: String) -> Bool {
-        guard let tile = plugin(pluginID)?.tile else { return false }
-        return edit { $0.add(pluginID, size: tile.defaultSize) }
+        guard let plugin = plugin(pluginID), layout.tile(for: pluginID) == nil else { return false }
+        let added = edit { $0.add(pluginID, size: plugin.tileSizes[0]) }
+        if !added { notice = Self.fullGridNotice }
+        return added
     }
 
     func canResize(_ pluginID: String, to size: TileSize) -> Bool {
@@ -131,7 +151,7 @@ final class HomeModel {
     }
 
     private func supports(_ pluginID: String, _ size: TileSize) -> Bool {
-        plugin(pluginID)?.tile?.supportedSizes.contains(size) ?? false
+        plugin(pluginID)?.tileSizes.contains(size) ?? false
     }
 
     /// Applies `change` to the shown arrangement and saves it when it changed something.
@@ -141,11 +161,12 @@ final class HomeModel {
         guard change(&changed) else { return false }
         layout = changed
         stored = changed
+        notice = nil
         store.save(changed)
         return true
     }
 
     private static func entry(_ plugin: HomePlugin, kind: HomeEntry.Kind) -> HomeEntry {
-        HomeEntry(pluginID: plugin.pluginID, name: plugin.name, symbol: plugin.symbol, kind: kind, opensDetail: plugin.tab != nil)
+        HomeEntry(pluginID: plugin.pluginID, name: plugin.name, symbol: plugin.symbol, kind: kind)
     }
 }

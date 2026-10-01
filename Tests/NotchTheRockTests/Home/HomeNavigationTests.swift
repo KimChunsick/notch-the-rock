@@ -53,14 +53,14 @@ struct HomeNavigationTests {
         #expect(host.state == .expanded)
     }
 
-    @Test func R16__open_unknown_or_display_only_plugin_shows_home() {
+    @Test func R16__open_unknown_plugin_shows_home_and_a_tile_only_plugin_its_fallback_screen() {
         defer { fixture.cleanUp() }
         host.open(pluginID: "com.example.tab")
         host.open(pluginID: "com.example.missing")
         #expect(host.screen == .home)
         #expect(host.state == .expanded)
         host.open(pluginID: "com.example.tile")
-        #expect(host.screen == .home)
+        #expect(host.screen == .detail(pluginID: "com.example.tile"))
     }
 
     @Test func R16__show_home_expands_on_the_home() {
@@ -116,7 +116,11 @@ struct HomeNavigationTests {
         defer { fixture.cleanUp() }
         #expect(host.homeEntries.map(\.pluginID) == ["com.example.both", "com.example.tile", "com.example.tab"])
         #expect(host.homeEntries.map(\.name) == ["둘 다", "타일만", "탭만"])
-        #expect(host.homeEntries.map(\.opensDetail) == [true, false, true])
+        // Each opens a screen: its own, or the host's fallback screen for the tile-only plugin.
+        for entry in host.homeEntries {
+            host.open(pluginID: entry.pluginID)
+            #expect(host.screen == .detail(pluginID: entry.pluginID))
+        }
     }
 
     /// The catalog still hands over tabs only; they reach the home as list rows named by the tab.
@@ -124,7 +128,7 @@ struct HomeNavigationTests {
         defer { fixture.cleanUp() }
         host.tabs = [NotchHostModel.Tab(pluginID: "com.example.sample", tab: PluginTab(title: "Sample", symbol: "star") { EmptyView() })]
         #expect(host.homeEntries == [
-            HomeEntry(pluginID: "com.example.sample", name: "Sample", symbol: "star", kind: .row, opensDetail: true),
+            HomeEntry(pluginID: "com.example.sample", name: "Sample", symbol: "star", kind: .row),
         ])
         #expect(host.tabs.map(\.pluginID) == ["com.example.sample"])
     }
