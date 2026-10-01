@@ -21,10 +21,9 @@ struct UnsavedNoticeTimeline<Content: View>: View {
 /// The expanded tab: a search field over the history shown as cards in one row, pinned entries
 /// first and newest first within each group, that scrolls sideways past about three cards. Each
 /// card shows the start of a text in a fixed-width font, an image's thumbnail or a link in blue,
-/// with "<app or kind> · <time ago>" under it. Clicking a card copies it back to `pasteboard`;
-/// ← and → move a selection between the cards and Return copies the selected one, or the first.
-/// The tab is `width` wide and has a definite height however long the history is. The host adds
-/// the margin around it.
+/// with "<app or kind> · <time ago>" under it. Clicking a card copies it back to `pasteboard`; the
+/// keys follow `action(for:fieldHasText:isComposing:area:selection:count:)`. The tab is `width`
+/// wide and has a definite height however long the history is. The host adds the margin around it.
 struct ClipboardView: View {
     static let width: CGFloat = 360
     static let spacing: CGFloat = 6
@@ -39,6 +38,7 @@ struct ClipboardView: View {
     @State private var query = ""
     /// The card the arrow keys moved to; nil until the first arrow.
     @State private var selection: ClipItem.ID?
+    @FocusState private var focus: Area?
 
     /// The cards for the entries `visible`: pinned ones first, each group in history order (newest
     /// first).
@@ -46,12 +46,50 @@ struct ClipboardView: View {
         visible.filter(\.isPinned) + visible.filter { !$0.isPinned }
     }
 
-    /// The card an arrow moves the selection to, `offset` cards along `ids`. With no selection, or
-    /// one no longer among `ids`, any arrow selects the first card; at either end it stays.
-    static func selection(from current: ClipItem.ID?, moving offset: Int, in ids: [ClipItem.ID]) -> ClipItem.ID? {
-        guard !ids.isEmpty else { return nil }
-        guard let current, let index = ids.firstIndex(of: current) else { return ids[0] }
-        return ids[min(max(index + offset, 0), ids.count - 1)]
+    /// Where the keyboard focus is on the screen: the search field or the row of cards.
+    enum Area: Hashable {
+        case field, cards
+    }
+
+    /// A key the screen may take.
+    enum Key {
+        case left, right, up, down, tab, backTab, enter
+    }
+
+    /// What a key does on the screen.
+    enum KeyAction: Equatable {
+        /// The key goes on to the focused control: the field's caret or an input method.
+        case passThrough
+        /// Selects the card at the index.
+        case select(Int)
+        /// Moves the focus into the row of cards and selects the card at the index.
+        case enterCards(Int)
+        /// Moves the focus back to the search field.
+        case focusField
+        /// Copies the card at the index.
+        case copy(Int)
+    }
+
+    /// What `key` does with `count` cards, the card at `selection` selected, the focus in `area`.
+    /// ← and → select a card when the field is empty or the focus is in the row, and are the
+    /// field's caret otherwise; with no selection they select the first card, at either end they
+    /// stay. ↓ or Tab moves from the field into the row, ↑ or Shift-Tab back. Return copies the
+    /// selected card, or the first. While an input method composes, as for an unfinished Hangul
+    /// syllable, every key goes to the field, as the notch's own keys do.
+    static func action(for key: Key, fieldHasText: Bool, isComposing: Bool, area: Area, selection: Int?, count: Int) -> KeyAction {
+        guard !isComposing, count > 0 else { return .passThrough }
+        switch key {
+        case .left, .right:
+            guard area == .cards || !fieldHasText else { return .passThrough }
+            guard let selection else { return .select(0) }
+            return .select(min(max(selection + (key == .left ? -1 : 1), 0), count - 1))
+        case .down, .tab:
+            return area == .field ? .enterCards(selection ?? 0) : .passThrough
+        case .up, .backTab:
+            return area == .cards ? .focusField : .passThrough
+        case .enter:
+            return .copy(selection ?? 0)
+        }
     }
 
     var body: some View {
@@ -62,7 +100,7 @@ struct ClipboardView: View {
 
     private func content(now: Date) -> some View {
         VStack(alignment: .leading, spacing: Self.spacing) {
-            SearchField(query: $query)
+            SearchField(query: $query, focus: $focus)
             if history.isStoreUnreadable {
                 notice("저장된 기록을 읽지 못했어요. 설정에서 초기화할 수 있어요.")
             }
@@ -81,9 +119,7 @@ struct ClipboardView: View {
             }
         }
         .frame(width: Self.width)
-        .onKeyPress(.leftArrow) { moveSelection(by: -1) }
-        .onKeyPress(.rightArrow) { moveSelection(by: 1) }
-        .onKeyPress(.return) { copySelection() }
+        .onKeyPress(phases: [.down, .repeat]) { press in handle(press) }
     }
 
     private func strip(_ cards: [ClipItem], now: Date) -> some View {
@@ -106,6 +142,9 @@ struct ClipboardView: View {
             .scrollIndicators(.never)
             // As tall as a card and its caption: a sideways scroll view has no height of its own.
             .fixedSize(horizontal: false, vertical: true)
+            .focusable()
+            .focusEffectDisabled()
+            .focused($focus, equals: .cards)
             .onChange(of: selection) { _, id in
                 if let id { proxy.scrollTo(id) }
             }
@@ -118,22 +157,47 @@ struct ClipboardView: View {
         (NSApp.keyWindow?.firstResponder as? NSTextInputClient)?.hasMarkedText() == true
     }
 
-    private func moveSelection(by offset: Int) -> KeyPress.Result {
-        let ids = Self.cards(history.matching(query)).map(\.id)
-        guard !ids.isEmpty, !isComposing else { return .ignored }
-        selection = Self.selection(from: selection, moving: offset, in: ids)
-        return .handled
+    /// The key a press stands for; a press with ⌘, ⌥ or ⌃ is none of them.
+    private static func key(_ press: KeyPress) -> Key? {
+        guard press.modifiers.isDisjoint(with: [.command, .option, .control]) else { return nil }
+        switch press.key {
+        case .leftArrow: return .left
+        case .rightArrow: return .right
+        case .upArrow: return .up
+        case .downArrow: return .down
+        case .return: return .enter
+        case .tab: return press.modifiers.contains(.shift) ? .backTab : .tab
+        // AppKit sends Shift-Tab as the back-tab character.
+        case KeyEquivalent("\u{19}"): return .backTab
+        default: return nil
+        }
     }
 
-    private func copySelection() -> KeyPress.Result {
+    private func handle(_ press: KeyPress) -> KeyPress.Result {
+        guard let key = Self.key(press) else { return .ignored }
         let cards = Self.cards(history.matching(query))
-        guard !isComposing, let item = cards.first(where: { $0.id == selection }) ?? cards.first else { return .ignored }
-        copy(item)
+        let action = Self.action(
+            for: key, fieldHasText: !query.isEmpty, isComposing: isComposing, area: focus == .cards ? .cards : .field,
+            selection: cards.firstIndex { $0.id == selection }, count: cards.count
+        )
+        switch action {
+        case .passThrough:
+            return .ignored
+        case .select(let index):
+            selection = cards[index].id
+        case .enterCards(let index):
+            selection = cards[index].id
+            focus = .cards
+        case .focusField:
+            focus = .field
+        case .copy(let index):
+            copy(cards[index])
+        }
         return .handled
     }
 
     /// What pressing a card does: puts its entry back on `pasteboard`.
-    func copy(_ item: ClipItem) {
+    private func copy(_ item: ClipItem) {
         history.copy(item, to: pasteboard)
     }
 
@@ -155,6 +219,7 @@ struct ClipboardView: View {
 
 private struct SearchField: View {
     @Binding var query: String
+    var focus: FocusState<ClipboardView.Area?>.Binding
 
     var body: some View {
         HStack(spacing: 6) {
@@ -162,6 +227,7 @@ private struct SearchField: View {
                 .foregroundStyle(.secondary)
             TextField("기록 검색", text: $query)
                 .textFieldStyle(.plain)
+                .focused(focus, equals: .field)
             if !query.isEmpty {
                 Button {
                     query = ""
