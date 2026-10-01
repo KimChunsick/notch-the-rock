@@ -49,9 +49,10 @@ import Testing
     }
 
     /// The expanded notch showing `content`, with `band` over the notch, measured and placed by the
-    /// host. Writes `R15-render-<name>-T74.png` when NOTCH_RENDER_DIR is set.
-    func measure(_ name: String, minWidth: CGFloat = 0, _ content: some View, band: @escaping (CGFloat) -> some View = { _ in EmptyView() }) async throws -> Gaps {
-        let measured = IntrinsicSizeLayout(maxSize: NotchSizing.maxContentSize) { content }
+    /// host; `fill` is the width a plugin's screen is offered when it is narrower. Writes
+    /// `R15-render-<name>-T102.png` when NOTCH_RENDER_DIR is set.
+    func measure(_ name: String, minWidth: CGFloat = 0, fill: CGFloat = 0, _ content: some View, band: @escaping (CGFloat) -> some View = { _ in EmptyView() }) async throws -> Gaps {
+        let measured = IntrinsicSizeLayout(maxSize: NotchSizing.maxContentSize, minWidth: fill) { content }
         let contentSize = NSHostingView(rootView: measured.environment(\.colorScheme, .dark)).fittingSize
         let metrics = NotchLayout.metrics(for: .expanded, notch: Self.notch, content: contentSize, minWidth: minWidth)
         let canvas = CGSize(width: metrics.size.width + 2 * Self.margin, height: metrics.size.height + Self.margin)
@@ -63,7 +64,7 @@ import Testing
         )
         if let directory = ProcessInfo.processInfo.environment["NOTCH_RENDER_DIR"] {
             let data = try #require(rep.representation(using: .png, properties: [:]))
-            try data.write(to: URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent("R15-render-\(name)-T74.png"))
+            try data.write(to: URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent("R15-render-\(name)-T102.png"))
         }
         // Off the main actor: scanning the pixels of a debug build takes a while, and other suites'
         // main-actor tests wait on deadlines meanwhile.
@@ -147,18 +148,23 @@ import Testing
     func measureScreen(_ name: String, _ pluginName: String, hasSettings: Bool, _ tab: some View) async throws -> Gaps {
         let plugin = HomePlugin(pluginID: "com.example.\(name)", name: pluginName, symbol: "square", tab: nil, tile: nil, hasSettings: hasSettings)
         let host = NotchHostModel()
-        return try await measure(name, minWidth: PluginBand.minimumWidth(notch: Self.notch, plugin: plugin), tab) { width in
+        let bandWidth = PluginBand.minimumWidth(notch: Self.notch, plugin: plugin)
+        return try await measure(name, minWidth: bandWidth, fill: NotchSizing.contentWidth(filling: bandWidth), tab) { width in
             PluginBand(host: host, plugin: plugin, notchSize: Self.notch, width: width, openSettings: { _ in })
         }
     }
 
-    /// The same padding on every side, when the plugin's view decides the shape's width. When the
-    /// band needs a wider shape for the plugin's name, the view stays centred under the camera: the
-    /// back control keeps the padding on the left and nothing comes closer on the right.
+    /// The same padding on every side: when the band needs a wider shape for the plugin's name than
+    /// for its view, the host offers the view the width between the shape's paddings and the view
+    /// spreads across it.
     func expectScreenPadding(_ gaps: Gaps, _ name: String) {
-        guard gaps.content.width + 2 * (NotchLayout.openShoulder + NotchSizing.padding) < gaps.shape.width - 0.5 else {
-            return expectEqualPadding(gaps, name)
-        }
+        expectEqualPadding(gaps, name)
+    }
+
+    /// A view that keeps its own width under a wider band (a third-party view, or a message alone)
+    /// stays centred under the camera: the back control keeps the padding on the left and nothing
+    /// comes closer on the right.
+    func expectCentredScreen(_ gaps: Gaps, _ name: String) {
         #expect(abs(gaps.left - NotchSizing.padding) <= 2, "\(name) left gap \(gaps.left) pt: \(gaps)")
         #expect(abs(gaps.bottom - NotchSizing.padding) <= 2, "\(name) bottom gap \(gaps.bottom) pt: \(gaps)")
         #expect(gaps.right >= NotchSizing.padding - 2, "\(name) right gap \(gaps.right) pt: \(gaps)")
@@ -192,17 +198,17 @@ import Testing
 
     @Test func R15__the_volume_screen_keeps_the_same_padding_on_every_side() async throws {
         let gaps = try await measureScreen("volume", "볼륨", hasSettings: true, VolumeStandIn())
-        expectScreenPadding(gaps, "volume")
+        expectCentredScreen(gaps, "volume")
     }
 
     @Test func R15__the_brightness_screen_keeps_the_same_padding_on_every_side() async throws {
         let gaps = try await measureScreen("brightness", "밝기", hasSettings: true, BrightnessStandIn())
-        expectScreenPadding(gaps, "brightness")
+        expectCentredScreen(gaps, "brightness")
     }
 
     @Test func R15__the_now_playing_screen_keeps_the_same_padding_on_every_side() async throws {
         let gaps = try await measureScreen("nowplaying", "지금 재생 중", hasSettings: false, NowPlayingStandIn())
-        expectScreenPadding(gaps, "nowplaying")
+        expectCentredScreen(gaps, "nowplaying")
     }
 
     @Test func R15__the_now_playing_screen_keeps_the_same_padding_on_every_side_while_a_track_plays() async throws {
@@ -212,30 +218,74 @@ import Testing
 
     @Test func R15__the_clipboard_screen_keeps_the_same_padding_on_every_side() async throws {
         let gaps = try await measureScreen("clipboard", "클립보드", hasSettings: true, ClipboardStandIn())
-        expectScreenPadding(gaps, "clipboard")
+        expectCentredScreen(gaps, "clipboard")
     }
 
     @Test func R15__the_clipboard_screen_keeps_the_same_padding_on_every_side_with_a_short_history() async throws {
         let gaps = try await measureScreen("clipboard-rows", "클립보드", hasSettings: true, ClipboardRowsStandIn())
-        expectScreenPadding(gaps, "clipboard-rows")
+        expectCentredScreen(gaps, "clipboard-rows")
     }
 
     @Test func R15__the_system_stats_screen_keeps_the_same_padding_on_every_side() async throws {
         let gaps = try await measureScreen("systemstats", "시스템 상태", hasSettings: false, SystemStatsStandIn())
         expectScreenPadding(gaps, "systemstats")
     }
+
+    /// A view of a fixed width, narrower than the band's room, that ignores the wider offer: it keeps
+    /// its width and stays centred under the camera, the documented fallback.
+    @Test func R15__a_fixed_width_screen_stays_centred_under_a_wider_band() async throws {
+        let gaps = try await measureScreen("fixed", "고정된 화면이에요", hasSettings: false, Color.white.frame(width: 160, height: 60))
+        expectCentredScreen(gaps, "fixed")
+        #expect(abs(gaps.content.width - 160) <= 0.5, "the fixed view took the offer: \(gaps)")
+        let centred = (gaps.shape.width - gaps.content.width) / 2 - NotchLayout.openShoulder
+        #expect(abs(gaps.right - centred) <= 2, "fixed view not centred under the camera: right gap \(gaps.right) pt, centred \(centred) pt: \(gaps)")
+        #expect(gaps.right > NotchSizing.padding + 2, "the band is not wider than the fixed view: \(gaps)")
+    }
+
+    /// Under the band with a narrow view that fills what it is offered, the shape is exactly as wide
+    /// as the band needs, and a second layout pass leaves it there: the offer comes from the band's
+    /// width, not from the measured view, so the shape never creeps.
+    @Test func R15__a_filling_screen_keeps_the_band_width_across_layout_passes() async throws {
+        let fixture = HomeDefaults()
+        defer { fixture.cleanUp() }
+        let plugin = HomePlugin(
+            pluginID: "com.example.battery", name: "배터리", symbol: "battery.100percent",
+            tab: PluginTab(title: "배터리", symbol: "battery.100percent") { BatteryStandIn() }, tile: nil
+        )
+        let host = NotchHostModel(now: { .now }, pinnedExpansion: true, homeStore: fixture.store)
+        host.plugins = [plugin]
+        host.open(pluginID: plugin.pluginID)
+        var widths: [CGFloat] = []
+        let root = NotchRootView(host: host, notchSize: Self.notch, openSettings: { _ in }, metricsChanged: { widths.append($0.size.width) })
+        let hosting = NSHostingView(rootView: root.environment(\.colorScheme, .dark))
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: NotchLayout.canvasSize), styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = hosting
+        hosting.frame = NSRect(origin: .zero, size: NotchLayout.canvasSize)
+        hosting.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(100))
+        let first = try #require(widths.last, "no metrics reported")
+        hosting.needsLayout = true
+        hosting.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(100))
+        let second = try #require(widths.last)
+        let band = PluginBand.minimumWidth(notch: Self.notch, plugin: plugin)
+        print("R15 band width \(band) pt, shape \(first) then \(second) pt: \(widths)")
+        #expect(abs(first - band) <= 0.5, "shape \(first) pt under a band of \(band) pt")
+        #expect(first == second, "the shape moved on the second pass: \(widths)")
+    }
 }
 
 // MARK: Stand-ins: each repeats its plugin's tab view layout (Plugins/<Name>/Sources) with fixed values.
 
-/// `BatteryView`, fully charged.
+/// `BatteryView`, fully charged: the symbol and the percentage at either end of what it is offered.
 struct BatteryStandIn: View {
     var body: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 0) {
             Image(systemName: "battery.100percent")
                 .font(.system(size: 44))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(Color.primary)
+            Spacer(minLength: 16)
             VStack(alignment: .leading, spacing: 4) {
                 Text("100%")
                     .font(.system(size: 32, weight: .semibold, design: .rounded))
@@ -279,7 +329,8 @@ private struct BrightnessStandIn: View {
     }
 }
 
-/// `NowPlayingView` with nothing playing, as on the end-to-end capture.
+/// `NowPlayingView` with nothing playing, as on the end-to-end capture: the message keeps its own
+/// width.
 private struct NowPlayingStandIn: View {
     var body: some View {
         HStack(spacing: 14) {
@@ -298,7 +349,7 @@ private struct NowPlayingStandIn: View {
     }
 }
 
-/// `NowPlayingView` while a track plays (grey art).
+/// `NowPlayingView` while a track plays (grey art): the column stretches beside the art.
 private struct NowPlayingTrackStandIn: View {
     var body: some View {
         HStack(spacing: 14) {
@@ -316,7 +367,8 @@ private struct NowPlayingTrackStandIn: View {
                         Capsule().fill(.white.opacity(0.15))
                         Capsule().frame(width: 230 * 0.4)
                     }
-                    .frame(width: 230, height: 4)
+                    .frame(height: 4)
+                    .frame(minWidth: 230, idealWidth: 230, maxWidth: .infinity)
                     HStack {
                         Text("1:23")
                         Spacer(minLength: 0)
@@ -325,7 +377,7 @@ private struct NowPlayingTrackStandIn: View {
                     .font(.system(size: 10))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
-                    .frame(width: 230)
+                    .frame(minWidth: 230, idealWidth: 230, maxWidth: .infinity)
                 }
                 .padding(.top, 4)
                 HStack(spacing: 24) {
@@ -333,10 +385,10 @@ private struct NowPlayingTrackStandIn: View {
                     transport("pause.fill", size: 22)
                     transport("forward.fill", size: 16)
                 }
-                .frame(width: 230)
+                .frame(minWidth: 230, idealWidth: 230, maxWidth: .infinity)
             }
             .lineLimit(1)
-            .frame(width: 230, alignment: .leading)
+            .frame(minWidth: 230, idealWidth: 230, maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -422,7 +474,8 @@ private struct ClipboardSearchStandIn: View {
     }
 }
 
-/// `SystemStatsView` before the first reading: six cards of a fixed width in a 2 x 3 grid.
+/// `SystemStatsView` before the first reading: six cards, each at least 188 pt wide, in a 2 x 3 grid
+/// that stretches across what it is offered.
 private struct SystemStatsStandIn: View {
     var body: some View {
         VStack(spacing: 6) {
@@ -455,7 +508,7 @@ private struct SystemStatsStandIn: View {
                 .frame(height: 13, alignment: .leading)
         }
         .padding(6)
-        .frame(width: 188, alignment: .topLeading)
+        .frame(minWidth: 188, idealWidth: 188, maxWidth: .infinity, alignment: .topLeading)
         .lineLimit(1)
         .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
     }

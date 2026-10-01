@@ -45,8 +45,9 @@ public final class __NAME__Plugin: NotchPlugin {
     }
 }
 
-/// The expanded screen. The host sizes the notch to this view, so it keeps a size of its own:
-/// no `.frame(maxWidth: .infinity)` or `maxHeight: .infinity`. The host also adds the 16 pt edge
+/// The expanded screen. The host sizes the notch to this view, so it keeps a size of its own: no
+/// `maxHeight: .infinity`. Under a band wider than the view the host offers more width; the
+/// `maxWidth: .infinity` frame takes it, so the margins stay equal. The host also adds the 16 pt edge
 /// margin, so the outermost view has no `.padding()` and no fixed outer frame.
 struct __NAME__View: View {
     var body: some View {
@@ -55,6 +56,7 @@ struct __NAME__View: View {
                 .font(.largeTitle)
             Text("__NAME__ 플러그인이에요.")
         }
+        .frame(maxWidth: .infinity)
     }
 }
 

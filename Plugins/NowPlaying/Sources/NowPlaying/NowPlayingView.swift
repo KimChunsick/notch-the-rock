@@ -133,8 +133,9 @@ extension TransportButton {
 }
 
 /// The expanded tab: the art, the title and artist, the progress with elapsed and total time, and
-/// previous, play/pause and next. 332 pt wide while a track plays; without one the message is as wide
-/// as its text. The host adds the margin around it.
+/// previous, play/pause and next. 332 pt wide while a track plays, and offered more (under a wider
+/// band) the column stretches beside the art; without one the message is as wide as its text. The
+/// host adds the margin around it.
 struct NowPlayingView: View {
     let model: NowPlayingModel
     let send: (NowPlayingCommand) -> Void
@@ -148,7 +149,7 @@ struct NowPlayingView: View {
             switch model.state {
             case .track(let info):
                 track(info)
-                    .frame(width: Self.columnWidth, alignment: .leading)
+                    .frame(minWidth: Self.columnWidth, idealWidth: Self.columnWidth, maxWidth: .infinity, alignment: .leading)
             case .nothing:
                 message("재생 중인 음악이 없어요.")
             case .unavailable:
@@ -177,14 +178,14 @@ struct NowPlayingView: View {
                 TransportButton.playPause(for: info, size: 22, send: send)
                 TransportButton.next(size: 16, send: send)
             }
-            .frame(width: Self.columnWidth)
+            .frame(minWidth: Self.columnWidth, idealWidth: Self.columnWidth, maxWidth: .infinity)
         }
         .lineLimit(1)
     }
 }
 
-/// A thin bar filled to the item's progress over the elapsed and the total time. While playing it
-/// moves on every second from the helper's sample.
+/// A thin bar filled to the item's progress over the elapsed and the total time, `width` wide or as
+/// wide as it is offered beyond that. While playing it moves on every second from the helper's sample.
 private struct ProgressRow: View {
     let info: TrackInfo
     let width: CGFloat
@@ -192,11 +193,13 @@ private struct ProgressRow: View {
     var body: some View {
         TimelineView(.periodic(from: info.sampledAt, by: 1)) { context in
             VStack(spacing: 3) {
-                ZStack(alignment: .leading) {
-                    Capsule().fill(.white.opacity(0.15))
-                    Capsule().frame(width: width * (info.progress(at: context.date) ?? 0))
+                GeometryReader { bar in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(.white.opacity(0.15))
+                        Capsule().frame(width: bar.size.width * (info.progress(at: context.date) ?? 0))
+                    }
                 }
-                .frame(width: width, height: 4)
+                .frame(height: 4)
                 HStack {
                     Text(info.elapsed(at: context.date).map(timeText) ?? "--:--")
                     Spacer(minLength: 0)
@@ -205,8 +208,8 @@ private struct ProgressRow: View {
                 .font(.system(size: 10))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-                .frame(width: width)
             }
+            .frame(minWidth: width, idealWidth: width, maxWidth: .infinity)
         }
     }
 }

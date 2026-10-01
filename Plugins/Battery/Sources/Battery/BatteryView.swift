@@ -56,18 +56,21 @@ final class BatteryModel {
     }
 }
 
-/// The expanded tab at the size of what it draws; the host adds the margin around it.
+/// The expanded tab at the size of what it draws; the host adds the margin around it. Offered more
+/// width (under a wider band), the symbol and the percentage go to either end and the rows run across
+/// it.
 struct BatteryView: View {
     let model: BatteryModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if let status = model.status {
-                HStack(spacing: 16) {
+                HStack(spacing: 0) {
                     Image(systemName: status.glyph)
                         .font(.system(size: 44))
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(status.state == .charging ? Color.green : Color.primary)
+                    Spacer(minLength: 16)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(status.percentageText)
                             .font(.system(size: 32, weight: .semibold, design: .rounded))
@@ -96,6 +99,7 @@ struct BatteryView: View {
                             Text(app.name)
                                 .lineLimit(1)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             }
