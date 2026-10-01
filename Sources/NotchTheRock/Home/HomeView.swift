@@ -1,0 +1,299 @@
+import NotchKit
+import SwiftUI
+
+/// The home: the plugin tile grid and, below it, one row per plugin without a grid place. Always
+/// as wide as the grid; as tall as the rows in use and the list.
+struct HomeView: View {
+    let host: NotchHostModel
+
+    var body: some View {
+        let home = host.home
+        let tiles = home.tiles
+        let list = home.list
+        VStack(alignment: .leading, spacing: HomeGrid.gap) {
+            if !tiles.isEmpty || home.isEditing {
+                HomeGridView(host: host, tiles: tiles)
+            }
+            if !list.isEmpty {
+                HomeList(host: host, plugins: list)
+            }
+            if tiles.isEmpty && list.isEmpty && !home.isEditing {
+                Text("아직 켠 플러그인이 없어요")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            }
+        }
+        .foregroundStyle(.white)
+        .frame(width: HomeGrid.size.width, alignment: .topLeading)
+    }
+}
+
+/// The tiles at their grid places. In edit mode the grid shows both rows with its free slots.
+private struct HomeGridView: View {
+    let host: NotchHostModel
+    let tiles: [HomeTile]
+
+    var body: some View {
+        let editing = host.home.isEditing
+        let rows = editing ? HomeLayout.unitRows : tiles.map { $0.placement.origin.row + $0.placement.size.rows }.max() ?? 0
+        ZStack(alignment: .topLeading) {
+            if editing {
+                ForEach(0..<(HomeLayout.columns / TileSize.small.columns * HomeLayout.maxRows), id: \.self) { slot in
+                    let columns = HomeLayout.columns / TileSize.small.columns
+                    let frame = HomeGrid.frame(of: TilePlacement(
+                        pluginID: "",
+                        size: .small,
+                        origin: GridOrigin(column: slot % columns * TileSize.small.columns, row: slot / columns * HomeLayout.rowHeight)
+                    ))
+                    RoundedRectangle(cornerRadius: HomeGrid.cornerRadius, style: .continuous)
+                        .strokeBorder(.white.opacity(0.14), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                        .frame(width: frame.width, height: frame.height)
+                        .offset(x: frame.minX, y: frame.minY)
+                }
+            }
+            ForEach(tiles, id: \.placement.pluginID) { tile in
+                TileView(host: host, tile: tile)
+            }
+        }
+        .frame(width: HomeGrid.size.width, height: HomeGrid.length(rows), alignment: .topLeading)
+    }
+}
+
+/// One tile. Tapping it opens the plugin's screen when the plugin has one. In edit mode it shows
+/// a remove button and a size menu, and it can be dragged to another grid place.
+private struct TileView: View {
+    let host: NotchHostModel
+    let tile: HomeTile
+    @State private var drag: CGSize = .zero
+
+    private static let snap = Animation.spring(response: 0.3, dampingFraction: 0.8)
+
+    var body: some View {
+        let home = host.home
+        let editing = home.isEditing
+        let placement = tile.placement
+        let frame = HomeGrid.frame(of: placement)
+        let shape = RoundedRectangle(cornerRadius: HomeGrid.cornerRadius, style: .continuous)
+        ZStack {
+            shape.fill(.white.opacity(editing ? 0.14 : 0.1))
+            tile.plugin.tile?.content(placement.size)
+                .frame(width: frame.width, height: frame.height)
+                .clipShape(shape)
+                .allowsHitTesting(!editing)
+        }
+        .frame(width: frame.width, height: frame.height)
+        .contentShape(shape)
+        .overlay(alignment: .topLeading) {
+            if editing {
+                Button {
+                    withAnimation(Self.snap) { home.remove(placement.pluginID) }
+                } label: {
+                    Image(systemName: "minus.circle.fill")
+                        .font(.system(size: 16))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.black, .white.opacity(0.85))
+                }
+                .buttonStyle(.plain)
+                .help("목록으로 옮기기")
+                .offset(x: -5, y: -5)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if editing, let sizes = tile.plugin.tile?.supportedSizes, sizes.count > 1 {
+                Menu {
+                    ForEach(sizes, id: \.self) { size in
+                        Button {
+                            withAnimation(Self.snap) { _ = home.resize(placement.pluginID, to: size) }
+                        } label: {
+                            if size == placement.size {
+                                Label(Self.title(of: size), systemImage: "checkmark")
+                            } else {
+                                Text(Self.title(of: size))
+                            }
+                        }
+                        .disabled(size != placement.size && !home.canResize(placement.pluginID, to: size))
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(.white.opacity(0.85)))
+                        .foregroundStyle(.black)
+                }
+                .menuStyle(.button)
+                .menuIndicator(.hidden)
+                .buttonStyle(.plain)
+                .fixedSize()
+                .help("크기 바꾸기")
+                .padding(6)
+            }
+        }
+        .offset(drag)
+        .zIndex(drag == .zero ? 0 : 1)
+        .offset(x: frame.minX, y: frame.minY)
+        .onTapGesture {
+            if !editing, tile.plugin.tab != nil { host.open(pluginID: placement.pluginID) }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 3)
+                .onChanged { drag = $0.translation }
+                .onEnded { value in
+                    let corner = CGPoint(x: frame.minX + value.translation.width, y: frame.minY + value.translation.height)
+                    withAnimation(Self.snap) {
+                        _ = home.move(placement.pluginID, to: HomeGrid.origin(nearest: corner, for: placement.size))
+                        drag = .zero
+                    }
+                },
+            including: editing ? .all : .subviews
+        )
+    }
+
+    static func title(of size: TileSize) -> String {
+        switch size {
+        case .small: "작게 (2x2)"
+        case .wide: "넓게 (4x2)"
+        case .large: "크게 (4x4)"
+        @unknown default: "\(size.columns)x\(size.rows)"
+        }
+    }
+}
+
+/// One row per plugin without a grid place. Long lists scroll after six rows.
+private struct HomeList: View {
+    let host: NotchHostModel
+    let plugins: [HomePlugin]
+
+    static let rowHeight: CGFloat = 28
+    static let spacing: CGFloat = 4
+    static let visibleRows = 6
+
+    var body: some View {
+        if plugins.count > Self.visibleRows {
+            ScrollView { rows }
+                .scrollIndicators(.never)
+                .frame(height: CGFloat(Self.visibleRows) * Self.rowHeight + CGFloat(Self.visibleRows - 1) * Self.spacing)
+        } else {
+            rows
+        }
+    }
+
+    private var rows: some View {
+        VStack(spacing: Self.spacing) {
+            ForEach(plugins, id: \.pluginID) { plugin in
+                HomeRow(host: host, plugin: plugin)
+            }
+        }
+    }
+}
+
+/// The plugin's icon and name. It opens the plugin's screen; in edit mode a plugin with a tile has
+/// a button that puts the tile on the grid.
+private struct HomeRow: View {
+    let host: NotchHostModel
+    let plugin: HomePlugin
+
+    var body: some View {
+        let home = host.home
+        let editing = home.isEditing
+        HStack(spacing: 8) {
+            Image(systemName: plugin.symbol)
+                .frame(width: 20)
+            Text(plugin.name)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if editing {
+                if plugin.tile != nil {
+                    Button {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { _ = home.add(plugin.pluginID) }
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 16))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, .green)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!home.canAdd(plugin.pluginID))
+                    .help("격자에 넣기")
+                }
+            } else if plugin.tab != nil {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.45))
+            }
+        }
+        .font(.system(size: 13, weight: .medium))
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, minHeight: HomeList.rowHeight, maxHeight: HomeList.rowHeight)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.white.opacity(0.08)))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if !editing, plugin.tab != nil { host.open(pluginID: plugin.pluginID) }
+        }
+    }
+}
+
+/// A plugin's screen: a ‹ control with the plugin's name that returns to the home, then the
+/// plugin's own view at its own size.
+struct PluginScreenView: View {
+    let host: NotchHostModel
+    let plugin: HomePlugin
+    let tab: PluginTab
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                host.back()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(plugin.name)
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .foregroundStyle(.white.opacity(0.9))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("홈으로")
+            tab.content
+        }
+    }
+}
+
+/// The home's controls in the top band: 편집/완료 in the left wing, the settings gear in the right.
+struct HomeBand: View {
+    let home: HomeModel
+    let notchSize: CGSize
+    let width: CGFloat
+    let openSettings: @MainActor () -> Void
+
+    var body: some View {
+        let layout = BandLayout(notch: notchSize, width: width, leading: HomeChrome.editWidth, trailing: HomeChrome.gearWidth)
+        ZStack(alignment: .topLeading) {
+            Button {
+                if home.isEditing { home.finishEditing() } else { home.beginEditing() }
+            } label: {
+                Text(home.isEditing ? "완료" : "편집")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: layout.leadingFrame.width, height: layout.leadingFrame.height)
+                    .background(Capsule().fill(.white.opacity(home.isEditing ? 0.24 : 0.1)))
+                    .contentShape(Capsule())
+            }
+            .help(home.isEditing ? "편집 마치기" : "홈 편집")
+            .position(x: layout.leadingFrame.midX, y: layout.leadingFrame.midY)
+            Button(action: openSettings) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: layout.trailingFrame.width, height: layout.trailingFrame.height)
+                    .contentShape(Rectangle())
+            }
+            .help("설정")
+            .position(x: layout.trailingFrame.midX, y: layout.trailingFrame.midY)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white.opacity(0.9))
+        .frame(width: width, height: notchSize.height, alignment: .topLeading)
+    }
+}

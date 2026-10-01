@@ -4,10 +4,19 @@ import SwiftUI
 
 /// Everything drawn in the notch window. The black shape hangs from the top edge of the canvas,
 /// which is the top edge of the screen; the rest of the canvas stays transparent.
+///
+/// Every presentation but the collapsed notch is measured at its own size and the shape grows to it
+/// with the same padding on every side (`NotchSizing`); a change of size springs like opening does,
+/// also between the home and a plugin's screen.
 struct NotchRootView: View {
     let host: NotchHostModel
     let notchSize: CGSize
     let openSettings: @MainActor () -> Void
+    /// Told the shape's metrics whenever they change, so pointer tracking follows the drawn shape.
+    var metricsChanged: @MainActor (NotchLayout.Metrics) -> Void = { _ in }
+
+    /// The measured size of what the current state shows.
+    @State private var contentSize: CGSize = .zero
 
     /// Opening is a little lively; closing settles without overshoot.
     private static let openSpring = Animation.spring(response: 0.42, dampingFraction: 0.74)
@@ -15,15 +24,29 @@ struct NotchRootView: View {
 
     var body: some View {
         let state = host.state
-        let metrics = NotchLayout.metrics(for: state, notch: notchSize, hasActivity: host.liveActivity != nil)
+        let showsHomeBand = state == .expanded && host.screen == .home
+        let metrics = NotchLayout.metrics(
+            for: state,
+            notch: notchSize,
+            hasActivity: host.liveActivity != nil,
+            content: contentSize,
+            minWidth: showsHomeBand ? BandLayout.minimumWidth(notch: notchSize, leading: HomeChrome.editWidth, trailing: HomeChrome.gearWidth) : 0
+        )
         let glow = state == .attention ? host.attention?.request.accent : nil
         ZStack(alignment: .top) {
             metrics.shape
                 .fill(Color.black)
                 .background(AttentionGlow(color: glow, shape: metrics.shape))
-            content(for: state, width: metrics.size.width)
-                .frame(width: metrics.size.width, height: metrics.size.height, alignment: .top)
-                .clipShape(metrics.shape)
+            ZStack(alignment: .topLeading) {
+                content(for: state)
+                    .offset(x: metrics.content.minX, y: metrics.content.minY)
+                if showsHomeBand {
+                    HomeBand(home: host.home, notchSize: notchSize, width: metrics.size.width, openSettings: openSettings)
+                        .transition(Self.contentTransition)
+                }
+            }
+            .frame(width: metrics.size.width, height: metrics.size.height, alignment: .topLeading)
+            .clipShape(metrics.shape)
         }
         .frame(width: metrics.size.width, height: metrics.size.height)
         .contentShape(metrics.shape)
@@ -36,10 +59,11 @@ struct NotchRootView: View {
         .animation(state == .collapsed ? Self.closeSpring : Self.openSpring, value: metrics)
         .animation(Self.openSpring, value: state)
         .environment(\.colorScheme, .dark)
+        .onChange(of: metrics, initial: true) { _, metrics in metricsChanged(metrics) }
     }
 
     @ViewBuilder
-    private func content(for state: NotchState, width: CGFloat) -> some View {
+    private func content(for state: NotchState) -> some View {
         switch state {
         case .collapsed:
             if let posted = host.liveActivity {
@@ -53,28 +77,38 @@ struct NotchRootView: View {
             }
         case .hud:
             if let shown = host.hud {
-                HUDWings(hud: shown.hud, notchSize: notchSize)
+                measured(HUDContent(hud: shown.hud, notchSize: notchSize))
                     .transition(Self.contentTransition)
             }
         case .expanded:
-            ExpandedContent(host: host, notchSize: notchSize, width: width, openSettings: openSettings)
-                .transition(Self.contentTransition)
+            if case .detail(let pluginID) = host.screen, let plugin = host.home.plugin(pluginID), let tab = plugin.tab {
+                measured(PluginScreenView(host: host, plugin: plugin, tab: tab))
+                    .id(pluginID)
+                    .transition(Self.contentTransition)
+            } else {
+                measured(HomeView(host: host))
+                    .transition(Self.contentTransition)
+            }
         case .attention:
             if let pending = host.attention {
-                AttentionContent(pending: pending, notchSize: notchSize) { response in
+                measured(AttentionContent(pending: pending) { response in
                     host.respond(response, to: pending.id)
-                }
+                })
                 .id(pending.id)
                 .transition(Self.contentTransition)
             }
         case .takeover:
             if let shown = host.takeover {
-                shown.takeover.content
-                    .padding(.top, notchSize.height)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                measured(shown.takeover.content)
                     .transition(Self.contentTransition)
             }
         }
+    }
+
+    /// `content` at its own size, which becomes the size the shape grows to.
+    private func measured<Content: View>(_ content: Content) -> some View {
+        IntrinsicSizeLayout(maxSize: NotchSizing.maxContentSize) { content }
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { contentSize = $0 }
     }
 
     /// Content fades in once the shape has mostly opened and leaves quickly when it closes.
@@ -102,7 +136,7 @@ private struct AttentionGlow: View {
     }
 }
 
-/// Views on both sides of the notch, keeping the camera area in the middle free.
+/// Views on both sides of the collapsed notch, keeping the camera area in the middle free.
 private struct Wings<Leading: View, Trailing: View>: View {
     let notchSize: CGSize
     let wingWidth: CGFloat
@@ -123,21 +157,19 @@ private struct Wings<Leading: View, Trailing: View>: View {
     }
 }
 
-private struct HUDWings: View {
+/// The HUD beside the camera: symbol and title in the left wing, level bar and detail in the right.
+/// Both wings are as wide as the wider one's content, so the shape stays centered on the notch.
+private struct HUDContent: View {
     let hud: HUD
     let notchSize: CGSize
 
     var body: some View {
-        Wings(notchSize: notchSize, wingWidth: NotchLayout.hudWingWidth) {
+        WingPair(gap: notchSize.width + 2 * BandLayout.cameraClearance) {
             HStack(spacing: 6) {
                 Image(systemName: hud.symbol)
                 Text(hud.title).lineLimit(1)
-                Spacer(minLength: 0)
             }
-            .padding(.leading, 12)
-        } trailing: {
             HStack(spacing: 6) {
-                Spacer(minLength: 0)
                 if let value = hud.value {
                     Capsule()
                         .fill(.white.opacity(0.25))
@@ -152,105 +184,51 @@ private struct HUDWings: View {
                     Text(detail).monospacedDigit().lineLimit(1)
                 }
             }
-            .padding(.trailing, 12)
         }
+        .foregroundStyle(.white)
+        .font(.system(size: 12, weight: .medium))
         .accessibilityElement(children: .combine)
     }
 }
 
-/// Tab icons in the left wing, the gear in the right wing, the selected plugin's view below.
-/// `TabBarLayout` places every control of the top row clear of the camera housing; tabs that do
-/// not fit are listed in the overflow menu.
-private struct ExpandedContent: View {
-    let host: NotchHostModel
-    let notchSize: CGSize
-    let width: CGFloat
-    let openSettings: @MainActor () -> Void
+/// Two subviews either side of a gap, each in a wing as wide as the wider one: the first at the
+/// left edge, the second at the right edge. Offered less width, the wings shrink to fit.
+private struct WingPair: Layout {
+    var gap: CGFloat
 
-    var body: some View {
-        let tabs = host.tabs
-        let layout = TabBarLayout(notch: notchSize, expandedWidth: width, tabCount: tabs.count)
-        VStack(spacing: 0) {
-            ZStack(alignment: .topLeading) {
-                ForEach(Array(zip(tabs, layout.tabFrames)), id: \.0.id) { tab, frame in
-                    Button {
-                        host.selectTab(tab.pluginID)
-                    } label: {
-                        TabBarIcon(symbol: tab.tab.symbol, selected: tab.id == host.selectedTabID)
-                    }
-                    .help(tab.tab.title)
-                    .position(x: frame.midX, y: frame.midY)
-                }
-                if let frame = layout.overflowFrame {
-                    let hidden = tabs[layout.overflow]
-                    Menu {
-                        ForEach(hidden) { tab in
-                            let pluginID = tab.pluginID
-                            Toggle(isOn: Binding(
-                                get: { host.selectedTabID == pluginID },
-                                set: { _ in host.selectTab(pluginID) }
-                            )) {
-                                Label(tab.tab.title, systemImage: tab.tab.symbol)
-                            }
-                        }
-                    } label: {
-                        TabBarIcon(symbol: "ellipsis", selected: hidden.contains { $0.id == host.selectedTabID })
-                    }
-                    .menuStyle(.button)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .help("탭 더 보기")
-                    .position(x: frame.midX, y: frame.midY)
-                }
-                Button(action: openSettings) {
-                    TabBarIcon(symbol: "gearshape", selected: false)
-                }
-                .help("설정")
-                .position(x: layout.gearFrame.midX, y: layout.gearFrame.midY)
-            }
-            .buttonStyle(.plain)
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(.white.opacity(0.9))
-            .frame(width: width, height: notchSize.height)
-
-            Group {
-                if let selected = host.tabs.first(where: { $0.id == host.selectedTabID }) {
-                    selected.tab.content
-                } else {
-                    Text("아직 켠 플러그인이 없어요")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.white.opacity(0.6))
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.horizontal, NotchLayout.openShoulder + 16)
-            .padding(.bottom, 16)
-        }
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let wing = wingWidth(proposal: proposal, subviews: subviews)
+        let height = subviews.map { $0.sizeThatFits(ProposedViewSize(width: wing, height: nil)).height }.max() ?? 0
+        return CGSize(width: 2 * wing + gap, height: height)
     }
-}
 
-private struct TabBarIcon: View {
-    let symbol: String
-    let selected: Bool
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let wing = wingWidth(proposal: ProposedViewSize(bounds.size), subviews: subviews)
+        let offer = ProposedViewSize(width: wing, height: bounds.height)
+        subviews.first?.place(at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading, proposal: offer)
+        subviews.dropFirst().first?.place(at: CGPoint(x: bounds.maxX, y: bounds.midY), anchor: .trailing, proposal: offer)
+    }
 
-    var body: some View {
-        Image(systemName: symbol)
-            .frame(width: TabBarLayout.buttonSize.width, height: TabBarLayout.buttonSize.height)
-            .background(RoundedRectangle(cornerRadius: 6).fill(.white.opacity(selected ? 0.18 : 0)))
+    private func wingWidth(proposal: ProposedViewSize, subviews: Subviews) -> CGFloat {
+        let ideal = subviews.map { $0.sizeThatFits(.unspecified).width }.max() ?? 0
+        guard let width = proposal.width else { return ideal }
+        return max(0, min(ideal, (width - gap) / 2))
     }
 }
 
 /// Title, message, choices, text field and buttons of the first waiting request.
+/// At least `minWidth` wide, so text fields and buttons have room; long text wraps at the widest
+/// the notch gets.
 private struct AttentionContent: View {
+    static let minWidth: CGFloat = 280
+
     let pending: NotchHostModel.PendingAttention
-    let notchSize: CGSize
     let respond: (AttentionResponse) -> Void
     @State private var selections: [String: [String]] = [:]
     @State private var text: String
 
-    init(pending: NotchHostModel.PendingAttention, notchSize: CGSize, respond: @escaping (AttentionResponse) -> Void) {
+    init(pending: NotchHostModel.PendingAttention, respond: @escaping (AttentionResponse) -> Void) {
         self.pending = pending
-        self.notchSize = notchSize
         self.respond = respond
         _text = State(initialValue: pending.request.textField?.initialText ?? "")
     }
@@ -272,7 +250,7 @@ private struct AttentionContent: View {
                 if let deadline = pending.deadline {
                     Countdown(deadline: deadline, accent: request.accent)
                 }
-                Spacer(minLength: notchSize.width + 16)
+                Spacer(minLength: 16)
                 Button {
                     respond(.dismissed)
                 } label: {
@@ -282,7 +260,6 @@ private struct AttentionContent: View {
                 .buttonStyle(.plain)
                 .help("닫기")
             }
-            .frame(height: notchSize.height)
 
             // A plain stack in the usual case; long requests scroll instead of being cut off.
             ViewThatFits(in: .vertical) {
@@ -309,8 +286,7 @@ private struct AttentionContent: View {
             }
         }
         .foregroundStyle(.white)
-        .padding(.horizontal, NotchLayout.openShoulder + 16)
-        .padding(.bottom, 16)
+        .frame(minWidth: Self.minWidth, alignment: .topLeading)
     }
 
     private var details: some View {

@@ -36,7 +36,8 @@ private final class NotchHostingView: NSHostingView<NotchRootView> {
 
 /// Places the notch window over the notch of the preferred screen and turns pointer movement into
 /// hover: the window takes clicks only while the pointer is on the drawn shape, so everything
-/// around the shape stays clickable for the apps below.
+/// around the shape stays clickable for the apps below. Esc goes to `NotchHostModel.escape()` while
+/// the window is key (after a click in it).
 @MainActor
 final class NotchWindowController {
     /// Pointer must rest on the notch this long before it opens, so passing by does not open it.
@@ -48,6 +49,8 @@ final class NotchWindowController {
     private let panel = NotchPanel()
     private let hostingView: NotchHostingView
     private var geometry: NotchGeometry?
+    /// The shape as the root view last drew it: its size follows the measured content.
+    private var metrics: NotchLayout.Metrics?
     private var pointerInside = false
     private var hoverTask: Task<Void, Never>?
     private var monitors: [Any] = []
@@ -84,8 +87,20 @@ final class NotchWindowController {
         }) {
             monitors.append(local)
         }
-        observeHost()
+        if let escape = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { [weak self] event in
+            guard event.keyCode == Self.escapeKeyCode else { return event }
+            let handled = MainActor.assumeIsolated {
+                guard let host = self?.host, host.state == .expanded else { return false }
+                host.escape()
+                return true
+            }
+            return handled ? nil : event
+        }) {
+            monitors.append(escape)
+        }
     }
+
+    private static let escapeKeyCode: UInt16 = 53
 
     private func placeOnScreen() {
         guard let screen = NotchGeometry.preferredScreen() else { return }
@@ -101,26 +116,18 @@ final class NotchWindowController {
             ),
             display: true
         )
-        hostingView.rootView = NotchRootView(host: host, notchSize: geometry.notchRect.size, openSettings: openSettings)
-        trackPointer()
-    }
-
-    /// The shape changes with the host state even when the pointer does not move.
-    private func observeHost() {
-        withObservationTracking {
-            _ = host.state
-            _ = host.liveActivity != nil
-        } onChange: { [weak self] in
-            Task { @MainActor in
-                self?.trackPointer()
-                self?.observeHost()
-            }
+        // The shape changes with the host state and the measured content even when the pointer does
+        // not move; the root view reports every change.
+        hostingView.rootView = NotchRootView(host: host, notchSize: geometry.notchRect.size, openSettings: openSettings) { [weak self] metrics in
+            self?.metrics = metrics
+            self?.trackPointer()
         }
+        trackPointer()
     }
 
     private func trackPointer() {
         guard let geometry else { return }
-        let metrics = NotchLayout.metrics(for: host.state, notch: geometry.notchRect.size, hasActivity: host.liveActivity != nil)
+        let metrics = metrics ?? NotchLayout.metrics(for: host.state, notch: geometry.notchRect.size, hasActivity: host.liveActivity != nil)
         let inside = NotchLayout.contains(NSEvent.mouseLocation, metrics: metrics, notchRect: geometry.notchRect)
         panel.ignoresMouseEvents = !inside
         guard inside != pointerInside else { return }
