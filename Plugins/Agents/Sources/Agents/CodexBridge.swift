@@ -19,8 +19,11 @@ final class CodexBridge {
     nonisolated static let typeAnswersButtonID = "type-answers"
     nonisolated static let sendAnswersButtonID = "send-answers"
     nonisolated static let jumpButtonID = "jump"
-    /// Codex's blue-gray.
-    static let accent = Color(red: 0.45, green: 0.55, blue: 0.95)
+    /// How many times a refused `thread/loaded/list` or `thread/resume` is sent before the bridge
+    /// reports the sessions it could not follow.
+    static let discoveryAttempts = 4
+    /// A neutral slate, so codex's requests never look like Claude Code's and borrow no brand colour.
+    static let accent = Color(red: 0.44, green: 0.53, blue: 0.62)
     static let clientInfo: JSONValue = .object([
         "name": .string("notch-the-rock"),
         "title": .string("NotchTheRock"),
@@ -35,6 +38,8 @@ final class CodexBridge {
     private let terminal: @MainActor (String?) -> TerminalLocation?
     private let wait: @MainActor () -> Duration
     private let initializeTimeout: Duration
+    /// The wait before discovery call number `attempt` (from 0) is sent again after the server refused it.
+    private let retryDelay: @MainActor (Int) -> Duration
     /// Thread folders by thread id, kept across connections.
     private(set) var threads: [String: String] = [:]
 
@@ -42,8 +47,11 @@ final class CodexBridge {
     private var send: (@MainActor (JSONValue) -> Void)?
     private var ready: (@MainActor () -> Void)?
     private var failed: (@MainActor (String) -> Void)?
+    private var incomplete: (@MainActor (String) -> Void)?
     /// Gives up on the connection when `initialize` goes unanswered.
     private var initializing: Task<Void, Never>?
+    /// Discovery calls the server refused, waiting to be sent again; `close()` cancels them.
+    private var retries: [Task<Void, Never>] = []
     /// Counts connections, so an answer never goes out on a later connection than its request's.
     private var connection = 0
     private var callCount = 0
@@ -57,10 +65,11 @@ final class CodexBridge {
     private var notices: [String: (id: Int, task: Task<Void, Never>)] = [:]
     private var noticeCount = 0
 
+    /// A call and, for discovery, how many times the server refused it before.
     private enum Call {
         case initialize
-        case list
-        case resume(String)
+        case list(cursor: String?, attempt: Int)
+        case resume(String, attempt: Int)
     }
 
     init(
@@ -69,7 +78,8 @@ final class CodexBridge {
         screen: AgentsScreenModel = AgentsScreenModel(),
         terminal: @escaping @MainActor (String?) -> TerminalLocation?,
         initializeTimeout: Duration = .seconds(10),
-        wait: @escaping @MainActor () -> Duration = { .seconds(ApprovalWait.defaultSeconds) }
+        wait: @escaping @MainActor () -> Duration = { .seconds(ApprovalWait.defaultSeconds) },
+        retryDelay: @escaping @MainActor (Int) -> Duration = CodexSupervisor.backoff(attempt:)
     ) {
         self.context = context
         self.activator = activator
@@ -77,22 +87,26 @@ final class CodexBridge {
         self.terminal = terminal
         self.wait = wait
         self.initializeTimeout = initializeTimeout
+        self.retryDelay = retryDelay
     }
 
     /// A new connection: `send` writes one message to it, `ready` runs once the server accepted
     /// `initialize`, and `failed` once the bridge gave up on the connection because the server refused
-    /// `initialize` or left it unanswered for `initializeTimeout`; the bridge is closed by then. Starts
-    /// with `initialize`.
+    /// `initialize` or left it unanswered for `initializeTimeout`; the bridge is closed by then.
+    /// `incomplete` runs when the server refused listing or following sessions `discoveryAttempts`
+    /// times: the connection stays, without those sessions. Starts with `initialize`.
     func open(
         send: @escaping @MainActor (JSONValue) -> Void,
         ready: @escaping @MainActor () -> Void = {},
-        failed: @escaping @MainActor (String) -> Void = { _ in }
+        failed: @escaping @MainActor (String) -> Void = { _ in },
+        incomplete: @escaping @MainActor (String) -> Void = { _ in }
     ) {
         close()
         connection += 1
         self.send = send
         self.ready = ready
         self.failed = failed
+        self.incomplete = incomplete
         let connection = connection
         initializing = Task { [weak self, initializeTimeout] in
             try? await Task.sleep(for: initializeTimeout)
@@ -110,8 +124,13 @@ final class CodexBridge {
         send = nil
         ready = nil
         failed = nil
+        incomplete = nil
         initializing?.cancel()
         initializing = nil
+        for retry in retries {
+            retry.cancel()
+        }
+        retries.removeAll()
         calls.removeAll()
         callCount = 0
         resumed.removeAll()
@@ -159,8 +178,8 @@ final class CodexBridge {
             context.log.error("codex app-server refused a request: \(Self.encode(error))")
             switch call {
             case .initialize: fail("app-server가 초기화 요청을 거절했어요.")
-            case .list: break
-            case .resume(let thread): resumed.remove(thread)
+            case .list(let cursor, let attempt): retry(after: attempt) { $0.list(cursor: cursor, attempt: attempt + 1) }
+            case .resume(let thread, let attempt): retry(after: attempt) { $0.subscribe(thread, attempt: attempt + 1) }
             }
             return nil
         }
@@ -196,27 +215,53 @@ final class CodexBridge {
             initializing?.cancel()
             initializing = nil
             send?(.object(["method": .string("initialized")]))
-            call(.list, "thread/loaded/list", .object([:]))
+            list(cursor: nil)
             ready?()
         case .list:
             if let cursor = result["nextCursor"]?.string {
-                call(.list, "thread/loaded/list", .object(["cursor": .string(cursor)]))
+                list(cursor: cursor)
             }
             for thread in result["data"]?.array?.compactMap(\.string) ?? [] {
                 resume(thread)
             }
-        case .resume(let thread):
+        case .resume(let thread, _):
             if let cwd = result["thread"]?["cwd"]?.string ?? result["cwd"]?.string {
                 threads[thread] = cwd
             }
         }
     }
 
-    /// Subscribes to a thread's events and requests. Only the id is sent: any other member would
-    /// change the settings of the TUI's live thread.
+    private func list(cursor: String?, attempt: Int = 0) {
+        call(.list(cursor: cursor, attempt: attempt), "thread/loaded/list", .object(cursor.map { ["cursor": .string($0)] } ?? [:]))
+    }
+
+    /// Subscribes to a thread once per connection. A thread stays in `resumed` while a refused resume
+    /// waits to be sent again and after the attempts ran out, so it is never resumed twice at once.
     private func resume(_ thread: String) {
         guard resumed.insert(thread).inserted else { return }
-        call(.resume(thread), "thread/resume", .object(["threadId": .string(thread), "excludeTurns": .bool(true)]))
+        subscribe(thread, attempt: 0)
+    }
+
+    /// Only the id is sent: any other member would change the settings of the TUI's live thread.
+    private func subscribe(_ thread: String, attempt: Int) {
+        call(.resume(thread, attempt: attempt), "thread/resume", .object(["threadId": .string(thread), "excludeTurns": .bool(true)]))
+    }
+
+    /// Sends a refused discovery call again after the backoff, on the same connection only. Once it was
+    /// refused `discoveryAttempts` times the sessions it would have found stay out of the notch, and
+    /// `incomplete` says so.
+    private func retry(after attempt: Int, _ again: @escaping @MainActor (CodexBridge) -> Void) {
+        guard attempt + 1 < Self.discoveryAttempts else {
+            incomplete?("app-server가 Codex 세션 정보를 주지 않아서 일부 세션이 노치에 보이지 않아요.")
+            return
+        }
+        let connection = connection
+        let delay = retryDelay(attempt)
+        retries.append(Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled, let self, self.connection == connection, self.send != nil else { return }
+            again(self)
+        })
     }
 
     // MARK: Notifications
@@ -420,7 +465,7 @@ final class CodexBridge {
     private func showOnScreen(_ title: String, _ content: ScreenItem.Content, allowsSession: Bool = false, until deadline: ContinuousClock.Instant) async -> ScreenResponse {
         guard deadline > .now else { return .timedOut }
         context.expand()
-        return await screen.show(title: title, content: content, allowsSession: allowsSession, until: deadline)
+        return await screen.show(title: title, content: content, accent: Self.accent, allowsSession: allowsSession, until: deadline)
     }
 
     // MARK: Notices and the terminal

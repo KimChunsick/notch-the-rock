@@ -346,6 +346,9 @@ func expectJSON(_ output: Data, _ expected: String, sourceLocation: SourceLocati
             OperationDetail.Section(label: "새 내용", body: content),
         ])
 
+        // Claude Code's denial carries the typed reason, and the item keeps Claude's colour.
+        #expect(item.takesDenyReason)
+        #expect(item.accent == ClaudeBridge.accent)
         live.plugin.bridge.screen.respond(to: item.id, with: .deny(reason: "이 파일은 그대로 두세요"))
         expectJSON(await output.value, #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"이 파일은 그대로 두세요"}}}"#)
     }

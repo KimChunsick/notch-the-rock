@@ -224,7 +224,7 @@ final class ClaudeBridge {
     private func showOnScreen(_ title: String, _ content: ScreenItem.Content, until deadline: ContinuousClock.Instant) async -> ScreenResponse {
         guard deadline > .now else { return .timedOut }
         context.expand()
-        return await screen.show(title: title, content: content, until: deadline)
+        return await screen.show(title: title, content: content, accent: Self.accent, takesDenyReason: true, until: deadline)
     }
 
     private static func denial(_ reason: String) -> String {

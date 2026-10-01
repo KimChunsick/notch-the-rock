@@ -151,7 +151,12 @@ func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
     func makeLink(_ connections: [FakeConnection]) throws -> (CodexLink, Int32) {
         let endpoint = CodexEndpoint(home: URL(fileURLWithPath: home))
         let listener = try listen(at: endpoint.socketPath)
-        let bridge = CodexBridge(context: try makeContext(host: host, directory: try makeDirectory()), activator: FakeActivator(), terminal: { _ in nil })
+        let bridge = CodexBridge(
+            context: try makeContext(host: host, directory: try makeDirectory()),
+            activator: FakeActivator(),
+            terminal: { _ in nil },
+            retryDelay: { _ in .milliseconds(5) }
+        )
         let queue = ConnectionQueue(connections)
         let link = CodexLink(
             supervisor: CodexSupervisor(endpoint: endpoint, executable: nil, launcher: FakeLauncher(socketPath: endpoint.socketPath)),
@@ -189,6 +194,30 @@ func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         #expect(link.state == .connected(.reused))
         link.stop()
         new.finish()
+    }
+
+    @Test func R07__sessions_the_server_will_not_follow_show_in_settings() async throws {
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let connection = FakeConnection()
+        let (link, listener) = try makeLink([connection])
+        defer { close(listener) }
+        link.start()
+        #expect(await eventually { connection.sent.count == 1 })
+        connection.deliver(#"{"id":1,"result":{}}"#)
+        // initialize, initialized, then the list as id 2.
+        #expect(await eventually { connection.sent.count == 3 })
+        connection.deliver(#"{"id":2,"result":{"data":["t1"],"nextCursor":null}}"#)
+        // The resume goes out as id 3 and comes back under the next id after each refusal.
+        for id in 3..<(3 + CodexBridge.discoveryAttempts) {
+            #expect(await eventually { connection.sent.count == id + 1 })
+            #expect(connection.sent.last?.contains(#""threadId":"t1""#) == true)
+            #expect(link.state == .connected(.reused))
+            connection.deliver(#"{"id":\#(id),"error":{"code":-32600,"message":"no thread"}}"#)
+        }
+        #expect(await eventually { if case .incomplete(.reused, _) = link.state { true } else { false } })
+        #expect(AgentsSettingsView.status(of: link.state).hasPrefix("연결했지만"))
+        link.stop()
+        connection.finish()
     }
 
     @Test func R07__disconnect_closes_a_connection_still_in_its_handshake() async throws {
