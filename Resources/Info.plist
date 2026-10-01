@@ -33,6 +33,8 @@
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>NotchTheRock이 Claude Code 세션이 열린 탭을 앞으로 가져오도록 터미널에 요청해요.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSPrincipalClass</key>
