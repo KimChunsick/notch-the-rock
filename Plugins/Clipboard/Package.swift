@@ -9,8 +9,8 @@ import PackageDescription
 //   swift test -Xswiftc -F -Xswiftc $CLT/Frameworks \
 //     -Xlinker -rpath -Xlinker $CLT/Frameworks -Xlinker -rpath -Xlinker $CLT/usr/lib
 //
-// The tests use private named pasteboards, never the general one, and one throwaway keychain item
-// they delete again.
+// The tests use private named pasteboards, never the general one, and an in-memory keychain, never
+// the user's.
 
 let package = Package(
     name: "Clipboard",

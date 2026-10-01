@@ -493,36 +493,3 @@ import Testing
     let restored = try #require(reloaded.items.first { $0.id == image.id })
     #expect(reloaded.imageData(for: restored) == png)
 }
-
-private func bytes(of key: SymmetricKey) -> Data {
-    key.withUnsafeBytes { Data($0) }
-}
-
-/// The real Keychain: the key is created once, reused afterwards, and never replaced when what is
-/// stored cannot be used.
-@MainActor
-@Test func R09__the_history_key_lives_in_the_keychain() throws {
-    let service = "com.notchtherock.clipboard.tests.\(UUID().uuidString)"
-    let storage = try PluginStorage(
-        directory: try makeDirectory(),
-        defaultsSuiteName: "clipboard-tests.com.notchtherock.clipboard",
-        keychainService: service
-    )
-    defer { try? storage.deleteKeychainData(for: HistoryKey.account) }
-    #expect(try storage.keychainData(for: HistoryKey.account) == nil)
-
-    let created = try HistoryKey.loadOrCreate(in: storage)
-    #expect(created.bitCount == 256)
-    #expect(try storage.keychainData(for: HistoryKey.account) == bytes(of: created))
-
-    let history = makeHistory(directory: storage.directory, key: created)
-    history.record(.text("encrypted with the keychain key"))
-    history.flush()
-    let reused = try HistoryKey.loadOrCreate(in: storage)
-    #expect(bytes(of: reused) == bytes(of: created))
-    #expect(makeHistory(directory: storage.directory, key: reused).items.map(\.content) == [.text("encrypted with the keychain key")])
-
-    try storage.setKeychainData(Data([1, 2, 3]), for: HistoryKey.account)
-    #expect(throws: HistoryKey.InvalidKeyError.self) { try HistoryKey.loadOrCreate(in: storage) }
-    #expect(try storage.keychainData(for: HistoryKey.account) == Data([1, 2, 3]))
-}

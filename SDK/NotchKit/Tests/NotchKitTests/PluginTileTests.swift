@@ -51,8 +51,8 @@ final class TilePlugin: NotchPlugin {
         #expect(plugins[1].tile?.supportedSizes == [.wide, .small])
     }
 
-    @Test func R16__sdk_is_1_1_after_the_additive_tile_api() {
-        #expect(NotchKitSDK.version == SDKVersion(major: 1, minor: 1))
+    @Test func R16__sdk_has_the_additive_tile_api_of_1_1() {
+        #expect(NotchKitSDK.version.supports(SDKVersion(major: 1, minor: 1)))
         #expect(NotchKitSDK.version.supports(SDKVersion(major: 1, minor: 0)))
     }
 

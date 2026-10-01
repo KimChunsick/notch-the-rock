@@ -104,9 +104,51 @@ struct ClipboardStore: Sendable {
     }
 }
 
-/// The 256-bit history key, kept in the Keychain under the plugin's service (this Mac only).
+extension ClipboardStore {
+    /// Loads the history key and returns the store in `directory` with it. A keychain call can wait
+    /// on the system, so run this off the main thread. When the key replaces an old one that cannot
+    /// be read without asking, the old history's files are deleted first, so the new history starts
+    /// empty instead of unreadable.
+    static func open(in directory: URL, keychain: some HistoryKeychain) throws -> (store: ClipboardStore, key: SymmetricKey, origin: HistoryKey.Origin) {
+        let (key, origin) = try HistoryKey.load(from: keychain)
+        let store = ClipboardStore(directory: directory, key: key)
+        if origin == .replacedOldKeyThatNeedsAccess {
+            try store.deleteAll()
+        }
+        return (store, key, origin)
+    }
+}
+
+/// The keychain calls the history key makes: `PluginStorage` in the app, a recording fake in tests.
+protocol HistoryKeychain: Sendable {
+    func keychainData(for account: String) throws(KeychainError) -> Data?
+    func setKeychainData(_ data: Data, for account: String, access: KeychainAccess) throws(KeychainError)
+    func deleteKeychainData(for account: String) throws(KeychainError)
+}
+
+extension PluginStorage: HistoryKeychain {}
+
+/// The 256-bit history key, kept in the Keychain under the plugin's service (this Mac only), as an
+/// item every application may read without a dialog. The app is signed without a team, so an item
+/// tied to its signature made macOS ask again after every build; the user chose weaker protection
+/// over that dialog (D-53).
 enum HistoryKey {
-    static let account = "history-key"
+    static let account = "history-key-2"
+    /// Where the key was kept before, readable by the build that stored it only.
+    static let legacyAccount = "history-key"
+
+    /// How `load(from:)` got the key.
+    enum Origin: Equatable, Sendable {
+        /// It was under `account`.
+        case stored
+        /// There was none, so a new one is stored now.
+        case created
+        /// It was under `legacyAccount`, readable without asking, and is now under `account`.
+        case movedFromOldAccount
+        /// The key under `legacyAccount` cannot be read without asking, so a new one is stored
+        /// under `account` and the history sealed with the old one cannot be opened.
+        case replacedOldKeyThatNeedsAccess
+    }
 
     /// The stored key's data does not hold a 256-bit key. It is left in place: replacing it would
     /// make the existing history unreadable for good.
@@ -115,15 +157,39 @@ enum HistoryKey {
         var description: String { "the history key in the keychain has \(byteCount) bytes instead of 32" }
     }
 
-    /// The stored key, or a new one stored now when the Keychain has none. A Keychain failure is
-    /// thrown instead of creating a key, so a temporarily unreadable key is never replaced.
-    static func loadOrCreate(in storage: PluginStorage) throws -> SymmetricKey {
-        if let data = try storage.keychainData(for: account) {
-            guard data.count == 32 else { throw InvalidKeyError(byteCount: data.count) }
-            return SymmetricKey(data: data)
+    /// The key under `account`; else the key under `legacyAccount` moved there; else a new one. A
+    /// keychain failure on `account`, including one that needs access, is thrown instead of creating
+    /// a key, so a temporarily unreadable key is never replaced. Only an old key that needs access is
+    /// replaced, after the new one is stored; the old item is then deleted when that needs no dialog.
+    static func load(from keychain: some HistoryKeychain) throws -> (key: SymmetricKey, origin: Origin) {
+        if let data = try keychain.keychainData(for: account) {
+            return (try key(from: data), .stored)
         }
+        let legacy: Data?
+        do {
+            legacy = try keychain.keychainData(for: legacyAccount)
+        } catch where error.needsAccess {
+            let key = try create(in: keychain)
+            try? keychain.deleteKeychainData(for: legacyAccount)
+            return (key, .replacedOldKeyThatNeedsAccess)
+        }
+        guard let legacy else {
+            return (try create(in: keychain), .created)
+        }
+        let key = try key(from: legacy)
+        try keychain.setKeychainData(legacy, for: account, access: .anyApplication)
+        try? keychain.deleteKeychainData(for: legacyAccount)
+        return (key, .movedFromOldAccount)
+    }
+
+    private static func key(from data: Data) throws -> SymmetricKey {
+        guard data.count == 32 else { throw InvalidKeyError(byteCount: data.count) }
+        return SymmetricKey(data: data)
+    }
+
+    private static func create(in keychain: some HistoryKeychain) throws -> SymmetricKey {
         let key = SymmetricKey(size: .bits256)
-        try storage.setKeychainData(key.withUnsafeBytes { Data($0) }, for: account)
+        try keychain.setKeychainData(key.withUnsafeBytes { Data($0) }, for: account, access: .anyApplication)
         return key
     }
 }
