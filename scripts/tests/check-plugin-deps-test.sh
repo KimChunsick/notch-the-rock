@@ -8,13 +8,16 @@
 # build fails. A plugin reaches no module that another plugin built. Helper products (executables and
 # dynamic libraries other than the plugin's own, D-23) are built and traced as well: a helper may load
 # only SDK and toolchain modules and the package targets its own build compiled, never NotchKit
-# (D-29), and reaches no module that another build of its package built. The repository's Plugins/
-# pass, and the check leaves them untouched.
+# (D-29), and reaches no module that another build of its package built. Every built binary's dylib
+# load commands are read as well, so a library linked through linker settings alone counts: the plugin's
+# product may link system libraries, NotchKit and the package's helper libraries, a helper the same but
+# NotchKit. The repository's Plugins/ pass, and the check leaves them untouched.
 #
 # Every checker run builds NotchKit in release and in debug, so all fixtures sit in one plugins folder
 # that the checker reads once. A fixture reaches a fake NotchTheRock (standing for the app) or Other
 # (standing for another plugin) module through `unsafeFlags(["-I", ...])`, so that it builds and the
-# build's module trace has something to name; the unsafeFlags rule fails it as well.
+# build's module trace has something to name; the unsafeFlags rule fails it as well. A fixture links a
+# fake libNotchTheRock.dylib the same way, through `unsafeFlags(["-L", ...])`.
 # Requires bash 3.2 or later, swift, xcrun and python3 (Command Line Tools).
 set -uo pipefail
 
@@ -25,6 +28,8 @@ WORK=$(cd "$WORK" && pwd -P)
 PLUGINS="$WORK/plugins"
 FAKE="$WORK/fake-modules"
 REACH_FAKE=", swiftSettings: [.unsafeFlags([\"-I\", \"$FAKE\"])]"
+FAKE_LIBS="$WORK/fake-libs"
+LINK_FAKE=", linkerSettings: [.linkedLibrary(\"NotchTheRock\"), .unsafeFlags([\"-L\", \"$FAKE_LIBS\"])]"
 failures=0
 current=""
 
@@ -197,6 +202,11 @@ let package = Package(
 )
 EOF
 printf 'public struct NotchHostModel {}\n' >"$WORK/fake-package/NotchTheRock/Sources/NotchTheRock/NotchTheRock.swift"
+# A dynamic library standing for the app's own code, linked as @rpath/libNotchTheRock.dylib.
+mkdir -p "$FAKE_LIBS"
+printf 'int notchtherock_host(void) { return 1; }\n' >"$WORK/host.c"
+xcrun clang -dynamiclib -target "$(uname -m)-apple-macosx14.0" -install_name @rpath/libNotchTheRock.dylib \
+    -o "$FAKE_LIBS/libNotchTheRock.dylib" "$WORK/host.c" || { printf 'could not build the fake library\n'; exit 1; }
 
 # Plugins that must pass.
 write_fixture Good "" "" ""
@@ -301,6 +311,25 @@ write_helpers HelperClean \
 write_source HelperClean CleanHook main.swift $'import Foundation\nimport HelperCleanCore\nprint(ProcessInfo.processInfo.processIdentifier)'
 write_source HelperClean Greeter include/greeter.h 'int greeter_answer(void);'
 write_source HelperClean Greeter greeter.c $'#include "greeter.h"\nint greeter_answer(void) { return 42; }'
+# Review round 043: libraries linked through linker settings alone, which no module trace shows. LinksApp's
+# product links the fake app library. HelperLink's C helper AppLink and Swift helper app-link link it too,
+# and AppLinkUnreached asks for it without unsafeFlags, so the linker does not find it. HelperKitLink's
+# helpers link NotchKit, which the linker finds in the build folder, without unsafeFlags or an import.
+write_fixture LinksApp "" "" "" "$LINK_FAKE"
+write_helpers HelperLink \
+    ', .library(name: "AppLink", type: .dynamic, targets: ["AppLink"]), .executable(name: "app-link", targets: ["AppLinkSwift"]), .library(name: "AppLinkUnreached", type: .dynamic, targets: ["AppLinkUnreached"])' \
+    "        .target(name: \"AppLink\"$LINK_FAKE), .executableTarget(name: \"AppLinkSwift\"$LINK_FAKE), .target(name: \"AppLinkUnreached\", linkerSettings: [.linkedLibrary(\"NotchTheRock\")]),"
+write_source HelperLink AppLink include/app_link.h 'int app_link_answer(void);'
+write_source HelperLink AppLink app_link.c $'#include "app_link.h"\nint app_link_answer(void) { return 42; }'
+write_source HelperLink AppLinkSwift main.swift 'print("link")'
+write_source HelperLink AppLinkUnreached include/app_link_unreached.h 'int app_link_unreached_answer(void);'
+write_source HelperLink AppLinkUnreached app_link_unreached.c $'#include "app_link_unreached.h"\nint app_link_unreached_answer(void) { return 42; }'
+write_helpers HelperKitLink \
+    ', .library(name: "KitLink", type: .dynamic, targets: ["KitLink"]), .executable(name: "kit-link", targets: ["KitLinkSwift"])' \
+    '        .target(name: "KitLink", linkerSettings: [.linkedLibrary("NotchKit")]), .executableTarget(name: "KitLinkSwift", linkerSettings: [.linkedLibrary("NotchKit")]),'
+write_source HelperKitLink KitLink include/kit_link.h 'int kit_link_answer(void);'
+write_source HelperKitLink KitLink kit_link.c $'#include "kit_link.h"\nint kit_link_answer(void) { return 42; }'
+write_source HelperKitLink KitLinkSwift main.swift 'print("kit link")'
 
 OUTPUT=$("$ROOT/scripts/check-plugin-deps.sh" "$PLUGINS" 2>&1)
 STATUS=$?
@@ -320,7 +349,7 @@ R03__check_plugin_deps_accepts_clean_plugins() {
     for plugin in Good Quoted Clean HelperClean; do
         ! reported "$plugin" "" || fail "the clean plugin $plugin was reported"
     done
-    contains "$OUTPUT" "플러그인 19개 중 14개가 검사를 통과하지 못했어요" || fail "not exactly the 14 failing fixtures failed"
+    contains "$OUTPUT" "플러그인 22개 중 17개가 검사를 통과하지 못했어요" || fail "not exactly the 17 failing fixtures failed"
 }
 
 R03__check_plugin_deps_rejects_app_and_plugin_dependencies() {
@@ -432,6 +461,29 @@ R03__check_plugin_deps_builds_each_helper_on_its_own() {
     ! reported HelperClean "도우미 clean-hook" || fail "clean-hook was refused the own target it shares with the plugin"
 }
 
+# Review round 043: a library linked through linker settings alone fails, named with the product, the
+# configurations and its install name. Without unsafeFlags the linker searches only the SDK and the build
+# folder, which holds NotchKit's build and the package's own products: the app library is not found there,
+# so AppLinkUnreached does not build, and NotchKit is, so the helpers that link it fail by their load
+# commands. A plugin's product may link NotchKit; HelperClean's helpers link only system libraries.
+R03__check_plugin_deps_checks_linked_libraries() {
+    current=${FUNCNAME[0]}
+    reported LinksApp "제품 LinksApp의 release, debug 빌드가 NotchKit이 아닌 라이브러리를 링크해요: @rpath/libNotchTheRock.dylib" \
+        || fail "the plugin product LinksApp that links the app library is not named"
+    reported HelperLink "도우미 AppLink: release, debug 빌드가 도우미가 쓸 수 없는 라이브러리를 링크해요: @rpath/libNotchTheRock.dylib" \
+        || fail "the C helper AppLink that links the app library is not named"
+    reported HelperLink "도우미 app-link: release, debug 빌드가 도우미가 쓸 수 없는 라이브러리를 링크해요: @rpath/libNotchTheRock.dylib" \
+        || fail "the Swift helper app-link that links the app library is not named"
+    reported HelperLink "도우미 AppLinkUnreached: release 빌드에 실패해서" || fail "AppLinkUnreached linked the app library without unsafeFlags"
+    contains "$OUTPUT" "ld: library 'NotchTheRock' not found" || fail "the link error of AppLinkUnreached does not name the library"
+    reported HelperKitLink "도우미 KitLink: release, debug 빌드가 NotchKit을 링크해요 (@rpath/libNotchKit.dylib). " \
+        || fail "the C helper KitLink that links NotchKit is not named"
+    reported HelperKitLink "도우미 kit-link: release, debug 빌드가 NotchKit을 링크해요 (@rpath/libNotchKit.dylib). " \
+        || fail "the Swift helper kit-link that links NotchKit is not named"
+    ! reported HelperKitLink "제품 HelperKitLink의" || fail "the plugin product's link to NotchKit was reported"
+    ! reported HelperClean "" || fail "the clean helpers of HelperClean were reported"
+}
+
 R03__check_plugin_deps_accepts_clean_plugins
 R03__check_plugin_deps_rejects_app_and_plugin_dependencies
 R03__check_plugin_deps_ignores_imports_in_comments_and_strings
@@ -442,6 +494,7 @@ R03__check_plugin_deps_sees_imports_the_build_settings_enable
 R03__check_plugin_deps_builds_each_plugin_on_its_own
 R03__check_plugin_deps_checks_helper_products
 R03__check_plugin_deps_builds_each_helper_on_its_own
+R03__check_plugin_deps_checks_linked_libraries
 
 if [ "$failures" -ne 0 ]; then
     printf '%d check(s) failed\n' "$failures"
