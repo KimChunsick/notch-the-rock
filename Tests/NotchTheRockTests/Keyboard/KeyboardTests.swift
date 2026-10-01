@@ -597,17 +597,17 @@ struct KeyboardTests {
         host.toggleFromKeyboard()
         _ = host.handleKey(.right)
         _ = host.handleKey(.down)
-        try render(HomeView(host: host).padding(16).background(Color.black), to: folder.appendingPathComponent("R17-render-home-focus-T72.png"))
+        try render(HomeView(host: host).padding(NotchSizing.padding).background(Color.black), to: folder.appendingPathComponent("R17-render-home-focus-T72.png"))
 
         _ = host.handleKey(.text("ㅁ"))
         host.keyboard.query = "ㅁ"
         _ = host.handleKey(.down)
-        try render(HomeView(host: host).padding(16).background(Color.black), to: folder.appendingPathComponent("R17-render-search-T72.png"))
+        try render(HomeView(host: host).padding(NotchSizing.padding).background(Color.black), to: folder.appendingPathComponent("R17-render-search-T72.png"))
 
         let long = longListHost()
         long.toggleFromKeyboard()
         for _ in 0..<8 { _ = long.handleKey(.down) }
-        try render(HomeView(host: long).padding(16).background(Color.black), to: folder.appendingPathComponent("R17-render-list-scroll-T72.png"))
+        try render(HomeView(host: long).padding(NotchSizing.padding).background(Color.black), to: folder.appendingPathComponent("R17-render-list-scroll-T72.png"))
 
         let registrar = FakeRegistrar()
         registrar.refused = [optionSpace]

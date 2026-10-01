@@ -194,7 +194,7 @@ extension PluginFixture {
         #expect(host.homeEntries.map(\.name) == ["배터리", "밝기", "클립보드", "시스템 상태", "볼륨"])
 
         let renderer = ImageRenderer(content: HomeView(host: host)
-            .padding(16)
+            .padding(NotchSizing.padding)
             .background(Color.black)
             .environment(\.colorScheme, .dark))
         renderer.scale = 2

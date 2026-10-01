@@ -54,6 +54,38 @@ struct NotchSizingTests {
         #expect(abs(wide.content.midX - 150) <= 0.5)
     }
 
+    /// The margin is 20 pt (D-47) on the left, the right and the bottom and under the notch band,
+    /// for the home and plugin screens, alerts and takeovers such as the greeting alike: the shape is
+    /// the content plus the shoulders and two margins wide and the band, the content and two margins tall.
+    @Test func R15__the_expanded_margin_is_20_pt_for_every_open_presentation() {
+        #expect(NotchSizing.padding == 20)
+        let content = CGSize(width: 191, height: 108)
+        for state in [NotchState.expanded, .attention, .takeover] {
+            let metrics = NotchLayout.metrics(for: state, notch: notch, content: content)
+            #expect(metrics.size == CGSize(width: 191 + 2 * (shoulder + 20), height: 32 + 108 + 2 * 20), "\(state)")
+            #expect(metrics.content == CGRect(x: shoulder + 20, y: 32 + 20, width: 191, height: 108), "\(state)")
+        }
+        #expect(NotchSizing.maxWidth == HomeGrid.size.width + 2 * (shoulder + 20))
+        // A plugin's screen under a wider band is offered the band's width less the shoulders and margins.
+        #expect(NotchSizing.contentWidth(filling: 300) == 300 - 2 * (shoulder + 20))
+        // The band's back control and gear keep the same distance from the side walls as the content.
+        #expect(BandLayout.edgeInset == shoulder + 20)
+    }
+
+    /// The collapsed notch's live-activity wings and the HUD take their insets from the notch's
+    /// height, not from the expanded margin.
+    @Test func R15__the_expanded_margin_leaves_the_collapsed_wings_and_the_hud_alone() {
+        #expect(NotchLayout.metrics(for: .collapsed, notch: notch).size == CGSize(width: 179 + 2 * 6, height: 32))
+        let activity = NotchLayout.metrics(for: .collapsed, notch: notch, activityWing: 50)
+        #expect(activity.size == CGSize(width: 179 + 2 * (6 + 50), height: 32))
+        #expect(activity.content == CGRect(x: 0, y: 0, width: 179 + 2 * (6 + 50), height: 32))
+        let hud = NotchLayout.metrics(for: .hud, notch: notch, activityWing: 100)
+        #expect(hud.size == CGSize(width: 179 + 2 * (6 + 100), height: 32))
+        #expect(hud.content == CGRect(x: 0, y: 0, width: 179 + 2 * (6 + 100), height: 32))
+        #expect(NotchLayout.activityInset(contentHeight: 14, notchHeight: 32) == 9)
+        #expect(NotchLayout.activityInset(contentHeight: 22, notchHeight: 37) == 7.5)
+    }
+
     /// A HUD keeps the collapsed notch's height and corners and widens it sideways by its wings,
     /// up to the HUD's widest wing.
     @Test func R25__hud_widens_the_collapsed_notch_sideways_only() {
