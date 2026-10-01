@@ -32,14 +32,21 @@
 #     linker settings alone. After every build that succeeds, the binary it built, named the way
 #     scripts/build-plugin.sh names it (lib<product>.dylib for a dynamic library, <product> for an
 #     executable) in the folder that `swift build --show-bin-path` reports for the same configuration,
-#     package and scratch folder, is read with `otool -l`: every LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB,
+#     package and scratch folder, is read with `otool -h -l`: every LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB,
 #     LC_REEXPORT_DYLIB, LC_LAZY_LOAD_DYLIB and LC_LOAD_UPWARD_DYLIB command names a library it links.
 #     `otool -L` would also list a library's own install name (LC_ID_DYLIB) and does not say which
-#     command an entry comes from. A linked library passes when it lies in /usr/lib/ or
-#     /System/Library/, when it is one of the package's dynamic library products other than <Name>
-#     (@rpath/lib<product>.dylib), or, for the plugin's product only, when it is
-#     @rpath/libNotchKit.dylib. Anything else fails and is named with the product and the
-#     configurations that link it.
+#     command an entry comes from. otool exits 0 for a file that is no Mach-O ("is not an object file")
+#     and for a truncated one, whose listing simply stops, so the output counts only when it is the
+#     complete listing of one binary of the product's kind: the binary's own line, its Mach header with
+#     the file type (an executable or a dynamic library) and the number of load commands, exactly that
+#     many load commands in order, each with its command, a name for every library command, and
+#     LC_SEGMENT_64 with LC_MAIN or LC_ID_DYLIB. Any other output fails the check. A linked library
+#     passes when it is an absolute path without empty, "." or ".." components, which is therefore its
+#     own normal form, in /usr/lib/ or /System/Library/; when it is exactly @rpath/lib<product>.dylib
+#     of one of the package's dynamic library products other than <Name>; or, for the plugin's product
+#     only, when it is exactly @rpath/libNotchKit.dylib. Anything else, @loader_path and
+#     @executable_path included, fails and is named with the product and the configurations that link
+#     it.
 # A plugin that depends on another package is not built: the build would fetch or build that
 # package. Every plugin builds in a scratch folder of its own in a temporary directory, which is
 # deleted afterwards, so Plugins/*/.build is neither read nor written. NotchKit is built alone once
@@ -159,19 +166,19 @@ real_scratch = os.path.realpath(scratch)
 traces = tempfile.mkdtemp(dir=work)
 
 # The helper products, chosen the way scripts/build-plugin.sh chooses them, the file each product
-# builds in the build's bin folder, and the install names of the package's own dynamic libraries
-# other than the plugin's, which any of its builds may link.
+# builds in the build's bin folder and whether it is an executable, and the install names of the
+# package's own dynamic libraries other than the plugin's, which any of its builds may link.
 helpers = []
 binaries = {}
 own_libraries = set()
 for product in manifest["products"]:
     if (product["type"].get("library") or [None])[0] == "dynamic":
-        binaries[product["name"]] = f"lib{product['name']}.dylib"
+        binaries[product["name"]] = (f"lib{product['name']}.dylib", False)
         if product["name"] != name:
             helpers.append(product["name"])
             own_libraries.add(f"@rpath/lib{product['name']}.dylib")
     elif "executable" in product["type"]:
-        binaries[product["name"]] = product["name"]
+        binaries[product["name"]] = (product["name"], True)
         helpers.append(product["name"])
 
 # The folder a build of <configuration> writes its products to, as SwiftPM reports it for this
@@ -186,26 +193,56 @@ def bin_path(configuration):
         bin_paths[configuration] = result.stdout.strip() if result.returncode == 0 else None
     return bin_paths[configuration]
 
-# The install name of every library <binary> links, from its dylib load commands, or None when
-# otool cannot read it.
+# The install name of every library in the `otool -h -l` output for <binary>, from its dylib load
+# commands, or None unless the output is the complete listing of one executable (or dynamic library):
+# the binary's own line, the Mach header with that file type and the number of load commands, exactly
+# that many load commands in order, each with its command, a name for every dylib load command, and
+# LC_SEGMENT_64 with LC_MAIN (or LC_ID_DYLIB). otool exits 0 for a file that is no Mach-O and for a
+# truncated one, whose listing stops early, so its exit status alone proves nothing.
 DYLIB_LOADS = {"LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB", "LC_LAZY_LOAD_DYLIB", "LC_LOAD_UPWARD_DYLIB"}
-def linked_libraries(binary):
-    result = subprocess.run(["otool", "-l", binary], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    if result.returncode != 0:
+def libraries_in(output, binary, executable):
+    lines = output.splitlines()
+    if len(lines) < 4 or lines[0] != f"{binary}:" or lines[1] != "Mach header":
         return None
-    libraries, command = [], None
-    for line in result.stdout.splitlines():
+    header = dict(zip(lines[2].split(), lines[3].split()))
+    if header.get("filetype") != ("2" if executable else "6") or not header.get("ncmds", "").isdigit():
+        return None
+    commands, libraries = [], []
+    for line in lines[4:]:
+        if line.startswith("Load command "):
+            if line != f"Load command {len(commands)}":
+                return None
+            commands.append(None)
+            continue
         field, _, value = line.strip().partition(" ")
         if field == "cmd":
-            command = value
-        elif field == "name" and command in DYLIB_LOADS:
+            if not commands or commands[-1] is not None:
+                return None
+            commands[-1] = value
+        elif field == "name" and commands and commands[-1] in DYLIB_LOADS:
             libraries.append(re.sub(r" \(offset \d+\)$", "", value))
-    return libraries
+    required = {"LC_SEGMENT_64", "LC_MAIN" if executable else "LC_ID_DYLIB"}
+    if len(commands) != int(header["ncmds"]) or None in commands or not required <= set(commands):
+        return None
+    return libraries if len(libraries) == sum(command in DYLIB_LOADS for command in commands) else None
 
+def linked_libraries(binary, executable):
+    result = subprocess.run(["otool", "-h", "-l", binary], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return libraries_in(result.stdout, binary, executable) if result.returncode == 0 else None
+
+# An @rpath name passes only as exactly @rpath/<file> of an allowed library. Any other name passes only
+# as an absolute path without empty, "." or ".." components, which is its own normal form, so its
+# prefix says where the library lies: /usr/lib/../../Users/x.dylib does not lie in /usr/lib/. Names
+# relative to @loader_path or @executable_path, or to the working folder, fail.
 def library_allowed(library, helper):
-    if library.startswith(("/usr/lib/", "/System/Library/")) or library in own_libraries:
-        return True
-    return not helper and library == "@rpath/libNotchKit.dylib"
+    if library.startswith("@rpath/"):
+        allowed = own_libraries if helper else own_libraries | {"@rpath/libNotchKit.dylib"}
+        return "/" not in library[len("@rpath/"):] and library in allowed
+    parts = library.split("/")
+    return (
+        parts[0] == "" and all(part not in ("", ".", "..") for part in parts[1:])
+        and library.startswith(("/usr/lib/", "/System/Library/"))
+    )
 
 # Builds <product> in release and then in debug, each with a trace of its own, and returns the
 # problems. The plugin's product may load and link NotchKit and fails when its trace names none of
@@ -232,8 +269,9 @@ def check(product, index, helper, swift_modules):
             found.append(f"{prefix}{configuration} 빌드에 실패해서 불러오는 모듈을 확인하지 못했어요. 빌드 오류:\n" + "\n".join(errors[-20:]))
             break
         folder = bin_path(configuration)
-        binary = os.path.join(folder, binaries[product]) if folder and product in binaries else None
-        libraries = linked_libraries(binary) if binary and os.path.isfile(binary) else None
+        file, executable = binaries.get(product, (None, False))
+        binary = os.path.join(folder, file) if folder and file else None
+        libraries = linked_libraries(binary, executable) if binary and os.path.isfile(binary) else None
         if libraries is None:
             found.append(f"{prefix}{configuration} 빌드 결과를 읽지 못해서 링크하는 라이브러리를 확인하지 못했어요: {binary or product}")
         for library in libraries or []:

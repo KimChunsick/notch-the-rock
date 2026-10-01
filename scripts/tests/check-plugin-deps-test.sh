@@ -11,14 +11,16 @@
 # (D-29), and reaches no module that another build of its package built. Every built binary's dylib
 # load commands are read as well, so a library linked through linker settings alone counts: the plugin's
 # product may link system libraries, NotchKit and the package's helper libraries, a helper the same but
-# NotchKit. The repository's Plugins/ pass, and the check leaves them untouched.
+# NotchKit, each by a name without "." or ".." components or nested @rpath folders, and otool output that
+# is not the complete listing of the binary fails. The repository's Plugins/ pass, and the check leaves
+# them untouched.
 #
 # Every checker run builds NotchKit in release and in debug, so all fixtures sit in one plugins folder
 # that the checker reads once. A fixture reaches a fake NotchTheRock (standing for the app) or Other
 # (standing for another plugin) module through `unsafeFlags(["-I", ...])`, so that it builds and the
 # build's module trace has something to name; the unsafeFlags rule fails it as well. A fixture links a
 # fake libNotchTheRock.dylib the same way, through `unsafeFlags(["-L", ...])`.
-# Requires bash 3.2 or later, swift, xcrun and python3 (Command Line Tools).
+# Requires bash 3.2 or later, swift, xcrun, otool and python3 (Command Line Tools).
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd -P)
@@ -484,6 +486,105 @@ R03__check_plugin_deps_checks_linked_libraries() {
     ! reported HelperClean "" || fail "the clean helpers of HelperClean were reported"
 }
 
+# Review round 049: a linked library passes only by a name that says where it lies: an absolute path
+# without empty, "." or ".." components under /usr/lib/ or /System/Library/, or exactly @rpath/<file> of
+# an allowed library. otool exits 0 for a file that is no Mach-O and for a truncated one, so its output
+# counts only as the complete listing of a binary of the product's kind. The checker's own functions run
+# here on install names, on small binaries and on otool output with lines taken out, without a build.
+R03__check_plugin_deps_validates_load_commands() {
+    current=${FUNCNAME[0]}
+    local units="$WORK/load-commands" target output line
+    target="$(uname -m)-apple-macosx14.0"
+    mkdir -p "$units"
+    printf 'int unit(void) { return 1; }\n' >"$units/unit.c"
+    printf 'int main(void) { return 0; }\n' >"$units/main.c"
+    xcrun clang -dynamiclib -target "$target" -install_name @rpath/libUnit.dylib -o "$units/libUnit.dylib" "$units/unit.c" \
+        && xcrun clang -target "$target" -o "$units/unit" "$units/main.c" \
+        && xcrun clang -c -target "$target" -o "$units/unit.o" "$units/unit.c" \
+        || { fail "could not build the binaries"; return; }
+    # A file of its own: bash 3.2 misreads quotes inside a here-document within $(...).
+    cat >"$units/check.py" <<'PY'
+import ast, os, subprocess, sys
+
+checker, units = sys.argv[1:]
+program = open(checker).read().split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
+# Only the checker's imports, constants and functions: the rest of its program checks a plugin.
+tree = ast.parse(program)
+tree.body = [
+    node for node in tree.body
+    if isinstance(node, (ast.Import, ast.FunctionDef))
+    or isinstance(node, ast.Assign) and all(isinstance(name, ast.Name) and name.id.isupper() for name in node.targets)
+]
+functions = {}
+exec(compile(tree, checker, "exec"), functions)
+functions["own_libraries"] = {"@rpath/libGreeter.dylib"}
+
+def run(function, *arguments):
+    try:
+        return functions[function](*arguments)
+    except Exception as error:
+        return f"{type(error).__name__}: {error}"
+
+# install name, allowed for the plugin's product, allowed for a helper
+for library, plugin, helper in [
+    ("/usr/lib/libSystem.B.dylib", True, True),
+    ("/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation", True, True),
+    ("@rpath/libGreeter.dylib", True, True),
+    ("@rpath/libNotchKit.dylib", True, False),
+    ("/usr/lib/../../Users/won/libNotchTheRock.dylib", False, False),
+    ("/System/Library/../../tmp/libNotchTheRock.dylib", False, False),
+    ("/usr/lib/./libSystem.B.dylib", False, False),
+    ("/usr/lib//libSystem.B.dylib", False, False),
+    ("/usr/lib/", False, False),
+    ("usr/lib/libSystem.B.dylib", False, False),
+    ("@rpath/../libNotchKit.dylib", False, False),
+    ("@rpath/sub/libGreeter.dylib", False, False),
+    ("@rpath//libGreeter.dylib", False, False),
+    ("@loader_path/libGreeter.dylib", False, False),
+    ("@executable_path/../Frameworks/libNotchKit.dylib", False, False),
+]:
+    for is_helper, expected in ((False, plugin), (True, helper)):
+        allowed = run("library_allowed", library, is_helper)
+        if allowed != expected:
+            print(f"{'a helper' if is_helper else 'the plugin product'} linking {library}: allowed is {allowed!r}, expected {expected!r}")
+
+dylib, executable = os.path.join(units, "libUnit.dylib"), os.path.join(units, "unit")
+truncated = os.path.join(units, "libTruncated.dylib")
+data = open(dylib, "rb").read()
+# The first half of the load commands: the header's sizeofcmds is the little-endian word at offset 20.
+open(truncated, "wb").write(data[: 32 + int.from_bytes(data[20:24], "little") // 2])
+system = ["/usr/lib/libSystem.B.dylib"]
+# binary, read as an executable, the libraries expected or None
+for binary, as_executable, expected in [
+    (dylib, False, system),
+    (executable, True, system),
+    (checker, False, None),
+    (truncated, False, None),
+    (os.path.join(units, "unit.o"), False, None),
+    (dylib, True, None),
+    (executable, False, None),
+]:
+    libraries = run("linked_libraries", binary, as_executable)
+    if libraries != expected:
+        print(f"{os.path.basename(binary)} read as {'an executable' if as_executable else 'a dynamic library'}: {libraries!r}, expected {expected!r}")
+
+listing = subprocess.run(["otool", "-h", "-l", dylib], stdout=subprocess.PIPE, text=True).stdout.splitlines()
+name = next(index for index, line in enumerate(listing) if line.strip().startswith("name /usr/lib/libSystem.B.dylib"))
+third, fourth = listing.index("Load command 3"), listing.index("Load command 4")
+for change, lines in [
+    ("without the name of a linked library", listing[:name] + listing[name + 1:]),
+    ("without load command 3", listing[:third] + listing[fourth:]),
+]:
+    libraries = run("libraries_in", "\n".join(lines) + "\n", dylib, False)
+    if libraries is not None:
+        print(f"otool output {change}: {libraries!r}, expected None")
+PY
+    output=$(python3 "$units/check.py" "$ROOT/scripts/check-plugin-deps.sh" "$units" 2>&1)
+    while IFS= read -r line; do
+        [ -z "$line" ] || fail "$line"
+    done <<<"$output"
+}
+
 R03__check_plugin_deps_accepts_clean_plugins
 R03__check_plugin_deps_rejects_app_and_plugin_dependencies
 R03__check_plugin_deps_ignores_imports_in_comments_and_strings
@@ -495,6 +596,7 @@ R03__check_plugin_deps_builds_each_plugin_on_its_own
 R03__check_plugin_deps_checks_helper_products
 R03__check_plugin_deps_builds_each_helper_on_its_own
 R03__check_plugin_deps_checks_linked_libraries
+R03__check_plugin_deps_validates_load_commands
 
 if [ "$failures" -ne 0 ]; then
     printf '%d check(s) failed\n' "$failures"
