@@ -5,8 +5,11 @@
 # backticks, several statements on a line), the `#if` condition that enables it (canImport, a target
 # define, the language mode, a debug or a release build) or the text around it. Text that only looks
 # like an import, in comments and in string or regex literals, is none, and a plugin that does not
-# build fails. A plugin reaches no module that another plugin built. The repository's Plugins/ pass,
-# and the check leaves them untouched.
+# build fails. A plugin reaches no module that another plugin built. Helper products (executables and
+# dynamic libraries other than the plugin's own, D-23) are built and traced as well: a helper may load
+# only SDK and toolchain modules and the package targets its own build compiled, never NotchKit
+# (D-29), and reaches no module that another build of its package built. The repository's Plugins/
+# pass, and the check leaves them untouched.
 #
 # Every checker run builds NotchKit in release and in debug, so all fixtures sit in one plugins folder
 # that the checker reads once. A fixture reaches a fake NotchTheRock (standing for the app) or Other
@@ -79,6 +82,34 @@ let package = Package(
 EOF
     printf 'import NotchKit\n%s\n' "$4" >"$dir/Sources/$1/$1.swift"
     printf 'let core = 1\n' >"$dir/Sources/$1Core/$1Core.swift"
+}
+
+# write_helpers <Name> <helper products> <helper targets>: a plugin package like write_fixture's (product
+# <Name> of target <Name>, which depends on NotchKit and <Name>Core) whose manifest also lists the given
+# products and targets. The caller writes the helper targets' sources.
+write_helpers() {
+    write_fixture "$1" "" "" ""
+    cat >"$PLUGINS/$1/Package.swift" <<EOF
+// swift-tools-version: 6.0
+import PackageDescription
+let package = Package(
+    name: "$1",
+    platforms: [.macOS(.v14)],
+    products: [.library(name: "$1", type: .dynamic, targets: ["$1"])$2],
+    dependencies: [.package(path: "$ROOT/SDK/NotchKit")],
+    targets: [
+        .target(name: "$1Core"),
+        .target(name: "$1", dependencies: [.product(name: "NotchKit", package: "NotchKit"), "$1Core"]),
+$3
+    ]
+)
+EOF
+}
+
+# write_source <plugin> <target> <path in the target> <source>
+write_source() {
+    mkdir -p "$(dirname "$PLUGINS/$1/Sources/$2/$3")"
+    printf '%s\n' "$4" >"$PLUGINS/$1/Sources/$2/$3"
 }
 
 # One target of the Forms fixture per import form the compiler accepts: <name> <module it imports>
@@ -250,6 +281,26 @@ write_fixture Earlier "" "" ""
 write_fixture Later "" "" 'import Earlier' '), .testTarget(name: "Earlier"'
 mkdir -p "$PLUGINS/Later/Tests/Earlier"
 printf 'let unused = 1\n' >"$PLUGINS/Later/Tests/Earlier/Earlier.swift"
+# Helper products (D-23). HelperApp's helpers import the app module, reachable only for app-hook, and
+# the plugin's own HelperAppCore, which stray-hook does not depend on.
+write_helpers HelperApp \
+    ', .executable(name: "app-hook", targets: ["AppHook"]), .library(name: "AppBridge", type: .dynamic, targets: ["AppBridge"]), .executable(name: "stray-hook", targets: ["StrayHook"])' \
+    "        .executableTarget(name: \"AppHook\"$REACH_FAKE), .target(name: \"AppBridge\"), .executableTarget(name: \"StrayHook\"),"
+write_source HelperApp AppHook main.swift $'import NotchTheRock\nprint("hook")'
+write_source HelperApp AppBridge AppBridge.swift 'import NotchTheRock'
+write_source HelperApp StrayHook main.swift $'import HelperAppCore\nprint("stray")'
+# A helper that depends on NotchKit, which only the app process carries (D-29).
+write_helpers HelperKit ', .executable(name: "kit-hook", targets: ["KitHook"])' \
+    '        .executableTarget(name: "KitHook", dependencies: [.product(name: "NotchKit", package: "NotchKit")]),'
+write_source HelperKit KitHook main.swift $'import NotchKit\nprint(NotchKitSDK.version)'
+# Clean helpers: a Swift executable on Foundation and the plugin's own HelperCleanCore, which the
+# plugin's product builds as well, a C dynamic library, and a static library that is no helper.
+write_helpers HelperClean \
+    ', .executable(name: "clean-hook", targets: ["CleanHook"]), .library(name: "Greeter", type: .dynamic, targets: ["Greeter"]), .library(name: "GreeterStatic", type: .static, targets: ["Greeter"])' \
+    '        .executableTarget(name: "CleanHook", dependencies: ["HelperCleanCore"]), .target(name: "Greeter"),'
+write_source HelperClean CleanHook main.swift $'import Foundation\nimport HelperCleanCore\nprint(ProcessInfo.processInfo.processIdentifier)'
+write_source HelperClean Greeter include/greeter.h 'int greeter_answer(void);'
+write_source HelperClean Greeter greeter.c $'#include "greeter.h"\nint greeter_answer(void) { return 42; }'
 
 OUTPUT=$("$ROOT/scripts/check-plugin-deps.sh" "$PLUGINS" 2>&1)
 STATUS=$?
@@ -266,10 +317,10 @@ R03__check_plugin_deps_accepts_clean_plugins() {
     [ "$status" -eq 0 ] || fail "check-plugin-deps.sh failed on the repository's Plugins/"
     contains "$output" "모두 NotchKit만 의존해요" || fail "no summary that every plugin passed"
     [ -z "$(find "$ROOT/Plugins" -newer "$marker" -print)" ] || fail "the check wrote into Plugins/: $(find "$ROOT/Plugins" -newer "$marker" -print | head -n 3)"
-    for plugin in Good Quoted Clean; do
+    for plugin in Good Quoted Clean HelperClean; do
         ! reported "$plugin" "" || fail "the clean plugin $plugin was reported"
     done
-    contains "$OUTPUT" "플러그인 16개 중 12개가 검사를 통과하지 못했어요" || fail "not exactly the 12 failing fixtures failed"
+    contains "$OUTPUT" "플러그인 19개 중 14개가 검사를 통과하지 못했어요" || fail "not exactly the 14 failing fixtures failed"
 }
 
 R03__check_plugin_deps_rejects_app_and_plugin_dependencies() {
@@ -342,6 +393,45 @@ R03__check_plugin_deps_builds_each_plugin_on_its_own() {
     contains "$OUTPUT" "no such module 'Earlier'" || fail "the build error of Later does not name the module Earlier"
 }
 
+# helper_checked <plugin> <helper>: the checker said it built and checked the helper product.
+helper_checked() {
+    contains "$OUTPUT" "check-plugin-deps: 도우미를 빌드해서 확인해요: $1 $2"$'\n'
+}
+
+# D-23, D-29: every executable and extra dynamic library product is built and traced like the plugin's
+# own product. A helper loads only SDK and toolchain modules and the targets its own build compiled:
+# the app module, reached or not, and NotchKit fail and name the helper; a Swift helper on Foundation
+# and an own target, and a C helper, pass. A static library is no helper and is not built.
+R03__check_plugin_deps_checks_helper_products() {
+    current=${FUNCNAME[0]}
+    reported HelperApp "도우미 app-hook: 타깃 AppHook의 release, debug 빌드가 도우미가 쓸 수 없는 모듈을 불러와요: NotchTheRock (" \
+        || fail "the helper app-hook that imports the app module is not named"
+    reported HelperApp "도우미 AppBridge: release 빌드에 실패해서" || fail "the helper AppBridge that does not build is not named"
+    contains "$OUTPUT" "AppBridge.swift:1:8: error: no such module 'NotchTheRock'" || fail "the build error of AppBridge is not shown"
+    # Each configuration has a NotchKit build of its own, so each is named with its path.
+    reported HelperKit "도우미 kit-hook: 타깃 KitHook의 release 빌드가 NotchKit을 불러와요 (" \
+        || fail "the helper kit-hook that imports NotchKit is not named for release"
+    reported HelperKit "도우미 kit-hook: 타깃 KitHook의 debug 빌드가 NotchKit을 불러와요 (" \
+        || fail "the helper kit-hook that imports NotchKit is not named for debug"
+    ! reported HelperApp "타깃 HelperApp의" || fail "the plugin product of HelperApp was reported"
+    ! reported HelperKit "타깃 HelperKit의" || fail "the plugin product of HelperKit was reported"
+    ! reported HelperClean "" || fail "the clean helpers of HelperClean were reported"
+    helper_checked HelperClean clean-hook || fail "the Swift helper clean-hook was not checked"
+    helper_checked HelperClean Greeter || fail "the C helper Greeter was not checked"
+    ! helper_checked HelperClean GreeterStatic || fail "the static library GreeterStatic was checked as a helper"
+    ! helper_checked HelperClean HelperClean || fail "the plugin's own product was checked as a helper"
+}
+
+# Every helper builds in a scratch folder of its own, restored from NotchKit's build: stray-hook does
+# not reach HelperAppCore, which the plugin's product build compiles, and clean-hook compiles the
+# HelperCleanCore it shares with the plugin's product itself, so its trace names it.
+R03__check_plugin_deps_builds_each_helper_on_its_own() {
+    current=${FUNCNAME[0]}
+    reported HelperApp "도우미 stray-hook: release 빌드에 실패해서" || fail "stray-hook passed with a module another build left"
+    contains "$OUTPUT" "no such module 'HelperAppCore'" || fail "the build error of stray-hook does not name HelperAppCore"
+    ! reported HelperClean "도우미 clean-hook" || fail "clean-hook was refused the own target it shares with the plugin"
+}
+
 R03__check_plugin_deps_accepts_clean_plugins
 R03__check_plugin_deps_rejects_app_and_plugin_dependencies
 R03__check_plugin_deps_ignores_imports_in_comments_and_strings
@@ -350,6 +440,8 @@ R03__check_plugin_deps_ignores_imports_in_regex_literals
 R03__check_plugin_deps_fails_on_a_file_the_compiler_cannot_parse
 R03__check_plugin_deps_sees_imports_the_build_settings_enable
 R03__check_plugin_deps_builds_each_plugin_on_its_own
+R03__check_plugin_deps_checks_helper_products
+R03__check_plugin_deps_builds_each_helper_on_its_own
 
 if [ "$failures" -ne 0 ]; then
     printf '%d check(s) failed\n' "$failures"

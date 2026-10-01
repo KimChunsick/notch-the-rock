@@ -20,15 +20,27 @@
 #     fails the check, and so does a build whose trace holds none of the plugin's modules. The app
 #     and every plugin are Swift modules, which the trace lists. Test targets are not part of the
 #     product; the manifest rules above cover them.
+#   - the Swift modules each helper product loads. Helpers are chosen the way scripts/build-plugin.sh
+#     chooses them: every executable product and every dynamic library product other than <Name>;
+#     static and automatic libraries are none. Each is built and traced like the plugin's product,
+#     but a helper runs in a process of its own, outside the app that carries NotchKit (D-29), so a
+#     module it loads passes only when it lies in the SDK or the toolchain, or in the Modules folder
+#     of its own build as one of the package's targets that this build compiled. NotchKit fails. The
+#     helper's Swift targets come from `swift package describe`; a helper that has some fails when its
+#     trace holds none of them, and a C helper, which loads no Swift module, has nothing to trace.
 # A plugin that depends on another package is not built: the build would fetch or build that
 # package. Every plugin builds in a scratch folder of its own in a temporary directory, which is
 # deleted afterwards, so Plugins/*/.build is neither read nor written. NotchKit is built alone once
 # per configuration; before each plugin the scratch folder is deleted and made again as a copy of
 # that build, so it holds NotchKit and this plugin's build and nothing another plugin built. A plugin
 # that imports another one without depending on it therefore does not compile and fails the check.
+# Before each helper the folder is made again the same way, so the helper's build compiles every
+# package target it depends on and its trace names them, even those the plugin's product compiled
+# first, and the helper reaches no module that the product or another helper built.
 # The copy keeps the folder's path because the compiler's module cache records it: a copy at
 # another path would build NotchKit again for every plugin.
-# Takes about two and a half minutes for three plugins, mostly building NotchKit twice.
+# Takes about two and a half minutes for three plugins, mostly building NotchKit twice; every helper
+# adds a build of its own targets.
 # Requires bash 3.2 or later, swift, xcrun and python3 (part of the Command Line Tools).
 set -euo pipefail
 shopt -s nullglob
@@ -78,10 +90,10 @@ for package in "${packages[@]}"; do
         continue
     fi
     printf 'check-plugin-deps: 빌드해서 확인해요: %s\n' "$name" >&2
-    python3 - "$name" "$package" "$SDK_DIR" "$dump" "$work" "$scratch" "$sdk_root" "$toolchain_lib" <<'PY' || offenders=$((offenders + 1))
-import json, os, re, subprocess, sys
+    python3 - "$name" "$package" "$SDK_DIR" "$dump" "$work" "$scratch" "$notchkit_build" "$sdk_root" "$toolchain_lib" <<'PY' || offenders=$((offenders + 1))
+import json, os, re, shutil, subprocess, sys, tempfile
 
-name, package, sdk_dir, dump, work, scratch, sdk_root, toolchain_lib = sys.argv[1:]
+name, package, sdk_dir, dump, work, scratch, notchkit_build, sdk_root, toolchain_lib = sys.argv[1:]
 manifest = json.load(open(dump))
 own_targets = {target["name"] for target in manifest["targets"]}
 problems = []
@@ -131,34 +143,53 @@ def inside(path, folder):
 own_modules = {module_of(target) for target in own_targets}
 system_folders = [os.path.realpath(sdk_root), os.path.realpath(toolchain_lib)]
 real_scratch = os.path.realpath(scratch)
-# (compiled module, loaded module, path) -> the configurations whose build loaded it
-foreign = {}
-if depends_on_other_packages:
-    problems.append("NotchKit 말고 다른 패키지를 의존해서 빌드하지 않았어요.")
-else:
+# The compiler appends to a trace file, so every build writes a file of its own in this folder.
+traces = tempfile.mkdtemp(dir=work)
+
+# The helper products, chosen the way scripts/build-plugin.sh chooses them.
+helpers = []
+for product in manifest["products"]:
+    if (product["type"].get("library") or [None])[0] == "dynamic":
+        if product["name"] != name:
+            helpers.append(product["name"])
+    elif "executable" in product["type"]:
+        helpers.append(product["name"])
+
+# Builds <product> in release and then in debug, each with a trace of its own, and returns the
+# problems. The plugin's product may load NotchKit and fails when its trace names none of the
+# plugin's modules. A helper may not load NotchKit and fails so only when it has Swift targets
+# (swift_modules), because a C helper loads no Swift module.
+def check(product, index, helper, swift_modules):
+    prefix = f"도우미 {product}: " if helper else ""
+    found = []
+    # (compiled module, loaded module, path) -> the configurations whose build loaded it
+    foreign = {}
     for configuration in ("release", "debug"):
-        trace = os.path.join(work, f"{name}-{configuration}.trace")
+        trace = os.path.join(traces, f"{index}-{configuration}.trace")
         result = subprocess.run(
-            ["swift", "build", "-c", configuration, "--package-path", package, "--product", name, "--scratch-path", scratch],
+            ["swift", "build", "-c", configuration, "--package-path", package, "--product", product, "--scratch-path", scratch],
             env=dict(os.environ, SWIFT_LOADED_MODULE_TRACE_FILE=trace),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         if result.returncode != 0:
             lines = result.stdout.splitlines()
             errors = [line for line in lines if "error:" in line] or lines
-            problems.append(f"{configuration} 빌드에 실패해서 불러오는 모듈을 확인하지 못했어요. 빌드 오류:\n" + "\n".join(errors[-20:]))
+            found.append(f"{prefix}{configuration} 빌드에 실패해서 불러오는 모듈을 확인하지 못했어요. 빌드 오류:\n" + "\n".join(errors[-20:]))
             break
         records = []
         if os.path.exists(trace):
             with open(trace) as file:
                 records = [json.loads(line) for line in file if line.strip()]
-        # The plugin's targets this build compiled. A declared target the product does not build
+        # The package's targets this build compiled. A declared target the product does not build
         # is not among them, so a module of that name in the Modules folder is not the plugin's.
         built_modules = own_modules & {record["name"] for record in records}
-        if not built_modules:
-            problems.append(f"{configuration} 빌드 기록에 이 플러그인의 모듈이 없어서 불러오는 모듈을 확인하지 못했어요.")
+        if not built_modules and not helper:
+            found.append(f"{configuration} 빌드 기록에 이 플러그인의 모듈이 없어서 불러오는 모듈을 확인하지 못했어요.")
             continue
-        allowed_modules = built_modules | {"NotchKit"}
+        if not built_modules and swift_modules:
+            found.append(f"{prefix}{configuration} 빌드 기록에 이 도우미의 Swift 타깃이 없어서 불러오는 모듈을 확인하지 못했어요.")
+            continue
+        allowed_modules = built_modules if helper else built_modules | {"NotchKit"}
         # Every record counts, not only those of the own targets: the manifest's and NotchKit's
         # records load only SDK and toolchain modules.
         for record in records:
@@ -172,8 +203,41 @@ else:
                 configurations = foreign.setdefault((record["name"], module, path), [])
                 if configuration not in configurations:
                     configurations.append(configuration)
-for (compiled, module, path), configurations in foreign.items():
-    problems.append(f"타깃 {compiled}의 {', '.join(configurations)} 빌드가 NotchKit이 아닌 모듈을 불러와요: {module} ({path})")
+    for (compiled, module, path), configurations in foreign.items():
+        configurations = ", ".join(configurations)
+        if not helper:
+            found.append(f"타깃 {compiled}의 {configurations} 빌드가 NotchKit이 아닌 모듈을 불러와요: {module} ({path})")
+        elif module == "NotchKit":
+            found.append(f"{prefix}타깃 {compiled}의 {configurations} 빌드가 NotchKit을 불러와요 ({path}). 도우미는 앱과 다른 프로세스에서 실행돼서 앱에 들어 있는 NotchKit을 쓸 수 없어요.")
+        else:
+            found.append(f"{prefix}타깃 {compiled}의 {configurations} 빌드가 도우미가 쓸 수 없는 모듈을 불러와요: {module} ({path})")
+    return found
+
+if depends_on_other_packages:
+    problems.append("NotchKit 말고 다른 패키지를 의존해서 빌드하지 않았어요.")
+else:
+    problems += check(name, 0, False, set())
+    if helpers:
+        # The dump does not say which targets are Swift ones; describe does, with the products each
+        # target is part of, directly or through another target.
+        result = subprocess.run(
+            ["swift", "package", "--package-path", package, "--scratch-path", scratch, "describe", "--type", "json"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        if result.returncode != 0:
+            problems.append("swift package describe가 실패해서 도우미를 확인하지 못했어요.\n" + result.stderr.strip())
+        else:
+            described = json.loads(result.stdout)["targets"]
+            for index, product in enumerate(helpers, start=1):
+                print(f"check-plugin-deps: 도우미를 빌드해서 확인해요: {name} {product}", file=sys.stderr, flush=True)
+                # This helper's own scratch folder: only NotchKit's build, at the path it was built in.
+                shutil.rmtree(scratch)
+                subprocess.run(["cp", "-cR", notchkit_build, scratch], check=True)
+                swift_modules = {
+                    module_of(target["name"]) for target in described
+                    if target.get("module_type") == "SwiftTarget" and product in target.get("product_memberships", [])
+                }
+                problems += check(product, index, True, swift_modules)
 
 for problem in problems:
     print(f"{name}: {problem}")
