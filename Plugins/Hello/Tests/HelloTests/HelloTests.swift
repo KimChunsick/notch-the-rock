@@ -99,22 +99,23 @@ func withContext(_ body: (NotchContext, RecordingHost) throws -> Void) throws {
     }
 
     @Test func R04__timeline_draws_holds_and_ends_near_three_seconds() {
-        #expect(HelloTimeline.total >= 2.5 && HelloTimeline.total <= 3.5)
-        #expect(HelloTimeline.duration == .milliseconds(Int((HelloTimeline.total * 1000).rounded())))
+        let hello = HelloTimeline.hello
+        #expect(hello.total >= 2.5 && hello.total <= 3.5)
+        #expect(hello.duration == .milliseconds(Int((hello.total * 1000).rounded())))
         // The finished word stays on screen for a moment before the notch collapses.
-        #expect(HelloTimeline.total - HelloTimeline.drawEnd >= 0.5)
+        #expect(hello.total - hello.drawEnd >= 0.5)
 
-        #expect(HelloTimeline.frame(at: 0).drawn == 0)
-        #expect(HelloTimeline.frame(at: HelloTimeline.drawEnd).drawn == 1)
-        #expect(HelloTimeline.frame(at: HelloTimeline.drawEnd).opacity == 1)
-        #expect(HelloTimeline.frame(at: HelloTimeline.total).opacity == 0)
-        #expect(HelloTimeline.frame(at: HelloTimeline.total + 1).opacity == 0)
+        #expect(hello.frame(at: 0).writing == 0)
+        #expect(hello.frame(at: hello.drawEnd).writing == 1)
+        #expect(hello.frame(at: hello.drawEnd).opacity == 1)
+        #expect(hello.frame(at: hello.total).opacity == 0)
+        #expect(hello.frame(at: hello.total + 1).opacity == 0)
 
-        let middle = HelloTimeline.frame(at: HelloTimeline.drawEnd / 2)
-        #expect(middle.drawn > 0.2 && middle.drawn < 0.8)
+        let middle = HelloLetteringView.drawn(at: hello.frame(at: hello.drawEnd / 2).writing)
+        #expect(middle > 0.2 && middle < 0.8)
         var last = -1.0
         for step in 0...60 {
-            let drawn = HelloTimeline.frame(at: HelloTimeline.total * Double(step) / 60).drawn
+            let drawn = HelloLetteringView.drawn(at: hello.frame(at: hello.total * Double(step) / 60).writing)
             #expect(drawn >= last)
             last = drawn
         }
@@ -125,10 +126,10 @@ func withContext(_ body: (NotchContext, RecordingHost) throws -> Void) throws {
             let plugin = HelloPlugin(context: context)
             plugin.activate()
             #expect(host.takeovers.count == 1)
-            #expect(host.takeovers.first?.duration == HelloTimeline.duration)
             #expect(host.takeovers.first?.pluginID == "com.notchtherock.hello")
+            // The takeover lasts as long as the greeting it writes, a few seconds at most.
             let duration = try #require(host.takeovers.first?.duration)
-            #expect(duration <= .milliseconds(3500))
+            #expect(duration >= HelloTimeline.hello.duration && duration <= .seconds(7))
         }
     }
 

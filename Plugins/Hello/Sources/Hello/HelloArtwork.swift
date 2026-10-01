@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// A handwritten word the greeting writes: its stroke in its own canvas units, the pen that traces
-/// it and the size the canvas is shown at. Trimming the shape from 0 to 1 writes the word.
+/// The handwritten "hello": its stroke in its own canvas units, the pen that traces it and the size
+/// the canvas is shown at. Trimming the shape from 0 to 1 writes the word.
 struct HelloArtwork: Shape {
     /// The word as one continuous stroke in writing order.
     var stroke: Path
@@ -19,17 +19,6 @@ struct HelloArtwork: Shape {
         penWidth: HelloLettering.strokeWidth,
         pointsPerUnit: HelloLettering.displayHeight / HelloLettering.canvas.height
     )
-
-    /// The handwritten "안녕하세요", as tall as "hello" and written with the same pen.
-    static let annyeonghaseyo = HelloArtwork(
-        stroke: HangulLettering.stroke,
-        canvas: HangulLettering.canvas,
-        penWidth: HangulLettering.strokeWidth,
-        pointsPerUnit: HangulLettering.displayHeight / HangulLettering.canvas.height
-    )
-
-    /// The words a greeting may write.
-    static let words = [hello, annyeonghaseyo]
 
     /// The greeting's own size in points.
     var size: CGSize {

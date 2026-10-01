@@ -43,6 +43,11 @@ enum Week {
         }
         return phrases
     }
+
+    /// Every phrase the Hangul hand writes, in a stable order.
+    static var koreanPhrases: [String] {
+        everyPhrase.filter { $0 != HelloPhrases.hello }.sorted()
+    }
 }
 
 /// Height in points of the opaque ink (pixels at least 90% opaque), which leaves out the soft glow.
@@ -77,51 +82,44 @@ extension HelloArtwork {
 }
 
 @MainActor
-func render(_ view: some View, proposed: ProposedViewSize = .unspecified) -> CGImage {
+func render(_ view: some View, scale: CGFloat = 2) -> CGImage {
     let renderer = ImageRenderer(content: view.environment(\.colorScheme, .dark))
-    renderer.scale = 2
-    renderer.proposedSize = proposed
+    renderer.scale = scale
     return renderer.cgImage!
 }
 
-/// The pen's position after writing `fraction` of `stroke`.
-func tip(of stroke: Path, at fraction: Double) throws -> CGPoint {
-    try #require(stroke.trimmedPath(from: 0, to: fraction).currentPoint)
+@MainActor
+func writePNG(_ view: some View, scale: CGFloat, to url: URL) throws {
+    let image = render(view.background(Color.black), scale: scale)
+    let data = try #require(NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))
+    try data.write(to: url)
+}
+
+extension HelloTimeline.Frame {
+    /// The pen `writing` of the way through its time, fully opaque, with the glow it has while writing.
+    static func writing(_ writing: Double) -> Self {
+        Self(writing: writing, opacity: 1, glow: 0.65)
+    }
 }
 
 @MainActor
 @Suite struct GreetingTests {
     @Test(arguments: [
-        (Week.wednesday, 3, HelloPhrases.Slot.dawn, "고요한 새벽이에요."),
-        (Week.sunday, 3, .dawn, "고요한 주말 새벽이에요."),
-        (Week.wednesday, 8, .morning, "좋은 아침이에요."),
-        (Week.saturday, 8, .morning, "여유로운 주말 아침이에요."),
-        (Week.wednesday, 15, .afternoon, "오후도 힘내세요."),
-        (Week.saturday, 15, .afternoon, "편안한 주말 오후 되세요."),
-        (Week.wednesday, 19, .evening, "오늘 하루 수고했어요."),
-        (Week.sunday, 19, .evening, "즐거운 주말 저녁 보내세요."),
-        (Week.wednesday, 23, .night, "좋은 밤이에요."),
-        (Week.saturday, 23, .night, "좋은 밤이에요."),
+        (Week.wednesday, 3, HelloPhrases.Slot.dawn, "고요한 새벽이에요"),
+        (Week.sunday, 3, .dawn, "고요한 주말 새벽이에요"),
+        (Week.wednesday, 8, .morning, "좋은 아침이에요"),
+        (Week.saturday, 8, .morning, "여유로운 주말 아침이에요"),
+        (Week.wednesday, 15, .afternoon, "오후도 힘내세요"),
+        (Week.saturday, 15, .afternoon, "편안한 주말 오후 되세요"),
+        (Week.wednesday, 19, .evening, "오늘 하루 수고했어요"),
+        (Week.sunday, 19, .evening, "즐거운 주말 저녁 보내세요"),
+        (Week.wednesday, 23, .night, "좋은 밤이에요"),
+        (Week.saturday, 23, .night, "느긋한 주말 밤이에요"),
     ])
     func R19__each_slot_has_its_weekday_and_weekend_phrases(day: Int, hour: Int, slot: HelloPhrases.Slot, phrase: String) {
         let date = Week.date(day: day, hour: hour)
         #expect(HelloPhrases.slot(for: date, calendar: Week.calendar) == slot)
         #expect(HelloPhrases.phrases(for: date, calendar: Week.calendar).contains(phrase))
-    }
-
-    @Test func R19__weekend_and_weekday_pools_differ() {
-        let weekdayAfternoon = HelloPhrases.phrases(for: Week.date(day: Week.wednesday, hour: 15), calendar: Week.calendar)
-        let weekendAfternoon = HelloPhrases.phrases(for: Week.date(day: Week.sunday, hour: 15), calendar: Week.calendar)
-        #expect(!weekdayAfternoon.contains("편안한 주말 오후 되세요."))
-        #expect(weekendAfternoon.contains("편안한 주말 오후 되세요."))
-
-        // A Monday morning and a Friday evening get a touch of their own.
-        let mondayMorning = HelloPhrases.phrases(for: Week.date(day: Week.monday, hour: 9), calendar: Week.calendar)
-        let tuesdayMorning = HelloPhrases.phrases(for: Week.date(day: Week.tuesday, hour: 9), calendar: Week.calendar)
-        #expect(mondayMorning.contains("힘찬 한 주 보내세요."))
-        #expect(!tuesdayMorning.contains("힘찬 한 주 보내세요."))
-        let fridayEvening = HelloPhrases.phrases(for: Week.date(day: Week.friday, hour: 19), calendar: Week.calendar)
-        #expect(fridayEvening.contains("한 주 동안 수고했어요."))
     }
 
     @Test(arguments: [
@@ -137,51 +135,43 @@ func tip(of stroke: Path, at fraction: Double) throws -> CGPoint {
         }
     }
 
-    /// Mornings, afternoons, evenings and nights of weekdays and weekends, Monday mornings and Friday
-    /// evenings included: the line under the word is always a phrase of its own, never one of the
-    /// greetings the pen writes.
+    /// With the date injected, the greeting is one phrase of that hour's pool, and over many picks
+    /// every phrase of it turns up, "hello" and "안녕하세요" included.
     @Test(arguments: [
-        (Week.wednesday, 9), (Week.wednesday, 15), (Week.wednesday, 19), (Week.wednesday, 23),
-        (Week.saturday, 9), (Week.sunday, 15), (Week.saturday, 19), (Week.sunday, 23),
-        (Week.monday, 9), (Week.friday, 19), (Week.tuesday, 3),
+        (Week.wednesday, 9, ["좋은 아침이에요"]),
+        (Week.wednesday, 15, ["오후도 힘내세요"]),
+        (Week.wednesday, 19, ["오늘 하루 수고했어요", "편안한 저녁 보내세요"]),
+        (Week.wednesday, 23, ["좋은 밤이에요", "오늘 밤도 푹 쉬세요"]),
+        (Week.tuesday, 3, ["고요한 새벽이에요", "새벽까지 수고 많아요"]),
+        (Week.saturday, 9, ["좋은 아침이에요", "여유로운 주말 아침이에요"]),
+        (Week.sunday, 15, ["편안한 주말 오후 되세요"]),
+        (Week.saturday, 19, ["즐거운 주말 저녁 보내세요", "편안한 저녁 보내세요"]),
+        (Week.sunday, 23, ["좋은 밤이에요", "느긋한 주말 밤이에요"]),
+        (Week.monday, 9, ["좋은 아침이에요", "힘찬 한 주 보내세요"]),
+        (Week.friday, 19, ["오늘 하루 수고했어요", "편안한 저녁 보내세요", "한 주 동안 수고했어요"]),
     ])
-    func R20__subtitle_is_never_a_handwritten_word(day: Int, hour: Int) {
-        let everyday: Set = ["hello", "안녕하세요", "안녕하세요!"]
+    func R19__greeting_is_one_phrase_of_the_hours_pool(day: Int, hour: Int, own: [String]) {
         let date = Week.date(day: day, hour: hour)
-        let pool = HelloPhrases.phrases(for: date, calendar: Week.calendar)
-        #expect(!pool.isEmpty)
-        #expect(everyday.isDisjoint(with: pool), "\(pool)")
+        #expect(HelloPhrases.phrases(for: date, calendar: Week.calendar) == own + ["hello", "안녕하세요"])
         var generator = SplitMix64(state: UInt64(day * 24 + hour))
-        for _ in 0..<32 {
-            let greeting = HelloGreeting.random(for: date, calendar: Week.calendar, using: &generator)
-            #expect(pool.contains(greeting.subtitle))
+        var picked = Set<String>()
+        for _ in 0..<96 {
+            picked.insert(HelloGreeting.random(for: date, calendar: Week.calendar, using: &generator).phrase)
         }
+        #expect(picked == Set(own + ["hello", "안녕하세요"]))
     }
 
-    @Test func R19__monday_morning_and_friday_evening_subtitles() {
-        var generator = SplitMix64(state: 7)
-        var monday = Set<String>(), friday = Set<String>()
-        for _ in 0..<64 {
-            monday.insert(HelloGreeting.random(for: Week.date(day: Week.monday, hour: 9), calendar: Week.calendar, using: &generator).subtitle)
-            friday.insert(HelloGreeting.random(for: Week.date(day: Week.friday, hour: 19), calendar: Week.calendar, using: &generator).subtitle)
-        }
-        #expect(monday == ["좋은 아침이에요.", "힘찬 한 주 보내세요."])
-        #expect(friday == ["오늘 하루 수고했어요.", "편안한 저녁 보내세요.", "한 주 동안 수고했어요."])
-    }
-
-    /// Every slot of every day writes "hello" or "안녕하세요", and both turn up.
-    @Test(arguments: 0..<7)
-    func R20__written_word_is_one_of_the_two_handwritten_strokes(day: Int) throws {
-        let strokes = [HelloLettering.stroke, HangulLettering.stroke]
-        #expect(HelloArtwork.words.map(\.stroke) == strokes)
-        var generator = SplitMix64(state: UInt64(day))
-        for hour in [3, 9, 15, 19, 23] {
-            var written = Set<Int>()
-            for _ in 0..<32 {
-                let greeting = HelloGreeting.random(for: Week.date(day: day, hour: hour), calendar: Week.calendar, using: &generator)
-                written.insert(try #require(strokes.firstIndex(of: greeting.word.stroke), "day \(day) hour \(hour)"))
+    /// Every hour of every day offers "hello" and "안녕하세요", and no phrase carries punctuation the
+    /// pen would have to write.
+    @Test func R21__hello_and_annyeonghaseyo_are_in_every_pool() {
+        for day in 0..<7 {
+            for hour in 0..<24 {
+                let pool = HelloPhrases.phrases(for: Week.date(day: day, hour: hour), calendar: Week.calendar)
+                #expect(pool.contains("hello") && pool.contains("안녕하세요"), "day \(day) hour \(hour)")
             }
-            #expect(written == [0, 1], "day \(day) hour \(hour)")
+        }
+        for phrase in Week.everyPhrase {
+            #expect(phrase.allSatisfy { $0.isLetter || $0 == " " }, "\(phrase)")
         }
     }
 
@@ -193,32 +183,38 @@ func tip(of stroke: Path, at fraction: Double) throws -> CGPoint {
                 let date = Week.date(day: day, hour: hour)
                 let one = HelloGreeting.random(for: date, calendar: Week.calendar, using: &first)
                 let other = HelloGreeting.random(for: date, calendar: Week.calendar, using: &second)
-                #expect(one.word.stroke == other.word.stroke)
-                #expect(one.subtitle == other.subtitle)
+                #expect(one.phrase == other.phrase)
             }
         }
     }
 
-    /// Both words are a single pen stroke of cubic curves, the way `HelloLettering` draws "hello".
-    @Test func R20__handwritten_words_are_single_cubic_strokes() {
-        for word in HelloArtwork.words {
-            var moves = 0, curves = 0, others = 0
-            word.stroke.forEach { element in
-                switch element {
-                case .move: moves += 1
-                case .curve: curves += 1
-                default: others += 1
-                }
+    /// "hello" is still the one cursive stroke on its own timing; every other phrase is the Hangul hand.
+    @Test func R21__hello_keeps_its_cursive_and_korean_uses_the_hangul_hand() {
+        for phrase in Week.everyPhrase {
+            switch HelloGreeting(phrase: phrase).writing {
+            case .hello: #expect(phrase == "hello")
+            case .hangul(let handwriting): #expect(handwriting.lines.joined(separator: " ") == phrase)
             }
-            #expect(moves == 1)
-            #expect(others == 0)
-            #expect(curves >= 15)
-            #expect(word.penWidth == HelloLettering.strokeWidth)
         }
+        #expect(HelloGreeting(phrase: "hello").timeline == .hello)
+        #expect(HelloTimeline.hello.drawEnd == 2.0 && HelloTimeline.hello.fadeStart == 3.05 && HelloTimeline.hello.total == 3.4)
     }
 
-    /// Nothing in the plugin sets letters from a font: the module has no CoreText glyph outlines.
-    @Test func R20__module_draws_no_font_outlines() throws {
+    /// Every syllable of every Korean phrase decomposes into jamo whose strokes are drawn by hand.
+    @Test func R21__every_pool_syllable_has_hand_drawn_jamo() {
+        for phrase in Week.koreanPhrases {
+            #expect(HangulHandwriting.missingJamo(in: phrase).isEmpty, "\(phrase): \(HangulHandwriting.missingJamo(in: phrase))")
+            for syllable in phrase where syllable != " " {
+                #expect(HangulHandwriting.missingJamo(in: String(syllable)).isEmpty, "\(syllable) in \(phrase)")
+            }
+        }
+        // A jamo the table lacks is reported, never drawn as nothing.
+        #expect(HangulHandwriting.missingJamo(in: "커") != [])
+        #expect(HangulHandwriting.missingJamo(in: "a") != [])
+    }
+
+    /// Nothing in the plugin sets letters from a font: no glyph outlines, no text under the pen.
+    @Test func R21__module_draws_no_font_outlines() throws {
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/Hello")
@@ -227,104 +223,174 @@ func tip(of stroke: Path, at fraction: Double) throws -> CGPoint {
         #expect(files.count >= 6)
         for file in files {
             let source = try String(contentsOf: file, encoding: .utf8)
-            for symbol in ["CoreText", "CTFont", "CTLine", "CTRun", "PathForGlyph"] {
+            for symbol in ["CoreText", "CTFont", "CTLine", "CTRun", "PathForGlyph", "NSFont", "NSAttributedString", "glyph"] {
                 #expect(!source.contains(symbol), "\(file.lastPathComponent) uses \(symbol)")
             }
-        }
-    }
-
-    @Test func R20__annyeonghaseyo_fits_its_canvas_without_jumps() throws {
-        let stroke = HangulLettering.stroke
-        let bounds = stroke.boundingRect
-        #expect(bounds.width > 0 && bounds.height > 0)
-        #expect(HangulLettering.canvas.contains(bounds.insetBy(dx: -HangulLettering.strokeWidth, dy: -HangulLettering.strokeWidth)))
-        // Walking the stroke never jumps: consecutive points along it stay close together.
-        var previous = try tip(of: stroke, at: 0.001)
-        for step in 1...300 {
-            let point = try tip(of: stroke, at: Double(step) / 300)
-            #expect(hypot(point.x - previous.x, point.y - previous.y) < HangulLettering.canvas.width / 30, "step \(step)")
-            previous = point
-        }
-    }
-
-    /// The pen writes from left to right overall, whatever loops back within a syllable.
-    @Test func R20__writing_runs_left_to_right() throws {
-        for word in HelloArtwork.words {
-            let xs = try [0.001, 0.25, 0.5, 0.75, 1].map { try tip(of: word.stroke, at: $0).x }
-            #expect(xs == xs.sorted(), "\(xs)")
-            #expect(Set(xs).count == xs.count, "\(xs)")
-        }
-    }
-
-    @Test func R19__words_are_half_the_former_hello_height() {
-        let written = HelloTimeline.frame(at: HelloTimeline.fadeStart)
-        let formerHeight = inkHeight(of: render(HelloLetteringView(artwork: .formerHello, frame: written)), scale: 2)
-        #expect(formerHeight > 100)
-        for word in HelloArtwork.words {
-            // The same pen, in points, and the same canvas height.
-            #expect(word.penWidth * word.pointsPerUnit == HelloArtwork.hello.penWidth * HelloArtwork.hello.pointsPerUnit)
-            #expect(word.size.height == HelloLettering.displayHeight)
-            let height = inkHeight(of: render(HelloLetteringView(artwork: word, frame: written)), scale: 2)
-            #expect(abs(height / formerHeight - 0.5) < 0.075, "\(height) pt of \(formerHeight) pt")
-        }
-    }
-
-    /// The greeting never widens the notch past the maximum width, and every phrase stays one line.
-    @Test func R20__greeting_fits_the_maximum_width_with_a_one_line_subtitle() {
-        let written = HelloTimeline.frame(at: HelloTimeline.fadeStart)
-        for word in HelloArtwork.words {
-            let wordHeight = CGFloat(render(HelloLetteringView(artwork: word, frame: written)).height) / 2
-            for phrase in Week.everyPhrase {
-                let greeting = HelloGreeting(word: word, subtitle: phrase)
-                let takeover = render(HelloGreetingView(greeting: greeting))
-                #expect(CGFloat(takeover.width) / 2 <= HelloGreeting.maxWidth, "\(phrase)")
-                let frame = render(HelloGreetingFrame(greeting: greeting, frame: written))
-                // One line of 14 pt text under the word; a second line would add about 17 pt more.
-                let subtitle = CGFloat(frame.height) / 2 - wordHeight
-                #expect(subtitle > 12 && subtitle < 24, "\(phrase): \(subtitle) pt")
+            if file.lastPathComponent != "HelloSettings.swift" {
+                #expect(!source.contains("Text("), "\(file.lastPathComponent) sets text")
             }
         }
     }
 
-    @Test func R20__subtitle_fades_in_once_the_word_is_written() throws {
-        #expect(HelloTimeline.total <= 3.5)
-        #expect(HelloTimeline.frame(at: HelloTimeline.drawEnd).drawn == 1)
-        #expect(HelloTimeline.frame(at: HelloTimeline.fadeStart).subtitle == 1)
-        for step in 0...70 {
-            let frame = HelloTimeline.frame(at: Double(step) / 20)
-            // The line appears only as the pen lands the last strokes, and goes with the word.
-            if frame.subtitle > 0 { #expect(frame.drawn > 0.9, "\(Double(step) / 20) s") }
+    /// The greeting is the handwriting alone: its frame is exactly the handwriting's size.
+    @Test func R21__greeting_is_only_the_handwriting() {
+        for phrase in Week.everyPhrase {
+            let greeting = HelloGreeting(phrase: phrase)
+            let image = render(HelloGreetingFrame(greeting: greeting, frame: .writing(1)), scale: 1)
+            let expected: CGSize = switch greeting.writing {
+            case .hello: HelloArtwork.hello.size
+            case .hangul(let handwriting): handwriting.size
+            }
+            #expect(abs(CGFloat(image.width) - expected.width) <= 1 && abs(CGFloat(image.height) - expected.height) <= 1, "\(phrase)")
         }
-        #expect(HelloTimeline.frame(at: HelloTimeline.total).opacity == 0)
+    }
+
+    /// Every phrase lays out within the maximum width in at most two lines, wrapping at spaces, with
+    /// all its ink inside its frame; the longer phrases do wrap.
+    @Test func R21__every_phrase_fits_the_maximum_width_in_two_lines() {
+        var wrapped = 0
+        for phrase in Week.koreanPhrases {
+            let handwriting = HangulHandwriting(phrase)
+            #expect(handwriting.lines.count <= 2, "\(phrase): \(handwriting.lines)")
+            #expect(handwriting.lines.joined(separator: " ") == phrase)
+            if handwriting.lines.count == 2 { wrapped += 1 }
+            #expect(handwriting.size.width + 2 * HelloGreeting.padding <= HelloGreeting.maxWidth, "\(phrase)")
+            let takeover = render(HelloGreetingView(greeting: HelloGreeting(phrase: phrase)), scale: 1)
+            #expect(CGFloat(takeover.width) <= HelloGreeting.maxWidth, "\(phrase)")
+            var ink = Path()
+            for stroke in handwriting.strokes { ink.addPath(stroke.path) }
+            let inked = ink.boundingRect.insetBy(dx: -HangulHandwriting.penWidth / 2, dy: -HangulHandwriting.penWidth / 2)
+            #expect(CGRect(origin: .zero, size: handwriting.size).contains(inked), "\(phrase): \(inked)")
+        }
+        #expect(wrapped >= 3)
+        #expect(HangulHandwriting("안녕하세요").lines == ["안녕하세요"])
+        #expect(HangulHandwriting("즐거운 주말 저녁 보내세요").lines.count == 2)
+    }
+
+    /// The pen moves at one speed and lifts between strokes: what it has written only grows, its tip
+    /// slides along the stroke while down and is lifted, never dragged, from one stroke to the next.
+    @Test(arguments: ["안녕하세요", "좋은 아침이에요", "즐거운 주말 저녁 보내세요"])
+    func R21__pen_writes_stroke_by_stroke_and_lifts_between(phrase: String) throws {
+        let handwriting = HangulHandwriting(phrase)
+        let step = HangulHandwriting.liftPause / 3
+        var previous: (pen: HangulHandwriting.Pen, tip: CGPoint?, length: CGFloat)?
+        var lifted = false
+        var time = 0.0
+        while time <= handwriting.duration + step {
+            let pen = handwriting.pen(at: time)
+            let tip = handwriting.tip(for: pen)
+            let length = handwriting.inkedLength(for: pen)
+            #expect((tip != nil) == pen.isDown)
+            if let previous {
+                #expect(length >= previous.length - 0.001, "t \(time)")
+                #expect(pen.stroke >= previous.pen.stroke, "t \(time)")
+                // SwiftUI measures a curve a few percent differently from the pen's own measure.
+                if let tip, let last = previous.tip, pen.stroke == previous.pen.stroke {
+                    #expect(hypot(tip.x - last.x, tip.y - last.y) <= HangulHandwriting.penSpeed * step * 1.15, "t \(time)")
+                }
+                if pen.isDown, previous.pen.isDown, pen.stroke != previous.pen.stroke {
+                    Issue.record("t \(time): the pen moved to stroke \(pen.stroke) without lifting")
+                }
+            }
+            if !pen.isDown { lifted = true }
+            previous = (pen, tip, length)
+            time += step
+        }
+        #expect(lifted)
+        let end = handwriting.pen(at: handwriting.duration + 1)
+        #expect(end.stroke == handwriting.strokes.count && !end.isDown)
+        let total = handwriting.strokes.reduce(0) { $0 + $1.length }
+        #expect(abs(handwriting.inkedLength(for: end) - total) < 0.001)
+        // Each stroke starts where the pen lands.
+        for (index, stroke) in handwriting.strokes.enumerated() {
+            let landing = try #require(handwriting.tip(for: HangulHandwriting.Pen(stroke: index, fraction: 0.0001, isDown: true)))
+            #expect(hypot(landing.x - stroke.start.x, landing.y - stroke.start.y) < 0.5)
+        }
+    }
+
+    /// The pen keeps one speed, so the takeover lasts as long as the phrase needs: "안녕하세요" in
+    /// about 1.6–2 s, the longest phrase in at most about 4 s, then a read hold and a fade.
+    @Test func R21__duration_follows_the_phrase() throws {
+        let annyeong = HangulHandwriting("안녕하세요")
+        #expect(annyeong.duration >= 1.6 && annyeong.duration <= 2.0, "\(annyeong.duration)")
+        var longest = 0.0
+        for phrase in Week.koreanPhrases {
+            let greeting = HelloGreeting(phrase: phrase)
+            guard case .hangul(let handwriting) = greeting.writing else { continue }
+            longest = max(longest, handwriting.duration)
+            let timeline = greeting.timeline
+            #expect(timeline.drawEnd == HelloTimeline.drawStart + handwriting.duration)
+            #expect(timeline.fadeStart - timeline.drawEnd >= 1.0, "\(phrase)")
+            #expect(timeline.total > timeline.fadeStart)
+            #expect(timeline.frame(at: timeline.drawEnd).writing == 1)
+            #expect(timeline.frame(at: timeline.total).opacity == 0)
+        }
+        #expect(longest <= 4.0, "\(longest)")
+        // The takeover lasts as long as the greeting the plugin picked.
+        let durations = Set(HelloPhrases.phrases(for: Date(), calendar: .current).map { HelloGreeting(phrase: $0).timeline.duration })
         try withContext { context, host in
             HelloPlugin(context: context).activate()
             let duration = try #require(host.takeovers.first?.duration)
-            #expect(duration == HelloTimeline.duration)
+            #expect(durations.contains(duration))
         }
     }
 
-    /// Offscreen frames of both words, written only when HELLO_CAPTURE_DIR is set:
-    /// `R20-render-frame-<word>-<moment>.png` with the pen at 30% and 60% of the word and the
-    /// finished word with its subtitle.
-    @Test func R20__offscreen_frames() throws {
-        guard let directory = ProcessInfo.processInfo.environment["HELLO_CAPTURE_DIR"] else { return }
+    /// The same phrase always comes out the same, while each syllable keeps a wobble of its own.
+    @Test func R21__paths_are_deterministic_with_per_syllable_wobble() throws {
+        for phrase in Week.koreanPhrases {
+            #expect(HangulHandwriting(phrase).strokes.map(\.path) == HangulHandwriting(phrase).strokes.map(\.path))
+        }
+        // "고요한 주말 새벽이에요" writes 요 twice; the two differ beyond where they sit.
+        let strokes = HangulHandwriting("요 요").strokes
+        #expect(strokes.count % 2 == 0)
+        let first = strokes[..<(strokes.count / 2)], second = strokes[(strokes.count / 2)...]
+        let shift = CGPoint(x: second.first!.start.x - first.first!.start.x, y: second.first!.start.y - first.first!.start.y)
+        let shapes = zip(first, second).map { one, other in
+            hypot(other.start.x - one.start.x - shift.x, other.start.y - one.start.y - shift.y) + abs(other.length - one.length)
+        }
+        #expect(shapes.reduce(0, +) > 0.5)
+    }
+
+    /// One line of Korean is as tall as "hello": half the hello before R19, within 15%.
+    @Test func R19__writing_is_half_the_former_hello_height() {
+        let formerHeight = inkHeight(of: render(HelloLetteringView(artwork: .formerHello, frame: .writing(1))), scale: 2)
+        #expect(formerHeight > 100)
+        for phrase in ["hello", "안녕하세요", "좋은 밤이에요"] {
+            let height = inkHeight(of: render(HelloGreetingFrame(greeting: HelloGreeting(phrase: phrase), frame: .writing(1))), scale: 2)
+            #expect(abs(height / formerHeight - 0.5) < 0.075, "\(phrase): \(height) pt of \(formerHeight) pt")
+        }
+    }
+
+    /// Offscreen renders, written only when HELLO_CAPTURE_DIR is set (HELLO_CAPTURE_TAG names the
+    /// iteration, "final" by default): every Korean phrase finished at real size and at 3×,
+    /// "안녕하세요" at 3×, and the pen at 30% and 60% of three phrases above the finished phrase.
+    @Test func R21__offscreen_renders() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let directory = environment["HELLO_CAPTURE_DIR"] else { return }
+        let tag = environment["HELLO_CAPTURE_TAG"] ?? "final"
         let folder = URL(fileURLWithPath: directory, isDirectory: true)
-        let finished = HelloTimeline.frame(at: HelloTimeline.fadeStart)
-        let moments: [(name: String, frame: HelloTimeline.Frame)] = [
-            ("0.3", HelloTimeline.Frame(drawn: 0.3, opacity: 1, glow: 0.65, subtitle: 0)),
-            ("0.6", HelloTimeline.Frame(drawn: 0.6, opacity: 1, glow: 0.65, subtitle: 0)),
-            ("complete", finished),
-        ]
-        let words: [(name: String, word: HelloArtwork, subtitle: String)] = [
-            ("hello", .hello, "좋은 아침이에요."), ("annyeonghaseyo", .annyeonghaseyo, "즐거운 주말 저녁 보내세요."),
-        ]
-        for word in words {
-            for moment in moments {
-                let view = HelloGreetingFrame(greeting: HelloGreeting(word: word.word, subtitle: word.subtitle), frame: moment.frame)
-                let image = render(view.padding(8).background(Color.black))
-                let data = try #require(NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))
-                try data.write(to: folder.appendingPathComponent("R20-render-frame-\(word.name)-\(moment.name).png"))
-            }
+        func written(_ phrase: String, _ writing: Double = 1) -> some View {
+            HelloGreetingFrame(greeting: HelloGreeting(phrase: phrase), frame: .writing(writing))
+        }
+        let phrases = Week.koreanPhrases
+        let sheet = VStack(alignment: .leading, spacing: 10) {
+            ForEach(phrases, id: \.self) { written($0) }
+        }.padding(12)
+        try writePNG(sheet, scale: 1, to: folder.appendingPathComponent("R21-render-sheet-\(tag).png"))
+        let half = (phrases.count + 1) / 2
+        let grid = HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 10) { ForEach(phrases[..<half], id: \.self) { written($0) } }
+            VStack(alignment: .leading, spacing: 10) { ForEach(phrases[half...], id: \.self) { written($0) } }
+        }.padding(12)
+        try writePNG(grid, scale: 3, to: folder.appendingPathComponent("R21-render-sheet3x-\(tag).png"))
+        try writePNG(written("안녕하세요").padding(12), scale: 3, to: folder.appendingPathComponent("R21-render-annyeonghaseyo-\(tag).png"))
+        for (name, phrase) in [("annyeonghaseyo", "안녕하세요"), ("joeun-achim", "좋은 아침이에요"), ("longest", "즐거운 주말 저녁 보내세요")] {
+            let frames = VStack(alignment: .leading, spacing: 10) {
+                written(phrase, 0.3)
+                written(phrase, 0.6)
+                written(phrase)
+            }.padding(12)
+            try writePNG(frames, scale: 2, to: folder.appendingPathComponent("R21-render-frames-\(name)-\(tag).png"))
         }
     }
 }
