@@ -356,7 +356,8 @@ private struct StripBubbleKey: PreferenceKey {
     }
 }
 
-/// A strip icon's name on a small light capsule.
+/// A strip icon's name on a small light capsule, on one line: a name wider than the width it is
+/// offered ends in an ellipsis (the icon's VoiceOver label keeps all of it).
 private struct StripBubble: View {
     let name: String
 
@@ -364,16 +365,16 @@ private struct StripBubble: View {
         Text(name)
             .font(.system(size: 11, weight: .semibold))
             .lineLimit(1)
+            .truncationMode(.tail)
             .foregroundStyle(.black)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .background(Capsule().fill(.white.opacity(0.92)))
-            .fixedSize()
     }
 }
 
-/// Places its one subview, the bubble, just above `icon`: centred on it, but kept within the
-/// strip's width so it stays inside the notch.
+/// Places its one subview, the bubble, just above `icon`: centred on it, but no wider than the
+/// strip and kept within its width so it stays inside the notch.
 private struct BubblePlacement: Layout {
     let icon: CGRect
 
@@ -385,7 +386,7 @@ private struct BubblePlacement: Layout {
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         guard let bubble = subviews.first else { return }
-        let size = bubble.sizeThatFits(.unspecified)
+        let size = bubble.sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
         let x = max(min(icon.midX - size.width / 2, bounds.width - size.width), 0)
         bubble.place(at: CGPoint(x: bounds.minX + x, y: bounds.minY + icon.minY - Self.gap - size.height), proposal: ProposedViewSize(size))
     }

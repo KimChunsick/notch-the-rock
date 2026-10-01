@@ -258,6 +258,20 @@ struct HomeStripTests {
         #expect(try bubble(host, "R36-render-hover-left-T121.png") == nil)
     }
 
+    /// A name wider than the strip keeps its bubble inside the strip, as wide as the strip at most,
+    /// and ends in an ellipsis: the name's ink stops short of the bubble's right edge.
+    @Test func R36__a_name_wider_than_the_strip_is_cut_short_inside_it() throws {
+        defer { fixture.cleanUp() }
+        let name = String(repeating: "가나다라마바사아자차", count: 6)
+        let long = HomePlugin(pluginID: "a-long", name: name, symbol: "puzzlepiece", tab: nil, tile: nil)
+        let host = host([long] + Self.symbolPlugins)
+        host.home.setHovering(true, icon: "a-long")
+        let (box, inkEnd) = try #require(try bubbleInk(host, "R36-render-long-bubble-T124.png"))
+        expectBubble(box, over: 0)
+        #expect(box.width >= HomeGrid.size.width - 2, "bubble \(box) narrower than the strip")
+        #expect(CGFloat(inkEnd) < box.maxX - 4, "the name's ink runs to \(inkEnd), into the bubble's edge \(box)")
+    }
+
     @Test func R36__a_tap_opens_the_screen_and_in_edit_mode_puts_the_plugin_on_the_grid() {
         defer { fixture.cleanUp() }
         let host = host(
@@ -369,6 +383,12 @@ struct HomeStripTests {
     /// Renders the home under `bubbleRoom` and returns the box of light (bubble) ink above the
     /// strip, which nothing but the bubble draws; nil when there is none.
     func bubble(_ host: NotchHostModel, _ name: String) throws -> CGRect? {
+        try bubbleInk(host, name)?.box
+    }
+
+    /// The bubble's box as `bubble(_:_:)` finds it, and the rightmost column of dark (name) ink
+    /// across its middle rows, where the capsule's rounded ends leave no black corners.
+    func bubbleInk(_ host: NotchHostModel, _ name: String) throws -> (box: CGRect, inkEnd: Int)? {
         let image = try render(HomeView(host: host).padding(.top, Self.bubbleRoom), name: name)
         var box: CGRect?
         for y in 0..<Int(Self.bubbleRoom) {
@@ -382,7 +402,9 @@ struct HomeStripTests {
             (Int(box.minX) + 4..<Int(box.maxX) - 4).filter { image.brightness($0, y) < 120 }
         }
         #expect(ink.count > 20, "no text in the bubble \(box)")
-        return box
+        let middle = Int(box.minY + box.height / 4)..<Int(box.maxY - box.height / 4)
+        let inkEnd = (Int(box.minX) + 4..<Int(box.maxX) - 1).last { x in middle.contains { image.brightness(x, $0) < 120 } }
+        return (box, inkEnd ?? Int(box.minX))
     }
 
     /// The bubble sits over the strip's `index`th icon, inside the strip's width and above it.
