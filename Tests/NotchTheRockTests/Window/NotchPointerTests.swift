@@ -7,6 +7,7 @@ import Testing
 @MainActor
 struct NotchPointerTests {
     let notchRect = CGRect(x: 646, y: 924, width: 179, height: 32)
+    let t0 = ContinuousClock.now
 
     /// The home, 264 pt tall, and a plugin screen, 124 pt tall.
     var home: NotchLayout.Metrics { NotchLayout.metrics(for: .expanded, notch: notchRect.size, content: CGSize(width: 390, height: 200)) }
@@ -20,57 +21,147 @@ struct NotchPointerTests {
 
     @Test func R16__a_smaller_screen_under_a_still_pointer_stays_open() {
         var pointer = NotchPointer(notchRect: notchRect, metrics: home)
-        #expect(pointer.handle(.pointerMoved, at: lowRow) == .enter)
+        #expect(pointer.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
         // The row opens a smaller plugin screen; the pointer has not moved.
-        #expect(pointer.handle(.shapeChanged(detail), at: lowRow) == nil)
-        #expect(pointer.handle(.shapeDrawn(detail), at: lowRow) == nil)
-        // Only moving the pointer off the shape ends the hover.
-        #expect(pointer.handle(.pointerMoved, at: CGPoint(x: lowRow.x + 4, y: lowRow.y - 3)) == .leave)
+        #expect(pointer.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0) == nil)
+        #expect(pointer.handle(.shapeDrawn(detail), at: lowRow, now: t0) == nil)
+        // Only moving the pointer ends the hover: off the shape and, after a shrink, off the old frame (R41).
+        #expect(pointer.handle(.pointerMoved, at: away, now: t0 + .seconds(1)) == .leave)
 
         // Nor does a shape growing under a still pointer start hovering.
         var idle = NotchPointer(notchRect: notchRect, metrics: collapsed)
-        #expect(idle.handle(.shapeChanged(home), at: lowRow) == nil)
+        #expect(idle.handle(.shapeChanged(home, expanded: true), at: lowRow, now: t0) == nil)
     }
 
     @Test func R15__hit_testing_takes_the_drawn_frame_and_the_destination_while_springing() {
         var pointer = NotchPointer(notchRect: notchRect, metrics: home)
         // Shrinking to the plugin screen: the home is still drawn, so its lower part takes clicks.
-        _ = pointer.handle(.shapeChanged(detail), at: away)
+        _ = pointer.handle(.shapeChanged(detail, expanded: true), at: away, now: t0)
         #expect(pointer.takesMouseEvents(at: lowRow))
         #expect(pointer.takesMouseEvents(at: inDetail))
         #expect(!pointer.takesMouseEvents(at: away))
         // Settled: the plugin screen's frame alone.
-        _ = pointer.handle(.shapeDrawn(detail), at: away)
+        _ = pointer.handle(.shapeDrawn(detail), at: away, now: t0)
         #expect(!pointer.takesMouseEvents(at: lowRow))
         #expect(pointer.takesMouseEvents(at: inDetail))
         // Growing back to the home: its frame counts before it is drawn.
-        _ = pointer.handle(.shapeChanged(home), at: away)
+        _ = pointer.handle(.shapeChanged(home, expanded: true), at: away, now: t0)
         #expect(pointer.takesMouseEvents(at: lowRow))
         #expect(!pointer.takesMouseEvents(at: away))
     }
 
     @Test func R16__a_tile_drag_holds_the_notch_open_until_it_ends() {
         var pointer = NotchPointer(notchRect: notchRect, metrics: home)
-        #expect(pointer.handle(.pointerMoved, at: lowRow) == .enter)
-        #expect(pointer.handle(.dragBegan, at: lowRow) == .hold)
+        #expect(pointer.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
+        #expect(pointer.handle(.dragBegan, at: lowRow, now: t0) == .hold)
         // Dragged off the shape: no leave, and the window keeps taking mouse events.
-        #expect(pointer.handle(.pointerMoved, at: away) == nil)
+        #expect(pointer.handle(.pointerMoved, at: away, now: t0) == nil)
         #expect(pointer.takesMouseEvents(at: away))
         // Dropped or cancelled off the shape: the usual rules again.
-        #expect(pointer.handle(.dragEnded, at: away) == .leave)
+        #expect(pointer.handle(.dragEnded, at: away, now: t0) == .leave)
         #expect(!pointer.takesMouseEvents(at: away))
 
         // A drag dropped back on the shape keeps hovering.
-        #expect(pointer.handle(.pointerMoved, at: lowRow) == .enter)
-        _ = pointer.handle(.dragBegan, at: lowRow)
-        _ = pointer.handle(.pointerMoved, at: away)
-        #expect(pointer.handle(.dragEnded, at: lowRow) == nil)
+        #expect(pointer.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
+        _ = pointer.handle(.dragBegan, at: lowRow, now: t0)
+        _ = pointer.handle(.pointerMoved, at: away, now: t0)
+        #expect(pointer.handle(.dragEnded, at: lowRow, now: t0) == nil)
 
         // A fast first drag event can leave the shape before the drag starts; the drag drops that leave.
-        #expect(pointer.handle(.pointerMoved, at: away) == .leave)
-        #expect(pointer.handle(.dragBegan, at: away) == .hold)
-        #expect(pointer.handle(.pointerMoved, at: away) == nil)
-        #expect(pointer.handle(.dragEnded, at: away) == .leave)
+        #expect(pointer.handle(.pointerMoved, at: away, now: t0) == .leave)
+        #expect(pointer.handle(.dragBegan, at: away, now: t0) == .hold)
+        #expect(pointer.handle(.pointerMoved, at: away, now: t0) == nil)
+        #expect(pointer.handle(.dragEnded, at: away, now: t0) == .leave)
+    }
+
+    /// The home's frame (y 692 to 956, x 510.5 to 960.5) is the region kept open after shrinking to
+    /// the plugin screen (y 832 to 956, x 610 to 861); `nearLowRow` is in it, off the plugin screen.
+    var nearLowRow: CGPoint { CGPoint(x: lowRow.x + 4, y: lowRow.y - 3) }
+
+    @Test func R41__a_shrink_under_the_pointer_keeps_the_old_frame_open() {
+        var pointer = NotchPointer(notchRect: notchRect, metrics: home)
+        #expect(pointer.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
+        #expect(pointer.handle(.clicked, at: lowRow, now: t0) == nil)
+        // The tile opens a smaller screen in two steps (the band's width, then the measured content);
+        // the floor restarts with the second and the home's frame stays the region.
+        let narrower = NotchLayout.metrics(for: .expanded, notch: notchRect.size, content: CGSize(width: 191, height: 200))
+        #expect(pointer.handle(.shapeChanged(narrower, expanded: true), at: lowRow, now: t0) == nil)
+        #expect(pointer.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0 + .milliseconds(50)) == nil)
+        #expect(pointer.keepOpenFloorEnd == t0 + .milliseconds(650))
+        #expect(pointer.handle(.shapeDrawn(detail), at: lowRow, now: t0 + .milliseconds(400)) == nil)
+        // Off the new shape, inside the old frame: open, at the floor's end and long after it.
+        #expect(pointer.handle(.pointerMoved, at: nearLowRow, now: t0 + .milliseconds(500)) == nil)
+        #expect(pointer.handle(.floorEnded, at: nearLowRow, now: t0 + .milliseconds(650)) == nil)
+        #expect(pointer.handle(.pointerMoved, at: nearLowRow, now: t0 + .seconds(2)) == nil)
+        // The margin around the old frame counts; the pointer at the screen top too.
+        #expect(pointer.handle(.pointerMoved, at: CGPoint(x: 963, y: 800), now: t0 + .seconds(2)) == nil)
+        #expect(pointer.handle(.pointerMoved, at: CGPoint(x: 520, y: 956), now: t0 + .seconds(2)) == nil)
+        // The region does not take clicks: the apps below it stay clickable.
+        #expect(!pointer.takesMouseEvents(at: nearLowRow))
+        // Moving away from the notch out of the old frame closes it.
+        #expect(pointer.handle(.pointerMoved, at: away, now: t0 + .seconds(2)) == .leave)
+        #expect(pointer.handle(.pointerMoved, at: nearLowRow, now: t0 + .seconds(3)) == nil)
+    }
+
+    @Test func R41__entering_the_smaller_shape_brings_back_the_usual_rules() {
+        var pointer = NotchPointer(notchRect: notchRect, metrics: home)
+        #expect(pointer.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
+        #expect(pointer.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0) == nil)
+        #expect(pointer.handle(.shapeDrawn(detail), at: lowRow, now: t0 + .milliseconds(400)) == nil)
+        #expect(pointer.handle(.pointerMoved, at: inDetail, now: t0 + .seconds(1)) == nil)
+        #expect(pointer.keepOpenFloorEnd == nil)
+        // Leaving the new shape closes as before, though the old frame is still around the pointer.
+        #expect(pointer.handle(.pointerMoved, at: nearLowRow, now: t0 + .seconds(1)) == .leave)
+    }
+
+    @Test func R41__an_exit_during_the_floor_waits_for_the_floor_to_end() {
+        var pointer = NotchPointer(notchRect: notchRect, metrics: home)
+        #expect(pointer.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
+        #expect(pointer.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0) == nil)
+        // Out of the old frame while the shape still springs: ignored.
+        #expect(pointer.handle(.pointerMoved, at: away, now: t0 + .milliseconds(300)) == nil)
+        #expect(pointer.handle(.shapeDrawn(detail), at: away, now: t0 + .milliseconds(400)) == nil)
+        // Still out of it when the floor ends: closes without another move.
+        #expect(pointer.handle(.floorEnded, at: away, now: t0 + .milliseconds(600)) == .leave)
+        // A floor end after the keep-open ended does nothing.
+        #expect(pointer.handle(.floorEnded, at: away, now: t0 + .seconds(1)) == nil)
+    }
+
+    @Test func R41__growth_and_a_notch_the_pointer_never_entered_keep_their_rules() {
+        // Growing to the home: nothing is kept open, leaving the shape closes at once.
+        var grown = NotchPointer(notchRect: notchRect, metrics: detail)
+        #expect(grown.handle(.pointerMoved, at: inDetail, now: t0) == .enter)
+        #expect(grown.handle(.shapeChanged(home, expanded: true), at: inDetail, now: t0) == nil)
+        #expect(grown.keepOpenFloorEnd == nil)
+        #expect(grown.handle(.pointerMoved, at: away, now: t0 + .milliseconds(100)) == .leave)
+
+        // Opened by the hotkey or a link under a still pointer, then shrunk: nothing is kept open.
+        var held = NotchPointer(notchRect: notchRect, metrics: collapsed)
+        #expect(held.handle(.shapeChanged(home, expanded: true), at: lowRow, now: t0) == nil)
+        #expect(held.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0) == nil)
+        #expect(held.keepOpenFloorEnd == nil)
+    }
+
+    @Test func R41__escape_and_a_click_outside_still_close() {
+        // Esc collapses the notch: the old frame is no longer kept, and hovering the notch opens it again.
+        var escaped = NotchPointer(notchRect: notchRect, metrics: home)
+        #expect(escaped.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
+        #expect(escaped.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0) == nil)
+        #expect(escaped.handle(.shapeChanged(collapsed, expanded: false), at: lowRow, now: t0 + .milliseconds(100)) == nil)
+        #expect(escaped.keepOpenFloorEnd == nil)
+        #expect(escaped.handle(.shapeDrawn(collapsed), at: lowRow, now: t0 + .milliseconds(300)) == nil)
+        #expect(escaped.handle(.pointerMoved, at: nearLowRow, now: t0 + .milliseconds(300)) == .leave)
+        #expect(escaped.handle(.pointerMoved, at: CGPoint(x: notchRect.midX, y: 950), now: t0 + .seconds(1)) == .enter)
+
+        // A click off the new shape ends the keep-open, even during the floor.
+        var clicked = NotchPointer(notchRect: notchRect, metrics: home)
+        #expect(clicked.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
+        #expect(clicked.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0) == nil)
+        // A second click on the tile while the home is still drawn is on the shape.
+        #expect(clicked.handle(.clicked, at: lowRow, now: t0 + .milliseconds(100)) == nil)
+        #expect(clicked.handle(.shapeDrawn(detail), at: lowRow, now: t0 + .milliseconds(300)) == nil)
+        #expect(clicked.handle(.clicked, at: nearLowRow, now: t0 + .milliseconds(400)) == .leave)
+        #expect(clicked.keepOpenFloorEnd == nil)
     }
 
     @Test func R16__escape_belongs_to_the_notch_only_while_its_window_is_key() {

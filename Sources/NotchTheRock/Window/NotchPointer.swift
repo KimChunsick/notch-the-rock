@@ -5,24 +5,35 @@ import CoreGraphics
 /// ends.
 ///
 /// - Only pointer events start or end hovering. A change of the shape (content of another size,
-///   another state, the frame springing toward it) never does by itself, so a smaller plugin screen
-///   opened under a still pointer stays open until the pointer moves.
+///   another state, the frame springing toward it) never does by itself.
+/// - When the expanded shape shrinks (a tile opening a smaller plugin screen, back, another screen)
+///   while the pointer hovers it, the old frame and `keepOpenMargin` around it stay open until the
+///   pointer enters the new shape (the usual rules again), leaves that region away from the notch
+///   (it hangs from the screen top around the notch), or clicks off the shape. For `shrinkFloor`
+///   after the shrink, leaving is ignored so the resize cannot close it; where the pointer rests
+///   when it ends (`floorEnded`) counts as a move. A notch the pointer has not entered since it
+///   opened (the hotkey, a link) keeps the usual rules.
 /// - While the shape springs to a new size, the window takes mouse events on the frame drawn now
 ///   and on the frame it is heading to; once it settles, on that frame alone.
 /// - A tile drag holds the notch open, and the window takes every mouse event, until the drag ends
 ///   (dropped or cancelled); then the pointer is checked against the shape as after a move.
 struct NotchPointer {
     enum Event {
-        /// The pointer moved, dragged or clicked.
+        /// The pointer moved or dragged.
         case pointerMoved
+        /// The pointer clicked.
+        case clicked
         /// The shape is heading to new metrics: content of another size, or another state.
-        case shapeChanged(NotchLayout.Metrics)
+        /// `expanded`: the notch shows the home or a plugin's screen.
+        case shapeChanged(NotchLayout.Metrics, expanded: Bool)
         /// The shape as drawn now, every frame while it springs toward its new metrics.
         case shapeDrawn(NotchLayout.Metrics)
         /// A tile drag in the home started.
         case dragBegan
         /// The tile drag ended, dropped or cancelled.
         case dragEnded
+        /// `keepOpenFloorEnd` passed; the pointer is checked where it rests.
+        case floorEnded
     }
 
     enum Hover: Equatable {
@@ -34,6 +45,17 @@ struct NotchPointer {
         case hold
     }
 
+    /// How long after a shrink leaving the kept-open region is ignored.
+    static let shrinkFloor: Duration = .milliseconds(600)
+    /// Points around the old frame that still keep the notch open after a shrink.
+    static let keepOpenMargin: CGFloat = 6
+
+    /// The old frame kept open after a shrink, until `floorEnd` even when the pointer leaves it.
+    private struct KeepOpen {
+        var region: CGRect
+        var floorEnd: ContinuousClock.Instant
+    }
+
     var notchRect: CGRect
     /// The metrics the shape is heading to.
     private(set) var destination: NotchLayout.Metrics
@@ -42,6 +64,7 @@ struct NotchPointer {
     /// Whether the pointer was on the shape at the last pointer event (or a drag holds it there).
     private var pointerInside = false
     private var isDragging = false
+    private var keepOpen: KeepOpen?
 
     init(notchRect: CGRect, metrics: NotchLayout.Metrics) {
         self.notchRect = notchRect
@@ -49,14 +72,23 @@ struct NotchPointer {
         drawn = metrics
     }
 
-    /// Updates the tracking for `event` with the pointer at `pointer` (screen coordinates) and
-    /// returns the hover change to schedule, if any.
-    mutating func handle(_ event: Event, at pointer: CGPoint) -> Hover? {
+    /// When leaving stops being ignored after a shrink; nil while nothing is kept open.
+    var keepOpenFloorEnd: ContinuousClock.Instant? { keepOpen?.floorEnd }
+
+    /// Updates the tracking for `event` with the pointer at `pointer` (screen coordinates) at `now`
+    /// and returns the hover change to schedule, if any.
+    mutating func handle(_ event: Event, at pointer: CGPoint, now: ContinuousClock.Instant) -> Hover? {
         switch event {
         case .pointerMoved:
-            return moved(to: pointer)
-        case .shapeChanged(let metrics):
-            destination = metrics
+            return moved(to: pointer, now: now)
+        case .clicked:
+            if !isOnShape(pointer) { keepOpen = nil }
+            return moved(to: pointer, now: now)
+        case .floorEnded:
+            guard keepOpen != nil else { return nil }
+            return moved(to: pointer, now: now)
+        case .shapeChanged(let metrics, let expanded):
+            reshaped(to: metrics, expanded: expanded, pointer: pointer, now: now)
             return nil
         case .shapeDrawn(let metrics):
             drawn = metrics
@@ -67,7 +99,7 @@ struct NotchPointer {
             return .hold
         case .dragEnded:
             isDragging = false
-            return moved(to: pointer)
+            return moved(to: pointer, now: now)
         }
     }
 
@@ -82,8 +114,39 @@ struct NotchPointer {
             || NotchLayout.contains(point, metrics: destination, notchRect: notchRect)
     }
 
-    private mutating func moved(to point: CGPoint) -> Hover? {
+    /// Keeps the old frame open when the expanded shape shrinks under the hovering pointer; another
+    /// state ends it.
+    private mutating func reshaped(to metrics: NotchLayout.Metrics, expanded: Bool, pointer: CGPoint, now: ContinuousClock.Instant) {
+        let old = NotchLayout.frame(of: destination, notchRect: notchRect)
+        destination = metrics
+        guard expanded else {
+            keepOpen = nil
+            return
+        }
+        let region = old.insetBy(dx: -Self.keepOpenMargin, dy: -Self.keepOpenMargin)
+        guard !NotchLayout.frame(of: metrics, notchRect: notchRect).contains(old),
+              pointerInside, !isDragging, isIn(region, pointer)
+        else { return }
+        // One screen change can shrink in steps; the first frame stays open.
+        keepOpen = KeepOpen(region: keepOpen.map { $0.region.union(region) } ?? region, floorEnd: now + Self.shrinkFloor)
+    }
+
+    /// In `region`, the pointer on the screen's top row included; above it is another display.
+    private func isIn(_ region: CGRect, _ point: CGPoint) -> Bool {
+        point.y <= notchRect.maxY && region.minX <= point.x && point.x <= region.maxX && region.minY <= point.y
+    }
+
+    private mutating func moved(to point: CGPoint, now: ContinuousClock.Instant) -> Hover? {
         guard !isDragging else { return nil }
+        if let keepOpen {
+            if NotchLayout.contains(point, metrics: destination, notchRect: notchRect) {
+                self.keepOpen = nil
+            } else if now < keepOpen.floorEnd || isIn(keepOpen.region, point) {
+                return nil
+            } else {
+                self.keepOpen = nil
+            }
+        }
         let inside = isOnShape(point)
         guard inside != pointerInside else { return nil }
         pointerInside = inside
