@@ -3,8 +3,8 @@ import NotchKit
 import SwiftUI
 
 /// Keeps a history of copied text, images and links, encrypted on disk with a key kept in the
-/// Keychain, and shows it in the expanded notch with search and pins. Content marked by password
-/// managers is never recorded.
+/// Keychain, and shows it in the expanded notch with search and pins and the latest entries in a
+/// home tile. Content marked by password managers is never recorded.
 @MainActor
 public final class ClipboardPlugin: NotchPlugin {
     public static let manifest = PluginManifest(
@@ -46,6 +46,13 @@ public final class ClipboardPlugin: NotchPlugin {
     public var expandedTab: PluginTab? {
         PluginTab(title: Self.manifest.name, symbol: Self.manifest.symbol) { [history] in
             ClipboardView(history: history)
+        }
+    }
+
+    /// Wide: the latest entries. Small: the newest one.
+    public var tile: PluginTile? {
+        PluginTile(supportedSizes: [.wide, .small]) { [history] size in
+            ClipboardTile(history: history, size: size)
         }
     }
 

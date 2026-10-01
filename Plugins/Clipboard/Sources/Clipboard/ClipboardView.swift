@@ -1,25 +1,42 @@
 import AppKit
 import SwiftUI
 
+/// Draws `content` with the time the unsaved notice of `history` is judged at, and again when the
+/// notice is due. Until then the date is the moment the count rose, so a list written within the
+/// delay never shows the notice. An explicit timeline is not drawn at its last date, so a date that
+/// never comes follows the due one.
+struct UnsavedNoticeTimeline<Content: View>: View {
+    let history: ClipboardHistory
+    @ViewBuilder let content: (Date) -> Content
+
+    var body: some View {
+        TimelineView(.explicit(history.unsavedSince.map { since in
+            [since, since + ClipboardHistory.unsavedNoticeDelay, .distantFuture]
+        } ?? [])) { timeline in
+            content(timeline.date)
+        }
+    }
+}
+
 /// The expanded tab: a search field over the history, pinned entries first, newest first within
-/// each group. Clicking a row copies it back to the general pasteboard.
+/// each group. Clicking a row copies it back to the general pasteboard. It is `width` wide and the
+/// list `listHeight` tall, scrolling past that, so the tab has the same definite size however long
+/// the history is.
 struct ClipboardView: View {
+    static let width: CGFloat = 360
+    static let listHeight: CGFloat = 180
+
     let history: ClipboardHistory
     @State private var query = ""
 
     var body: some View {
-        // Drawn again when the unsaved notice is due. Until then the timeline's date is the moment
-        // the count rose, so a list written within the delay never shows the notice. An explicit
-        // timeline is not drawn at its last date, so a date that never comes follows the due one.
-        TimelineView(.explicit(history.unsavedSince.map { since in
-            [since, since + ClipboardHistory.unsavedNoticeDelay, .distantFuture]
-        } ?? [])) { timeline in
-            content(now: timeline.date)
+        UnsavedNoticeTimeline(history: history) { now in
+            content(now: now)
         }
     }
 
     private func content(now: Date) -> some View {
-        VStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 6) {
             SearchField(query: $query)
             if history.isStoreUnreadable {
                 notice("저장된 기록을 읽지 못했어요. 설정에서 초기화할 수 있어요.")
@@ -47,9 +64,11 @@ struct ClipboardView: View {
                         }
                     }
                     .scrollIndicators(.never)
+                    .frame(height: Self.listHeight)
                 }
             }
         }
+        .frame(width: Self.width)
     }
 
     private func rows(_ items: [ClipItem], now: Date) -> some View {
@@ -77,7 +96,6 @@ struct ClipboardView: View {
             .font(.system(size: 11))
             .foregroundStyle(.orange)
             .lineLimit(2)
-            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 8)
     }
 
@@ -85,7 +103,7 @@ struct ClipboardView: View {
         Text(text)
             .font(.system(size: 12))
             .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(width: Self.width, height: Self.listHeight)
     }
 }
 
@@ -128,9 +146,8 @@ private struct ClipRow: View {
         HStack(spacing: 6) {
             Button(action: copy) {
                 HStack(spacing: 8) {
-                    icon
-                        .frame(width: 26, height: 20)
-                    Text(preview)
+                    ClipIcon(item: item, size: CGSize(width: 26, height: 20))
+                    Text(item.preview)
                         .lineLimit(1)
                         .truncationMode(.tail)
                     Spacer(minLength: 4)
@@ -168,29 +185,42 @@ private struct ClipRow: View {
         }
     }
 
-    @ViewBuilder private var icon: some View {
-        switch item.content {
-        case .text:
-            Image(systemName: "text.alignleft").foregroundStyle(.secondary)
-        case .link:
-            Image(systemName: "link").foregroundStyle(.blue)
-        case .image(_, let thumbnail):
-            if let image = NSImage(data: thumbnail) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: 26, height: 20)
-                    .clipShape(RoundedRectangle(cornerRadius: 3))
-            } else {
-                Image(systemName: "photo").foregroundStyle(.secondary)
+}
+
+/// An entry's type: a text or link symbol, or the image's thumbnail filling `size`.
+struct ClipIcon: View {
+    let item: ClipItem
+    let size: CGSize
+
+    var body: some View {
+        Group {
+            switch item.content {
+            case .text:
+                Image(systemName: "text.alignleft").foregroundStyle(.secondary)
+            case .link:
+                Image(systemName: "link").foregroundStyle(.blue)
+            case .image(_, let thumbnail):
+                if let image = NSImage(data: thumbnail) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: size.width, height: size.height)
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                } else {
+                    Image(systemName: "photo").foregroundStyle(.secondary)
+                }
             }
         }
+        .frame(width: size.width, height: size.height)
     }
+}
 
-    private var preview: String {
-        switch item.content {
+extension ClipItem {
+    /// The entry on one line: a text with its runs of spaces and line breaks made single spaces, the
+    /// URL of a link, "이미지" for an image.
+    var preview: String {
+        switch content {
         case .text(let text):
-            // One line: runs of spaces and line breaks become a single space.
             text.prefix(300).split(whereSeparator: \.isWhitespace).joined(separator: " ")
         case .link(let url):
             url
