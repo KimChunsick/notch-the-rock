@@ -367,8 +367,8 @@ private func processEnded(_ pid: pid_t) async throws -> Bool {
 
 // MARK: - Live: the screen against the system tools at the same time
 
-/// Runs a tool and returns what it printed.
-private func run(_ executable: String, _ arguments: [String], environment: [String: String]? = nil) throws -> Data {
+/// Runs a tool and returns what it printed and its exit status.
+private func run(_ executable: String, _ arguments: [String], environment: [String: String]? = nil) throws -> (output: Data, status: Int32) {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = arguments
@@ -379,7 +379,7 @@ private func run(_ executable: String, _ arguments: [String], environment: [Stri
     try process.run()
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
-    return data
+    return (data, process.terminationStatus)
 }
 
 /// Shows the screen with the readers the plugin gives it and returns the first detail it publishes,
@@ -398,53 +398,133 @@ private func showScreen<Reference: Sendable>(
     return (shown, try await tools)
 }
 
-/// pid → POWER from the last sample of an independent `top -l 2 -o power` run, read with its own
-/// pattern rather than the reader's parser.
-@Sendable private func referenceTop() async throws -> [Int32: Double] {
-    let output = try await Task.detached {
-        String(decoding: try run("/usr/bin/top", ["-l", "2", "-s", "1", "-o", "power", "-stats", "pid,power"], environment: ["LC_ALL": "C"]), as: UTF8.self)
+/// What an independent `top -l 2 -o power -stats pid,power` run left: what it printed once it exited
+/// with status 0, or why it did not.
+private enum TopReference: Sendable {
+    case printed(String)
+    case failed(String)
+}
+
+/// An independent `top -l 2 -o power` run, read with the test's own pattern rather than the reader's
+/// parser.
+@Sendable private func referenceTop() async -> TopReference {
+    await Task.detached {
+        do {
+            let (output, status) = try run("/usr/bin/top", ["-l", "2", "-s", "1", "-o", "power", "-stats", "pid,power"], environment: ["LC_ALL": "C"])
+            return status == 0 ? .printed(String(decoding: output, as: UTF8.self)) : .failed("top exited with status \(status)")
+        } catch {
+            return .failed("top did not launch: \(error)")
+        }
     }.value
-    let lastSample = try #require(output.components(separatedBy: "PID ").last)
-    var power: [Int32: Double] = [:]
-    for match in lastSample.matches(of: /(?m)^\s*(\d+)\s+(\d+(?:\.\d+)?)\s*$/) {
-        if let pid = Int32(match.1), let value = Double(match.2) { power[pid] = value }
-    }
-    return power
 }
 
 /// Two scores agree when they are within 2 points or 30% of the larger one: top's energy impact
 /// moves from second to second, and two tops never sample exactly the same instant.
 private func close(_ a: Double, _ b: Double) -> Bool { abs(a - b) <= max(2, 0.3 * max(a, b)) }
 
+/// How the apps a screen shows compare with one reference top run.
+private enum AppOrderCheck: Equatable {
+    /// top's scores put the apps in the screen's order and no app top scores clearly higher is missing.
+    case agrees
+    /// What top's scores contradict on the screen.
+    case disagrees([String])
+    /// Why the run cannot judge the screen.
+    case inconclusive(String)
+}
+
+/// Whether `apps` come in the order the last sample of `top` puts them (pid → POWER, apps summed by
+/// `appPath` like the reader does), allowing for ties and apps moving between samples (`close`), with
+/// no app top scores clearly higher missing. A run that failed, printed no pid/POWER row or scored no
+/// app above 0 is inconclusive; with apps above 0 an empty screen disagrees. Also returns top's apps,
+/// highest first, for printing.
+private func checkAppOrder(_ apps: [AppEnergy], against top: TopReference, appPath: (Int32) -> String?) -> (check: AppOrderCheck, top: [AppEnergy]) {
+    let output: String
+    switch top {
+    case .printed(let printed): output = printed
+    case .failed(let reason): return (.inconclusive(reason), [])
+    }
+    let samples = output.components(separatedBy: "PID ")
+    guard samples.count > 1, let lastSample = samples.last else { return (.inconclusive("top printed no PID header"), []) }
+    var power: [Int32: Double] = [:]
+    for match in lastSample.matches(of: /(?m)^\s*(\d+)\s+(\d+(?:\.\d+)?)\s*$/) {
+        if let pid = Int32(match.1), let value = Double(match.2) { power[pid] = value }
+    }
+    guard !power.isEmpty else { return (.inconclusive("top's last sample has no pid/POWER row"), []) }
+    let referenceApps = AppEnergyReader.rank(power, appPath: appPath)
+    guard !referenceApps.isEmpty else { return (.inconclusive("top scored no app above 0 (\(power.count) processes)"), []) }
+    guard !apps.isEmpty else { return (.disagrees(["the screen shows no app while top scores \(referenceApps.count) above 0"]), referenceApps) }
+    let score = Dictionary(referenceApps.map { ($0.bundlePath, $0.power) }, uniquingKeysWith: +)
+    var problems: [String] = []
+    for (earlier, later) in zip(apps, apps.dropFirst()) {
+        let (a, b) = (score[earlier.bundlePath] ?? 0, score[later.bundlePath] ?? 0)
+        if b > a && !close(a, b) { problems.append("\(later.name) (\(b)) is clearly above \(earlier.name) (\(a)) in top") }
+    }
+    let floor = apps.count == AppEnergyReader.limit ? apps.last.map { score[$0.bundlePath] ?? 0 } ?? 0 : 0
+    for app in referenceApps where !apps.contains(where: { $0.bundlePath == app.bundlePath }) {
+        if app.power > floor && !close(app.power, floor) { problems.append("\(app.name) (\(app.power)) is missing") }
+    }
+    return (problems.isEmpty ? .agrees : .disagrees(problems), referenceApps)
+}
+
+/// A reference top run that failed, printed nothing usable or scored no app above 0 cannot judge the
+/// screen: it is inconclusive, never agreement. A usable run still catches a wrong order.
+@Test func R28__app_order_check_needs_a_usable_top_reference() {
+    let paths: [Int32: String] = [101: "/Applications/Alpha.app/Contents/MacOS/Alpha",
+                                  102: "/Applications/Beta.app/Contents/MacOS/Beta",
+                                  103: "/usr/libexec/somedaemon"]
+    let appPath = { (pid: Int32) in paths[pid].flatMap(AppEnergyReader.appBundlePath(forExecutable:)) }
+    let alpha = AppEnergy(bundlePath: "/Applications/Alpha.app", name: "Alpha", power: 30)
+    let beta = AppEnergy(bundlePath: "/Applications/Beta.app", name: "Beta", power: 5)
+    let usable = """
+    Processes: 400 total, 2 running, 398 sleeping, 2000 threads
+
+    PID    POWER
+    101    0.0
+    102    0.0
+    Processes: 400 total, 3 running, 397 sleeping, 2001 threads
+
+    PID    POWER
+    101    30.2
+    102    4.8
+    103    50.0
+    """
+    let allZero = usable.replacingOccurrences(of: "30.2", with: "0.0").replacingOccurrences(of: "4.8", with: "0.0")
+
+    func isInconclusive(_ check: AppOrderCheck) -> Bool {
+        if case .inconclusive = check { return true }
+        return false
+    }
+    #expect(isInconclusive(checkAppOrder([alpha, beta], against: .printed(""), appPath: appPath).check), "an empty top output")
+    #expect(isInconclusive(checkAppOrder([alpha, beta], against: .printed("top: failed to sample\n"), appPath: appPath).check), "an unparseable top output")
+    #expect(isInconclusive(checkAppOrder([alpha, beta], against: .printed(allZero), appPath: appPath).check), "a sample with every app at 0")
+    #expect(isInconclusive(checkAppOrder([alpha, beta], against: .failed("top exited with status 1"), appPath: appPath).check), "a failed top run")
+    #expect(checkAppOrder([alpha, beta], against: .printed(usable), appPath: appPath).check == .agrees)
+    #expect(checkAppOrder([beta, alpha], against: .printed(usable), appPath: appPath).check == .disagrees(["Alpha (30.2) is clearly above Beta (4.8) in top"]))
+    #expect(checkAppOrder([], against: .printed(usable), appPath: appPath).check == .disagrees(["the screen shows no app while top scores 2 above 0"]))
+}
+
 /// The apps the running screen shows, while an independent `top -o power` samples the same second,
-/// come in the order top's scores put them, allowing for ties and apps moving between samples
-/// (`close`), and no app top scores clearly higher is missing. Up to three attempts, each printed.
+/// agree with top (`checkAppOrder`). Up to three attempts, each printed; an attempt whose top run
+/// cannot judge the screen is retried, and when none can, the test is skipped with their reasons.
 @MainActor
 @Test func R28__live_screen_apps_match_top_power_order() async throws {
     var failures: [String] = []
+    var inconclusive: [String] = []
     for attempt in 1...3 {
-        let (shown, power) = try await showScreen(meanwhile: referenceTop)
-        let apps = shown.apps
-        let referenceApps = AppEnergyReader.rank(power) { pid in
+        let (shown, top) = try await showScreen(meanwhile: referenceTop)
+        let (check, topApps) = checkAppOrder(shown.apps, against: top) { pid in
             AppEnergyReader.executablePath(of: pid).flatMap(AppEnergyReader.appBundlePath(forExecutable:))
         }
-        let score = Dictionary(referenceApps.map { ($0.bundlePath, $0.power) }, uniquingKeysWith: +)
-        print("R28 attempt \(attempt) screen: \(apps.map { "\($0.name) \($0.power)" })")
-        print("R28 attempt \(attempt) top -o power: \(referenceApps.prefix(5).map { "\($0.name) \($0.power)" })")
-
-        var problems: [String] = []
-        for (earlier, later) in zip(apps, apps.dropFirst()) {
-            let (a, b) = (score[earlier.bundlePath] ?? 0, score[later.bundlePath] ?? 0)
-            if b > a && !close(a, b) { problems.append("\(later.name) (\(b)) is clearly above \(earlier.name) (\(a)) in top") }
+        print("R28 attempt \(attempt) screen: \(shown.apps.map { "\($0.name) \($0.power)" })")
+        print("R28 attempt \(attempt) top -o power: \(topApps.prefix(5).map { "\($0.name) \($0.power)" }) — \(check)")
+        switch check {
+        case .agrees: return
+        case .disagrees(let problems): failures.append("attempt \(attempt): \(problems.joined(separator: "; "))")
+        case .inconclusive(let reason): inconclusive.append("attempt \(attempt): \(reason)")
         }
-        let floor = apps.count == AppEnergyReader.limit ? apps.last.map { score[$0.bundlePath] ?? 0 } ?? 0 : 0
-        for app in referenceApps where !apps.contains(where: { $0.bundlePath == app.bundlePath }) {
-            if app.power > floor && !close(app.power, floor) { problems.append("\(app.name) (\(app.power)) is missing") }
-        }
-        if problems.isEmpty { return }
-        failures.append("attempt \(attempt): \(problems.joined(separator: "; "))")
     }
-    Issue.record("the screen's app order did not match top -o power: \(failures.joined(separator: " | "))")
+    if failures.isEmpty { try Test.cancel("no top -o power run could judge the screen: \(inconclusive.joined(separator: " | "))") }
+    Issue.record("the screen's app order did not match top -o power: \((failures + inconclusive).joined(separator: " | "))")
 }
 
 /// A connected device with a battery as the test reads it from the tools' raw output: its name and
@@ -503,15 +583,15 @@ private func toolPeripherals(ioreg: Data, systemProfiler: Data) -> [ToolPeripher
 /// What ioreg and system_profiler list right now.
 @Sendable private func rawToolPeripherals() async throws -> [ToolPeripheral] {
     try await Task.detached {
-        toolPeripherals(ioreg: try run("/usr/sbin/ioreg", ["-r", "-a", "-k", "BatteryPercent"]),
-                        systemProfiler: try run("/usr/sbin/system_profiler", ["-json", "SPBluetoothDataType"]))
+        toolPeripherals(ioreg: try run("/usr/sbin/ioreg", ["-r", "-a", "-k", "BatteryPercent"]).output,
+                        systemProfiler: try run("/usr/sbin/system_profiler", ["-json", "SPBluetoothDataType"]).output)
     }.value
 }
 
 /// Whether the raw tool output shows any connected device with a battery; nothing else skips the test.
 private let rawPeripheralConnected: Bool = {
-    guard let ioreg = try? run("/usr/sbin/ioreg", ["-r", "-a", "-k", "BatteryPercent"]),
-          let systemProfiler = try? run("/usr/sbin/system_profiler", ["-json", "SPBluetoothDataType"])
+    guard let ioreg = try? run("/usr/sbin/ioreg", ["-r", "-a", "-k", "BatteryPercent"]).output,
+          let systemProfiler = try? run("/usr/sbin/system_profiler", ["-json", "SPBluetoothDataType"]).output
     else { return false }
     return !toolPeripherals(ioreg: ioreg, systemProfiler: systemProfiler).isEmpty
 }()
