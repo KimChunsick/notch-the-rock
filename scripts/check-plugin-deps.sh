@@ -20,16 +20,47 @@
 #     fails the check, and so does a build whose trace holds none of the plugin's modules. The app
 #     and every plugin are Swift modules, which the trace lists. Test targets are not part of the
 #     product; the manifest rules above cover them.
+#   - the Swift modules each helper product loads. Helpers are chosen the way scripts/build-plugin.sh
+#     chooses them: every executable product and every dynamic library product other than <Name>;
+#     static and automatic libraries are none. Each is built and traced like the plugin's product,
+#     but a helper runs in a process of its own, outside the app that carries NotchKit (D-29), so a
+#     module it loads passes only when it lies in the SDK or the toolchain, or in the Modules folder
+#     of its own build as one of the package's targets that this build compiled. NotchKit fails. The
+#     helper's Swift targets come from `swift package describe`; a helper that has some fails when its
+#     trace holds none of them, and a C helper, which loads no Swift module, has nothing to trace.
+#   - the libraries each of these builds links, which no trace shows when a target links them through
+#     linker settings alone. After every build that succeeds, the binary it built, named the way
+#     scripts/build-plugin.sh names it (lib<product>.dylib for a dynamic library, <product> for an
+#     executable) in the folder that `swift build --show-bin-path` reports for the same configuration,
+#     package and scratch folder, is read with `otool -h -l`: every LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB,
+#     LC_REEXPORT_DYLIB, LC_LAZY_LOAD_DYLIB and LC_LOAD_UPWARD_DYLIB command names a library it links.
+#     `otool -L` would also list a library's own install name (LC_ID_DYLIB) and does not say which
+#     command an entry comes from. otool exits 0 for a file that is no Mach-O ("is not an object file")
+#     and for a truncated one, whose listing simply stops, so the output counts only when it is the
+#     complete listing of one binary of the product's kind: the binary's own line, its Mach header with
+#     the file type (an executable or a dynamic library) and the number of load commands, exactly that
+#     many load commands in order, each with its command, a name for every library command, and
+#     LC_SEGMENT_64 with LC_MAIN or LC_ID_DYLIB. Any other output fails the check. A linked library
+#     passes when it is an absolute path without empty, "." or ".." components, which is therefore its
+#     own normal form, in /usr/lib/ or /System/Library/; when it is exactly @rpath/lib<product>.dylib
+#     of one of the package's dynamic library products other than <Name>; or, for the plugin's product
+#     only, when it is exactly @rpath/libNotchKit.dylib. Anything else, @loader_path and
+#     @executable_path included, fails and is named with the product and the configurations that link
+#     it.
 # A plugin that depends on another package is not built: the build would fetch or build that
 # package. Every plugin builds in a scratch folder of its own in a temporary directory, which is
 # deleted afterwards, so Plugins/*/.build is neither read nor written. NotchKit is built alone once
 # per configuration; before each plugin the scratch folder is deleted and made again as a copy of
 # that build, so it holds NotchKit and this plugin's build and nothing another plugin built. A plugin
 # that imports another one without depending on it therefore does not compile and fails the check.
+# Before each helper the folder is made again the same way, so the helper's build compiles every
+# package target it depends on and its trace names them, even those the plugin's product compiled
+# first, and the helper reaches no module that the product or another helper built.
 # The copy keeps the folder's path because the compiler's module cache records it: a copy at
 # another path would build NotchKit again for every plugin.
-# Takes about two and a half minutes for three plugins, mostly building NotchKit twice.
-# Requires bash 3.2 or later, swift, xcrun and python3 (part of the Command Line Tools).
+# Takes about two and a half minutes for three plugins, mostly building NotchKit twice; every helper
+# adds a build of its own targets.
+# Requires bash 3.2 or later, swift, xcrun, otool and python3 (part of the Command Line Tools).
 set -euo pipefail
 shopt -s nullglob
 
@@ -78,10 +109,10 @@ for package in "${packages[@]}"; do
         continue
     fi
     printf 'check-plugin-deps: 빌드해서 확인해요: %s\n' "$name" >&2
-    python3 - "$name" "$package" "$SDK_DIR" "$dump" "$work" "$scratch" "$sdk_root" "$toolchain_lib" <<'PY' || offenders=$((offenders + 1))
-import json, os, re, subprocess, sys
+    python3 - "$name" "$package" "$SDK_DIR" "$dump" "$work" "$scratch" "$notchkit_build" "$sdk_root" "$toolchain_lib" <<'PY' || offenders=$((offenders + 1))
+import json, os, re, shutil, subprocess, sys, tempfile
 
-name, package, sdk_dir, dump, work, scratch, sdk_root, toolchain_lib = sys.argv[1:]
+name, package, sdk_dir, dump, work, scratch, notchkit_build, sdk_root, toolchain_lib = sys.argv[1:]
 manifest = json.load(open(dump))
 own_targets = {target["name"] for target in manifest["targets"]}
 problems = []
@@ -131,34 +162,137 @@ def inside(path, folder):
 own_modules = {module_of(target) for target in own_targets}
 system_folders = [os.path.realpath(sdk_root), os.path.realpath(toolchain_lib)]
 real_scratch = os.path.realpath(scratch)
-# (compiled module, loaded module, path) -> the configurations whose build loaded it
-foreign = {}
-if depends_on_other_packages:
-    problems.append("NotchKit 말고 다른 패키지를 의존해서 빌드하지 않았어요.")
-else:
-    for configuration in ("release", "debug"):
-        trace = os.path.join(work, f"{name}-{configuration}.trace")
+# The compiler appends to a trace file, so every build writes a file of its own in this folder.
+traces = tempfile.mkdtemp(dir=work)
+
+# The helper products, chosen the way scripts/build-plugin.sh chooses them, the file each product
+# builds in the build's bin folder and whether it is an executable, and the install names of the
+# package's own dynamic libraries other than the plugin's, which any of its builds may link.
+helpers = []
+binaries = {}
+own_libraries = set()
+for product in manifest["products"]:
+    if (product["type"].get("library") or [None])[0] == "dynamic":
+        binaries[product["name"]] = (f"lib{product['name']}.dylib", False)
+        if product["name"] != name:
+            helpers.append(product["name"])
+            own_libraries.add(f"@rpath/lib{product['name']}.dylib")
+    elif "executable" in product["type"]:
+        binaries[product["name"]] = (product["name"], True)
+        helpers.append(product["name"])
+
+# The folder a build of <configuration> writes its products to, as SwiftPM reports it for this
+# package and scratch folder, or None when it does not say.
+bin_paths = {}
+def bin_path(configuration):
+    if configuration not in bin_paths:
         result = subprocess.run(
-            ["swift", "build", "-c", configuration, "--package-path", package, "--product", name, "--scratch-path", scratch],
+            ["swift", "build", "-c", configuration, "--package-path", package, "--scratch-path", scratch, "--show-bin-path"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        bin_paths[configuration] = result.stdout.strip() if result.returncode == 0 else None
+    return bin_paths[configuration]
+
+# The install name of every library in the `otool -h -l` output for <binary>, from its dylib load
+# commands, or None unless the output is the complete listing of one executable (or dynamic library):
+# the binary's own line, the Mach header with that file type and the number of load commands, exactly
+# that many load commands in order, each with its command, a name for every dylib load command, and
+# LC_SEGMENT_64 with LC_MAIN (or LC_ID_DYLIB). otool exits 0 for a file that is no Mach-O and for a
+# truncated one, whose listing stops early, so its exit status alone proves nothing.
+DYLIB_LOADS = {"LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB", "LC_LAZY_LOAD_DYLIB", "LC_LOAD_UPWARD_DYLIB"}
+def libraries_in(output, binary, executable):
+    lines = output.splitlines()
+    if len(lines) < 4 or lines[0] != f"{binary}:" or lines[1] != "Mach header":
+        return None
+    header = dict(zip(lines[2].split(), lines[3].split()))
+    if header.get("filetype") != ("2" if executable else "6") or not header.get("ncmds", "").isdigit():
+        return None
+    commands, libraries = [], []
+    for line in lines[4:]:
+        if line.startswith("Load command "):
+            if line != f"Load command {len(commands)}":
+                return None
+            commands.append(None)
+            continue
+        field, _, value = line.strip().partition(" ")
+        if field == "cmd":
+            if not commands or commands[-1] is not None:
+                return None
+            commands[-1] = value
+        elif field == "name" and commands and commands[-1] in DYLIB_LOADS:
+            libraries.append(re.sub(r" \(offset \d+\)$", "", value))
+    required = {"LC_SEGMENT_64", "LC_MAIN" if executable else "LC_ID_DYLIB"}
+    if len(commands) != int(header["ncmds"]) or None in commands or not required <= set(commands):
+        return None
+    return libraries if len(libraries) == sum(command in DYLIB_LOADS for command in commands) else None
+
+def linked_libraries(binary, executable):
+    result = subprocess.run(["otool", "-h", "-l", binary], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return libraries_in(result.stdout, binary, executable) if result.returncode == 0 else None
+
+# An @rpath name passes only as exactly @rpath/<file> of an allowed library. Any other name passes only
+# as an absolute path without empty, "." or ".." components, which is its own normal form, so its
+# prefix says where the library lies: /usr/lib/../../Users/x.dylib does not lie in /usr/lib/. Names
+# relative to @loader_path or @executable_path, or to the working folder, fail.
+def library_allowed(library, helper):
+    if library.startswith("@rpath/"):
+        allowed = own_libraries if helper else own_libraries | {"@rpath/libNotchKit.dylib"}
+        return "/" not in library[len("@rpath/"):] and library in allowed
+    parts = library.split("/")
+    return (
+        parts[0] == "" and all(part not in ("", ".", "..") for part in parts[1:])
+        and library.startswith(("/usr/lib/", "/System/Library/"))
+    )
+
+# Builds <product> in release and then in debug, each with a trace of its own, and returns the
+# problems. The plugin's product may load and link NotchKit and fails when its trace names none of
+# the plugin's modules. A helper may neither load nor link NotchKit and fails for a trace without its
+# modules only when it has Swift targets (swift_modules), because a C helper loads no Swift module.
+def check(product, index, helper, swift_modules):
+    prefix = f"도우미 {product}: " if helper else ""
+    found = []
+    # (compiled module, loaded module, path) -> the configurations whose build loaded it
+    foreign = {}
+    # linked library -> the configurations whose build links it
+    linked = {}
+    for configuration in ("release", "debug"):
+        trace = os.path.join(traces, f"{index}-{configuration}.trace")
+        result = subprocess.run(
+            ["swift", "build", "-c", configuration, "--package-path", package, "--product", product, "--scratch-path", scratch],
             env=dict(os.environ, SWIFT_LOADED_MODULE_TRACE_FILE=trace),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         if result.returncode != 0:
             lines = result.stdout.splitlines()
-            errors = [line for line in lines if "error:" in line] or lines
-            problems.append(f"{configuration} 빌드에 실패해서 불러오는 모듈을 확인하지 못했어요. 빌드 오류:\n" + "\n".join(errors[-20:]))
+            # The linker's own lines, such as "ld: library 'X' not found", carry no "error:".
+            errors = [line for line in lines if "error:" in line or line.startswith("ld: ")] or lines
+            found.append(f"{prefix}{configuration} 빌드에 실패해서 불러오는 모듈을 확인하지 못했어요. 빌드 오류:\n" + "\n".join(errors[-20:]))
             break
+        folder = bin_path(configuration)
+        file, executable = binaries.get(product, (None, False))
+        binary = os.path.join(folder, file) if folder and file else None
+        libraries = linked_libraries(binary, executable) if binary and os.path.isfile(binary) else None
+        if libraries is None:
+            found.append(f"{prefix}{configuration} 빌드 결과를 읽지 못해서 링크하는 라이브러리를 확인하지 못했어요: {binary or product}")
+        for library in libraries or []:
+            if not library_allowed(library, helper):
+                configurations = linked.setdefault(library, [])
+                if configuration not in configurations:
+                    configurations.append(configuration)
         records = []
         if os.path.exists(trace):
             with open(trace) as file:
                 records = [json.loads(line) for line in file if line.strip()]
-        # The plugin's targets this build compiled. A declared target the product does not build
+        # The package's targets this build compiled. A declared target the product does not build
         # is not among them, so a module of that name in the Modules folder is not the plugin's.
         built_modules = own_modules & {record["name"] for record in records}
-        if not built_modules:
-            problems.append(f"{configuration} 빌드 기록에 이 플러그인의 모듈이 없어서 불러오는 모듈을 확인하지 못했어요.")
+        if not built_modules and not helper:
+            found.append(f"{configuration} 빌드 기록에 이 플러그인의 모듈이 없어서 불러오는 모듈을 확인하지 못했어요.")
             continue
-        allowed_modules = built_modules | {"NotchKit"}
+        if not built_modules and swift_modules:
+            found.append(f"{prefix}{configuration} 빌드 기록에 이 도우미의 Swift 타깃이 없어서 불러오는 모듈을 확인하지 못했어요.")
+            continue
+        allowed_modules = built_modules if helper else built_modules | {"NotchKit"}
         # Every record counts, not only those of the own targets: the manifest's and NotchKit's
         # records load only SDK and toolchain modules.
         for record in records:
@@ -172,8 +306,49 @@ else:
                 configurations = foreign.setdefault((record["name"], module, path), [])
                 if configuration not in configurations:
                     configurations.append(configuration)
-for (compiled, module, path), configurations in foreign.items():
-    problems.append(f"타깃 {compiled}의 {', '.join(configurations)} 빌드가 NotchKit이 아닌 모듈을 불러와요: {module} ({path})")
+    for (compiled, module, path), configurations in foreign.items():
+        configurations = ", ".join(configurations)
+        if not helper:
+            found.append(f"타깃 {compiled}의 {configurations} 빌드가 NotchKit이 아닌 모듈을 불러와요: {module} ({path})")
+        elif module == "NotchKit":
+            found.append(f"{prefix}타깃 {compiled}의 {configurations} 빌드가 NotchKit을 불러와요 ({path}). 도우미는 앱과 다른 프로세스에서 실행돼서 앱에 들어 있는 NotchKit을 쓸 수 없어요.")
+        else:
+            found.append(f"{prefix}타깃 {compiled}의 {configurations} 빌드가 도우미가 쓸 수 없는 모듈을 불러와요: {module} ({path})")
+    for library, configurations in linked.items():
+        configurations = ", ".join(configurations)
+        if not helper:
+            found.append(f"제품 {product}의 {configurations} 빌드가 NotchKit이 아닌 라이브러리를 링크해요: {library}")
+        elif os.path.basename(library) == "libNotchKit.dylib":
+            found.append(f"{prefix}{configurations} 빌드가 NotchKit을 링크해요 ({library}). 도우미는 앱과 다른 프로세스에서 실행돼서 앱에 들어 있는 NotchKit을 쓸 수 없어요.")
+        else:
+            found.append(f"{prefix}{configurations} 빌드가 도우미가 쓸 수 없는 라이브러리를 링크해요: {library}")
+    return found
+
+if depends_on_other_packages:
+    problems.append("NotchKit 말고 다른 패키지를 의존해서 빌드하지 않았어요.")
+else:
+    problems += check(name, 0, False, set())
+    if helpers:
+        # The dump does not say which targets are Swift ones; describe does, with the products each
+        # target is part of, directly or through another target.
+        result = subprocess.run(
+            ["swift", "package", "--package-path", package, "--scratch-path", scratch, "describe", "--type", "json"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        if result.returncode != 0:
+            problems.append("swift package describe가 실패해서 도우미를 확인하지 못했어요.\n" + result.stderr.strip())
+        else:
+            described = json.loads(result.stdout)["targets"]
+            for index, product in enumerate(helpers, start=1):
+                print(f"check-plugin-deps: 도우미를 빌드해서 확인해요: {name} {product}", file=sys.stderr, flush=True)
+                # This helper's own scratch folder: only NotchKit's build, at the path it was built in.
+                shutil.rmtree(scratch)
+                subprocess.run(["cp", "-cR", notchkit_build, scratch], check=True)
+                swift_modules = {
+                    module_of(target["name"]) for target in described
+                    if target.get("module_type") == "SwiftTarget" and product in target.get("product_memberships", [])
+                }
+                problems += check(product, index, True, swift_modules)
 
 for problem in problems:
     print(f"{name}: {problem}")
