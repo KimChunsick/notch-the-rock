@@ -842,3 +842,37 @@ private func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom
     #expect(h.volume.state == VolumeState(level: 0.0625, isMuted: false, canMute: true))
     #expect(h.host.huds == ["speaker.badge.exclamationmark.fill 볼륨 0.0625 바꿀 수 없어요"])
 }
+
+/// The fill colour of every slider control `view` draws with, hosted in a window, as sRGB
+/// components 0...1; a slider left at the system accent has none.
+@MainActor
+private func sliderFills(in view: some View) -> [[CGFloat]] {
+    let hosting = NSHostingView(rootView: view.environment(\.colorScheme, .dark))
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200), styleMask: [.borderless], backing: .buffered, defer: true)
+    window.contentView = hosting
+    hosting.layoutSubtreeIfNeeded()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    func fills(_ view: NSView) -> [[CGFloat]] {
+        let own = (view as? NSSlider)?.trackFillColor?.usingColorSpace(.sRGB).map { [$0.redComponent, $0.greenComponent, $0.blueComponent] }
+        return (own.map { [$0] } ?? []) + view.subviews.flatMap(fills)
+    }
+    return fills(hosting)
+}
+
+/// R38: the volume screen's slider, and the wide tile's, fill with the colour that ends the notch's
+/// volume bar instead of the system accent. An offscreen render on macOS 26 draws the slider's
+/// knob but not its track, so this reads the fill colour of the slider control the screen shows.
+@MainActor
+@Test func R38__the_volume_slider_is_tinted_the_volume_blue() throws {
+    let h = try Harness()
+    h.plugin.model.refresh()
+    let views = [try #require(h.plugin.expandedTab).content, try #require(h.plugin.tile).content(.wide)]
+    for (name, view) in zip(["screen", "wide tile"], views) {
+        let fills = sliderFills(in: view)
+        print("R38 volume \(name) slider fills \(fills)")
+        #expect(fills.count == 1, "\(name): \(fills)")
+        for fill in fills {
+            #expect(zip(fill, [0.36, 0.64, 1]).allSatisfy { abs($0 - $1) <= 0.02 }, "\(name): \(fill)")
+        }
+    }
+}

@@ -72,7 +72,7 @@ import Testing
 
     /// The shape's edges (found from outside, past the blue backdrop), then the ink: any pixel whose
     /// red is at least 14 (the backdrop has none, the shape is black). The bar's fill is told from
-    /// its dark track by a red of at least 120.
+    /// its dark track by a channel of at least 120, whatever its colour.
     nonisolated static func measure(_ image: CGImage, scale: CGFloat, notch: CGSize) -> Drawn? {
         let width = image.width, height = image.height
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
@@ -113,7 +113,7 @@ import Testing
         let barRow = (rightBox.minY + rightBox.maxY) / 2
         var fillMaxX = rightBox.minX - 1
         var red = 0, blue = 0, count = 0
-        for x in rightBox.minX...rightBox.maxX where rgb(x, barRow).r >= 120 {
+        for x in rightBox.minX...rightBox.maxX where bright(x, barRow) >= 120 {
             fillMaxX = max(fillMaxX, x)
             red += rgb(x, barRow).r
             blue += rgb(x, barRow).b
@@ -139,7 +139,7 @@ import Testing
 
     /// At the notch heights of the 13" and 15" MacBook Air: the symbol and the bar only in the side
     /// wings at the collapsed height, the bar 70–90 pt long and about 6 pt tall, filled in proportion
-    /// to the value (±2 %), muted with an empty bar, brightness warm and volume cool.
+    /// to the value (±2 %), muted with an empty bar, brightness warm and volume cool (blue, R38).
     @Test(arguments: [CGFloat(32), 37])
     func R25__hud_draws_symbol_and_bar_in_the_collapsed_wings(notchHeight: CGFloat) async throws {
         for (name, hud) in Self.cases {
@@ -162,5 +162,23 @@ import Testing
                 #expect(drawn.fillBlue >= drawn.fillRed - 4, "cool fill: \(what)")
             }
         }
+    }
+
+    /// R38: the volume bar is a calm blue, plainly unlike the brightness bar's warm gold, and each
+    /// keeps its colour when its plugin shows a refused change with a badged symbol of its family.
+    @Test func R38__volume_bar_is_blue_and_unlike_the_brightness_bar() async throws {
+        let volume = try await draw("volume-50-R38", HUD(symbol: "speaker.wave.2.fill", title: "볼륨", value: 0.5, detail: "50%"), notchHeight: 32)
+        let refusedVolume = try await draw("volume-refused-R38", HUD(symbol: "speaker.badge.exclamationmark.fill", title: "볼륨", value: 0.5, detail: "바꿀 수 없어요"), notchHeight: 32)
+        let brightness = try await draw("brightness-50-R38", HUD(symbol: "sun.max.fill", title: "밝기", value: 0.5, detail: "50%"), notchHeight: 32)
+        let refusedBrightness = try await draw("brightness-refused-R38", HUD(symbol: "sun.max.trianglebadge.exclamationmark.fill", title: "밝기", value: 0.5, detail: "바꿀 수 없어요"), notchHeight: 32)
+        for (name, drawn) in [("volume", volume), ("refused volume", refusedVolume)] {
+            #expect(abs(drawn.fill - 0.5) <= 0.02, "\(name): \(drawn)")
+            #expect(drawn.fillBlue - drawn.fillRed >= 60, "\(name) fill is not blue: \(drawn)")
+        }
+        for (name, drawn) in [("brightness", brightness), ("refused brightness", refusedBrightness)] {
+            #expect(drawn.fillRed - drawn.fillBlue >= 40, "\(name) fill is not warm: \(drawn)")
+        }
+        #expect(abs(volume.fillRed - brightness.fillRed) + abs(volume.fillBlue - brightness.fillBlue) >= 120,
+                "volume \(volume) vs brightness \(brightness)")
     }
 }

@@ -90,8 +90,11 @@ struct VolumeTile: View {
     }
 }
 
-/// The volume as a slider. A level the device refuses snaps it back.
+/// The volume as a slider, tinted with the calm blue that ends the notch's volume bar. A level the
+/// device refuses snaps it back.
 private struct VolumeSlider: View {
+    static let tint = Color(red: 0.36, green: 0.64, blue: 1)
+
     let model: VolumeModel
     let volume: VolumeState
 
@@ -100,6 +103,7 @@ private struct VolumeSlider: View {
             Text("볼륨")
         }
         .labelsHidden()
+        .tint(Self.tint)
     }
 }
 

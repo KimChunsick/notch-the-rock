@@ -63,8 +63,11 @@ struct BrightnessTile: View {
     }
 }
 
-/// The brightness as a slider. A value the display refuses snaps it back.
+/// The brightness as a slider, tinted with the gold that ends the notch's brightness bar. A value
+/// the display refuses snaps it back.
 private struct BrightnessSlider: View {
+    static let tint = Color(red: 0.97, green: 0.73, blue: 0.28)
+
     let model: BrightnessModel
     let brightness: Double
 
@@ -73,6 +76,7 @@ private struct BrightnessSlider: View {
             Text("밝기")
         }
         .labelsHidden()
+        .tint(Self.tint)
     }
 }
 
