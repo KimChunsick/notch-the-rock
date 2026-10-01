@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 
 /// 플러그인: every discovered bundle with its state, an on/off switch, consent for user bundles and
-/// the plugin's own settings page while it is on. Scrolls to the page of the plugin whose gear was
-/// pressed (`revealed`).
+/// the plugin's own settings page while it is on. Scrolls to the page of the record running the
+/// plugin whose gear was pressed (`revealed`).
 struct PluginSettingsPane: View {
     let catalog: PluginCatalog
     var revealed: SettingsSelection.Reveal?
@@ -35,7 +35,7 @@ struct PluginSettingsPane: View {
                 }
                 .formStyle(.grouped)
                 .onChange(of: revealed, initial: true) { _, revealed in
-                    if let id = revealed?.record(in: catalog.records) { proxy.scrollTo(id, anchor: .top) }
+                    if let revealed { proxy.scrollTo(revealed.record, anchor: .top) }
                 }
             }
 

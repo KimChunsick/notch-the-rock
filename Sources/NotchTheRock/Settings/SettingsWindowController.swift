@@ -7,19 +7,23 @@ import SwiftUI
 @MainActor
 final class SettingsWindowController {
     private let catalog: PluginCatalog
-    private let selection = SettingsSelection()
+    let selection = SettingsSelection()
     private var window: NSWindow?
+    private let present: @MainActor (NSWindow) -> Void
 
-    init(catalog: PluginCatalog) {
+    /// - Parameter present: brings the window to the front; tests keep it hidden.
+    init(catalog: PluginCatalog, present: @escaping @MainActor (NSWindow) -> Void = { $0.showInFront() }) {
         self.catalog = catalog
+        self.present = present
     }
 
-    /// Shows the window; for a plugin's id, on the 플러그인 tab at that plugin's page.
+    /// Shows the window; for a plugin's id, on the 플러그인 tab at the page of the bundle running as
+    /// that plugin, or at the top of the tab when none runs.
     func show(pluginID: String? = nil) {
-        if let pluginID { selection.reveal(pluginID: pluginID) }
+        if let pluginID { selection.showPlugins(revealing: catalog.runningRecord(for: pluginID)) }
         let window = window ?? makeWindow()
         self.window = window
-        window.showInFront()
+        present(window)
     }
 
     func makeWindow() -> NSWindow {
@@ -45,7 +49,7 @@ extension NSWindow {
     }
 }
 
-/// The Settings window's tab, and the plugin whose page the 플러그인 tab scrolls to.
+/// The Settings window's tab, and the record whose page the 플러그인 tab scrolls to.
 @MainActor
 @Observable
 final class SettingsSelection {
@@ -55,24 +59,20 @@ final class SettingsSelection {
         case permissions
     }
 
-    /// One request to show a plugin's page. Each is new, so asking again for the same plugin after
+    /// One request to show a record's page. Each is new, so asking again for the same plugin after
     /// scrolling away scrolls back to it.
     struct Reveal: Equatable {
-        let pluginID: String
+        let record: PluginRecord.ID
         let serial: Int
-
-        /// The plugin's record, matched by identifier as the host keys plugins (`PluginKey`).
-        func record(in records: [PluginRecord]) -> PluginRecord.ID? {
-            records.first { $0.key == PluginKey(pluginID) }?.id
-        }
     }
 
     var tab: Tab = .general
     private(set) var revealed: Reveal?
 
-    func reveal(pluginID: String) {
+    /// The 플러그인 tab, at `record`'s page when there is one.
+    func showPlugins(revealing record: PluginRecord.ID?) {
         tab = .plugins
-        revealed = Reveal(pluginID: pluginID, serial: (revealed?.serial ?? 0) + 1)
+        revealed = record.map { Reveal(record: $0, serial: (revealed?.serial ?? 0) + 1) }
     }
 }
 

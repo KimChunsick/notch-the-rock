@@ -178,18 +178,82 @@ import Testing
         #expect(host.state == .expanded)
     }
 
-    @Test func R29__settings_open_on_the_plugins_tab_at_that_plugins_page() throws {
-        let selection = SettingsSelection()
-        #expect(selection.tab == .general)
-        selection.reveal(pluginID: "com.example.Clipboard")
-        #expect(selection.tab == .plugins)
-        let first = try #require(selection.revealed)
-        let records = [URL(fileURLWithPath: "/tmp/a.notchplugin"), URL(fileURLWithPath: "/tmp/b.notchplugin")].enumerated().map { index, url in
-            PluginRecord(bundleURL: url, source: .builtIn, identifier: index == 0 ? "com.example.battery" : "com.example.clipboard", name: "", version: "", fingerprint: nil, state: .on)
+    /// The gear through the app's own opener (`main.swift` hands the band `settings.show(pluginID:)`)
+    /// into the Settings window controller, whose window is made but not shown. The bundle listed
+    /// first with the identifier is refused (it needs a newer SDK), so the later one owns the
+    /// identifier and runs: Settings opens at the running bundle's page, never the refused one's.
+    @Test func R29__the_gear_opens_settings_at_the_running_bundle_not_an_earlier_refused_one_with_its_id() throws {
+        let fixture = try PluginFixture()
+        let home = HomeDefaults()
+        defer {
+            fixture.cleanUp()
+            home.cleanUp()
         }
-        #expect(first.record(in: records) == records[1].id)
-        // Asking again for the same plugin is a new request, so the page scrolls to it again.
-        selection.reveal(pluginID: "com.example.Clipboard")
-        #expect(selection.revealed != first)
+        let id = fixture.newIdentifier()
+        let plain = fixture.newIdentifier()
+        let refused = try fixture.makeBundle(in: fixture.locations.builtIn!, name: "A", identifier: id, sdk: "2.0")
+        let running = try fixture.makeBundle(in: fixture.locations.builtIn!, name: "B", identifier: id)
+        try fixture.makeBundle(in: fixture.locations.builtIn!, name: "C", identifier: plain)
+        let host = NotchHostModel(now: { .now }, homeStore: home.store)
+        let catalog = fixture.catalog(host: host) { info in
+            let manifest = PluginManifest(id: info.identifier, name: "플러그인", version: "1.0.0", symbol: "square", sdkVersion: NotchKitSDK.version)
+            return (manifest, info.identifier == id ? SettingsPagePlugin.self : CountingPlugin.self)
+        }
+        catalog.loadAll()
+        guard case .failed = catalog.records[0].state else {
+            Issue.record("the earlier bundle was not refused: \(catalog.records.map(\.state))")
+            return
+        }
+        #expect(catalog.records.map(\.id) == [refused.path, running.path, fixture.locations.builtIn!.appendingPathComponent("C.notchplugin").path])
+        #expect(catalog.records[1].state == .on)
+        // The home learns which plugins have a settings page from the plugins themselves.
+        #expect(host.plugins.map(\.pluginID) == [id, plain])
+        #expect(host.plugins.map(\.hasSettings) == [true, false])
+
+        var presented: [NSWindow] = []
+        let settings = SettingsWindowController(catalog: catalog, present: { presented.append($0) })
+        let band = { (plugin: HomePlugin) in
+            PluginBand(host: host, plugin: plugin, notchSize: Self.notch, width: NotchSizing.maxWidth, openSettings: { settings.show(pluginID: $0) })
+        }
+        #expect(band(host.plugins[1]).settingsAction == nil)
+        host.open(pluginID: id)
+        let gear = try #require(band(host.plugins[0]).settingsAction)
+        #expect(settings.selection.tab == .general)
+        gear()
+        #expect(presented.count == 1)
+        #expect(settings.selection.tab == .plugins)
+        let first = try #require(settings.selection.revealed)
+        #expect(first.record == running.path)
+        #expect(first.record != refused.path)
+        // Pressing it again is a new request, so the page scrolls to the plugin again, in the same window.
+        gear()
+        #expect(settings.selection.revealed?.record == running.path)
+        #expect(settings.selection.revealed != first)
+        #expect(presented.count == 2 && presented[0] === presented[1])
+
+        // With no running bundle for the identifier, Settings opens on the 플러그인 tab without a page.
+        catalog.setEnabled(false, for: running.path)
+        settings.selection.tab = .general
+        gear()
+        #expect(settings.selection.tab == .plugins)
+        #expect(settings.selection.revealed == nil)
+    }
+}
+
+/// A plugin with a settings page, so its screen's band has a gear.
+@MainActor
+final class SettingsPagePlugin: NotchPlugin {
+    static let manifest = PluginManifest(id: "com.example.settingspage", name: "SettingsPage", version: "1.0.0", symbol: "square", sdkVersion: NotchKitSDK.version)
+
+    init(context: NotchContext) {}
+    func activate() {}
+    func deactivate() {}
+
+    var expandedTab: PluginTab? {
+        PluginTab(title: "SettingsPage", symbol: "square") { Text("page") }
+    }
+
+    var settingsView: AnyView? {
+        AnyView(Text("settings"))
     }
 }
