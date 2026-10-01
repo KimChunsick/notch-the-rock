@@ -3,7 +3,8 @@ import SwiftUI
 
 /// Slides the percentage and charging state out of the notch when external power connects or
 /// disconnects, shows a compact charging indicator beside the notch while charging, shows the
-/// percentage in a home tile, and shows the percentage, state and remaining time in its screen.
+/// percentage in a home tile, and shows the percentage, state and remaining time in its screen with
+/// the apps using the most energy and the connected peripherals' batteries below them.
 @MainActor
 public final class BatteryPlugin: NotchPlugin {
     public static let manifest = PluginManifest(
@@ -18,13 +19,19 @@ public final class BatteryPlugin: NotchPlugin {
     static let hudDuration: Duration = .milliseconds(2500)
 
     private let context: NotchContext
-    private let model = BatteryModel()
+    private let model: BatteryModel
     private var monitor: PowerSourceMonitor?
     /// Percentage shown by the posted charging activity, nil while none is posted.
     private var postedChargingPercentage: Int?
 
-    public init(context: NotchContext) {
+    public convenience init(context: NotchContext) {
+        self.init(context: context, sampler: BatteryDetail.sample)
+    }
+
+    /// `sampler` reads the screen's app and peripheral lists while it is shown; nil reads none.
+    init(context: NotchContext, sampler: BatteryModel.Sampler?) {
         self.context = context
+        self.model = BatteryModel(sampler: sampler)
     }
 
     public func activate() {
