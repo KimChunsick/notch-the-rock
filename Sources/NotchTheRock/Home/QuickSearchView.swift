@@ -28,19 +28,25 @@ struct QuickSearchView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
             } else if results.count > Self.visibleRows {
+                // The selected result stays in sight: when the list appears (a broader query keeps
+                // a selection made further down), when the results change and when it moves.
                 ScrollViewReader { proxy in
                     ScrollView { rows(results) }
                         .scrollIndicators(.never)
                         .frame(height: CGFloat(Self.visibleRows) * 28 + CGFloat(Self.visibleRows - 1) * 4)
-                        .onChange(of: host.selectedResult?.pluginID) { _, selected in
-                            if let selected { proxy.scrollTo(selected) }
-                        }
+                        .onAppear { scrollToSelection(proxy) }
+                        .onChange(of: results.map(\.pluginID)) { scrollToSelection(proxy) }
+                        .onChange(of: host.selectedResult?.pluginID) { scrollToSelection(proxy) }
                 }
             } else {
                 rows(results)
             }
         }
         .foregroundStyle(.white)
+    }
+
+    private func scrollToSelection(_ proxy: ScrollViewProxy) {
+        if let selected = host.selectedResult?.pluginID { proxy.scrollTo(selected) }
     }
 
     private func rows(_ results: [HomeEntry]) -> some View {
@@ -105,6 +111,9 @@ private struct QuickSearchField: NSViewRepresentable {
 /// that opened the search (`HomeKeyboard.openingKey`) through its field editor, where an input
 /// method gets it like any other key: ㄴ then ㅏ composes 나. Everything typed, the composition
 /// included, becomes the query.
+///
+/// The field follows the window's shared field editor only while it edits with it: from every time
+/// it takes the focus (entering its window, Tab back, a click) until its editing ends.
 final class QuickSearchTextField: NSTextField {
     weak var keyboard: HomeKeyboard?
     private var editing: NSObjectProtocol?
@@ -114,10 +123,15 @@ final class QuickSearchTextField: NSTextField {
         unfollow()
         guard let window, window.makeFirstResponder(self), let editor = currentEditor() as? NSTextView else { return }
         editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
-        follow(editor)
         guard let opening = keyboard?.openingKey else { return }
         keyboard?.openingKey = nil
         editor.keyDown(with: opening)
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        guard super.becomeFirstResponder() else { return false }
+        if let editor = currentEditor() as? NSTextView { follow(editor) }
+        return true
     }
 
     override func textDidEndEditing(_ notification: Notification) {
@@ -126,19 +140,27 @@ final class QuickSearchTextField: NSTextField {
         super.textDidEndEditing(notification)
     }
 
-    /// Copies the field editor's text into the query on every change of its storage, a composition
-    /// included: `textDidChange` does not come for marked text.
+    /// Copies the field editor's text into the query now and on every change of its storage, a
+    /// composition included: `textDidChange` does not come for marked text.
     private func follow(_ editor: NSTextView) {
+        unfollow()
         editing = NotificationCenter.default.addObserver(
             forName: NSTextStorage.didProcessEditingNotification,
             object: editor.textStorage,
             queue: nil
         ) { [weak self, weak editor] _ in
             MainActor.assumeIsolated {
-                guard let keyboard = self?.keyboard, keyboard.query != nil, let editor else { return }
-                keyboard.query = editor.string
+                guard let self, let editor else { return }
+                self.copyQuery(from: editor)
             }
         }
+        copyQuery(from: editor)
+    }
+
+    /// The field editor's text is the query while the search is open.
+    private func copyQuery(from editor: NSTextView) {
+        guard let keyboard, keyboard.query != nil, keyboard.query != editor.string else { return }
+        keyboard.query = editor.string
     }
 
     private func unfollow() {

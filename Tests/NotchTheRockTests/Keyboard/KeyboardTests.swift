@@ -453,6 +453,34 @@ struct KeyboardTests {
         #expect(host.keyboard.query == nil)
     }
 
+    @Test func R17__the_search_follows_the_field_again_after_it_loses_and_regains_the_focus() throws {
+        defer { fixture.cleanUp() }
+        let host = sampleHost()
+        host.toggleFromKeyboard()
+        let window = notchWindow(showing: host)
+        #expect(NotchWindowController.takesKey(try keyDown("w", kVK_ANSI_W, in: window), notchWindow: window, host: host))
+        settle(try #require(window.contentView))
+        let editor = try #require(window.firstResponder as? NSTextView)
+        let delegate: AnyObject? = editor.delegate
+        let field = try #require(delegate as? QuickSearchTextField)
+        #expect(host.keyboard.query == "w")
+
+        // Tab ends the editing; the same field, still in its window, then takes the focus again.
+        editor.insertTab(nil)
+        #expect(host.keyboard.query == "w")
+        #expect(window.makeFirstResponder(field))
+        let refocused = try #require(window.firstResponder as? NSTextView)
+        refocused.selectAll(nil)
+        refocused.keyDown(with: try keyDown("c", kVK_ANSI_C, in: window))
+        #expect(refocused.string == "c")
+        #expect(host.keyboard.query == "c")
+        #expect(host.searchResults.map(\.pluginID) == ["B"])
+
+        // Enter opens what the field now says, not what it said before.
+        #expect(NotchWindowController.takesKey(try keyDown("\r", kVK_Return, in: window), notchWindow: window, host: host))
+        #expect(host.screen == .detail(pluginID: "B"))
+    }
+
     // MARK: Long list
 
     /// A large tile and eight list rows, two more than the list shows without scrolling.
@@ -477,6 +505,42 @@ struct KeyboardTests {
         #expect(host.listScrollTarget == "L7")
         _ = host.handleKey(.down)
         #expect(host.listScrollTarget == "L8")
+    }
+
+    @Test func R17__a_search_result_chosen_under_a_narrow_query_stays_in_view_when_the_query_broadens() throws {
+        defer { fixture.cleanUp() }
+        let host = longListHost()
+        host.toggleFromKeyboard()
+        let window = notchWindow(showing: host)
+        let content = try #require(window.contentView)
+
+        // Narrow the search to the eighth row and choose it.
+        #expect(NotchWindowController.takesKey(try keyDown("8", kVK_ANSI_8, in: window), notchWindow: window, host: host))
+        settle(content)
+        #expect(host.searchResults.map(\.pluginID) == ["L8"])
+        #expect(NotchWindowController.takesKey(try keyDown("", kVK_DownArrow, in: window), notchWindow: window, host: host))
+
+        // Clearing the query lists all nine plugins, six at a time; the chosen row is the ninth.
+        try #require(window.firstResponder as? NSTextView).deleteBackward(nil)
+        settle(content)
+        #expect(host.keyboard.query == "")
+        let results = host.searchResults.map(\.pluginID)
+        #expect(results.count == 9)
+        #expect(host.selectedResult?.pluginID == "L8")
+        let index = CGFloat(try #require(results.firstIndex(of: "L8")))
+        let row = (index * 32)...(index * 32 + 28)
+
+        let list = try #require(scrollViews(in: content).first)
+        let document = try #require(list.documentView)
+        let visible = list.documentVisibleRect
+        let shown = document.isFlipped
+            ? visible.minY...visible.maxY
+            : (document.bounds.height - visible.maxY)...(document.bounds.height - visible.minY)
+        #expect(shown.lowerBound <= row.lowerBound + 0.5 && row.upperBound <= shown.upperBound + 0.5, "rows \(shown) shown, chosen row at \(row)")
+    }
+
+    private func scrollViews(in view: NSView) -> [NSScrollView] {
+        ((view as? NSScrollView).map { [$0] } ?? []) + view.subviews.flatMap(scrollViews(in:))
     }
 
     // MARK: Recorder
@@ -533,17 +597,17 @@ struct KeyboardTests {
         host.toggleFromKeyboard()
         _ = host.handleKey(.right)
         _ = host.handleKey(.down)
-        try render(HomeView(host: host).padding(16).background(Color.black), to: folder.appendingPathComponent("R17-render-home-focus-T71.png"))
+        try render(HomeView(host: host).padding(16).background(Color.black), to: folder.appendingPathComponent("R17-render-home-focus-T72.png"))
 
         _ = host.handleKey(.text("ㅁ"))
         host.keyboard.query = "ㅁ"
         _ = host.handleKey(.down)
-        try render(HomeView(host: host).padding(16).background(Color.black), to: folder.appendingPathComponent("R17-render-search-T71.png"))
+        try render(HomeView(host: host).padding(16).background(Color.black), to: folder.appendingPathComponent("R17-render-search-T72.png"))
 
         let long = longListHost()
         long.toggleFromKeyboard()
         for _ in 0..<8 { _ = long.handleKey(.down) }
-        try render(HomeView(host: long).padding(16).background(Color.black), to: folder.appendingPathComponent("R17-render-list-scroll-T71.png"))
+        try render(HomeView(host: long).padding(16).background(Color.black), to: folder.appendingPathComponent("R17-render-list-scroll-T72.png"))
 
         let registrar = FakeRegistrar()
         registrar.refused = [optionSpace]
@@ -552,7 +616,7 @@ struct KeyboardTests {
         _ = hotkey.change(to: optionSpace)
         try render(
             Form { Section { HotkeySettingsRow(hotkey: hotkey) } }.formStyle(.grouped).frame(width: 560),
-            to: folder.appendingPathComponent("R17-render-settings-T71.png")
+            to: folder.appendingPathComponent("R17-render-settings-T72.png")
         )
     }
 
