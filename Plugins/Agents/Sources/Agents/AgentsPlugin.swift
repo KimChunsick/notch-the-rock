@@ -4,8 +4,8 @@ import SwiftUI
 
 /// Brings Claude Code to the notch. Claude Code's hooks run the bundled `notch-hook` helper, which
 /// forwards each hook to this plugin over a Unix socket in a folder only the user can enter. When a
-/// session finishes its turn or waits for input, the notch glows with the project name and the
-/// message, and from there the user jumps to the session's terminal. Permission requests are allowed
+/// session waits for input, finishes its turn or ends, the notch glows with the agent's mark, the
+/// project name and the message, and from there the user jumps to the session's terminal. Permission requests are allowed
 /// or denied, and AskUserQuestion answered, in the notch; "터미널에서 답하기" or the end of the wait
 /// hands them back to the terminal. An operation too long for the notch, and typed answers to several
 /// questions, are shown in full on the plugin's screen and answered there. The settings page
@@ -28,7 +28,7 @@ public final class AgentsPlugin: NotchPlugin {
     private let context: NotchContext
     private let socketPath: String
     private let activator: any TerminalActivating
-    private let logos = InstalledAppLogos()
+    private let logos: InstalledAppLogos
     private var server: HookServer?
     /// Drops ended sessions from the list while the plugin is active.
     private var pruning: Task<Void, Never>?
@@ -60,8 +60,10 @@ public final class AgentsPlugin: NotchPlugin {
         self.context = context
         self.socketPath = socketPath
         self.activator = activator
+        let logos = InstalledAppLogos()
+        self.logos = logos
         let defaults = context.storage.defaults
-        bridge = ClaudeBridge(context: context, activator: activator) {
+        bridge = ClaudeBridge(context: context, activator: activator, logos: logos) {
             .seconds(ApprovalWait.seconds(in: defaults))
         }
         hooks = ClaudeHooksModel(installer: HookInstaller(
@@ -69,7 +71,7 @@ public final class AgentsPlugin: NotchPlugin {
             recordURL: context.storage.directory.appendingPathComponent("claude-install.json"),
             entries: HookEntry.claude(helper: context.bundleURL.appendingPathComponent("Contents/Helpers/notch-hook"))
         ))
-        let codexBridge = CodexBridge(context: context, activator: activator, screen: bridge.screen, terminal: codexTerminal) {
+        let codexBridge = CodexBridge(context: context, activator: activator, screen: bridge.screen, terminal: codexTerminal, logos: logos) {
             .seconds(ApprovalWait.seconds(in: defaults))
         }
         let link = CodexLink(

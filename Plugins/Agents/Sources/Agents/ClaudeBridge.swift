@@ -7,11 +7,14 @@ import SwiftUI
 struct SessionRecord: Hashable {
     var terminal: TerminalLocation?
     var cwd: String?
+    /// The session finished its turn and said so; Claude Code's idle reminder (`idle_prompt`) in the
+    /// same pause adds no alert. A prompt, a request or a new session starts the next pause.
+    var alertedPause = false
 }
 
 /// Turns Claude Code hook messages into notch requests: records where each session runs, makes the
-/// notch glow when a session finishes its turn or waits for input, and takes the user to the
-/// session's terminal from there. Permission requests and AskUserQuestion are answered in the notch
+/// notch glow with the Claude mark when a session waits for input, finishes its turn or ends, and
+/// takes the user to the session's terminal from there. Permission requests and AskUserQuestion are answered in the notch
 /// within the configured wait, or handed back to the terminal.
 @MainActor
 final class ClaudeBridge {
@@ -41,6 +44,8 @@ final class ClaudeBridge {
     let screen = AgentsScreenModel()
     private let context: NotchContext
     private let activator: any TerminalActivating
+    /// The marks alerts show; nil shows the agent's symbol.
+    private let logos: (any AgentLogoProviding)?
     /// How long the notch waits for an answer before the request goes back to the terminal.
     private let wait: @MainActor () -> Duration
     private(set) var sessions: [String: SessionRecord] = [:]
@@ -51,9 +56,15 @@ final class ClaudeBridge {
     private var decisions: [Int: Task<HookDecision?, Never>] = [:]
     private var decisionCount = 0
 
-    init(context: NotchContext, activator: any TerminalActivating, wait: @escaping @MainActor () -> Duration = { .seconds(ApprovalWait.defaultSeconds) }) {
+    init(
+        context: NotchContext,
+        activator: any TerminalActivating,
+        logos: (any AgentLogoProviding)? = nil,
+        wait: @escaping @MainActor () -> Duration = { .seconds(ApprovalWait.defaultSeconds) }
+    ) {
         self.context = context
         self.activator = activator
+        self.logos = logos
         self.wait = wait
     }
 
@@ -108,14 +119,23 @@ final class ClaudeBridge {
         track(sessionID, message)
         let title = projectName(sessionID, message)
         switch message.event {
-        case .sessionStart, .userPromptSubmit, .sessionEnd:
+        case .sessionStart, .userPromptSubmit:
             return nil
+        case .sessionEnd:
+            // /clear ends one conversation and starts the next in the same terminal.
+            guard payload["reason"]?.string != "clear" else { return nil }
+            return notify(sessionID, title: title, message: "Claude Code 세션이 끝났어요.")
         case .stop:
+            sessions[sessionID]?.alertedPause = true
             return notify(sessionID, title: title, message: "Claude Code가 작업을 마쳤어요.")
         case .notification:
-            if let type = payload["notification_type"]?.string, !Self.waitingNotificationTypes.contains(type) {
+            let type = payload["notification_type"]?.string
+            if let type, !Self.waitingNotificationTypes.contains(type) {
                 return nil
             }
+            // The finished turn's alert already told the user this session waits. The other waiting
+            // types come within a turn, so they always alert.
+            if type == "idle_prompt", sessions[sessionID]?.alertedPause == true { return nil }
             return notify(sessionID, title: title, message: payload["message"]?.string ?? "Claude Code가 입력을 기다려요.")
         case .permissionRequest, .preToolUse:
             return nil
@@ -252,7 +272,7 @@ final class ClaudeBridge {
             title: title,
             message: message,
             accent: Self.accent,
-            sourceIcon: terminal.flatMap(Self.appIcon),
+            sourceIcon: AgentKind.claude.alertIcon(logos),
             buttons: [AttentionButton(id: Self.jumpButtonID, title: terminal == nil ? "노치 열기" : "터미널로 이동", role: .primary)],
             timeout: Self.noticeTimeout
         )
@@ -268,6 +288,12 @@ final class ClaudeBridge {
         }
         if let cwd = message.payload["cwd"]?.string {
             record.cwd = cwd
+        }
+        switch message.event {
+        case .stop, .notification:
+            break
+        case .sessionStart, .userPromptSubmit, .permissionRequest, .preToolUse, .sessionEnd:
+            record.alertedPause = false
         }
         sessions[sessionID] = record
     }

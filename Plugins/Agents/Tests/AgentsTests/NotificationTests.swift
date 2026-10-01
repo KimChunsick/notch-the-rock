@@ -93,12 +93,13 @@ import Testing
     @Test func R05__a_newer_notice_replaces_the_older_one_of_the_same_session() async throws {
         try sessionStart()
         host.waitsForCancellation = true
-        let first = bridge.receive(try message(.stop, #"{"session_id":"s1","cwd":"/Users/me/notch-the-rock"}"#))
-        try await Task.sleep(for: .milliseconds(50))
-        let second = bridge.receive(try message(
+        // A finished turn's idle reminder adds no alert (R40), so the waiting notice comes first here.
+        let first = bridge.receive(try message(
             .notification,
             #"{"session_id":"s1","cwd":"/Users/me/notch-the-rock","notification_type":"idle_prompt","message":"waiting"}"#
         ))
+        try await Task.sleep(for: .milliseconds(50))
+        let second = bridge.receive(try message(.stop, #"{"session_id":"s1","cwd":"/Users/me/notch-the-rock"}"#))
         await first?.value
         #expect(host.requests.count == 2)
         bridge.cancelAll()

@@ -8,8 +8,9 @@ import SwiftUI
 /// requests. Command and file-change approvals are answered `accept`, `acceptForSession` or
 /// `decline`; questions are answered by question id. A request answered elsewhere
 /// (`serverRequest/resolved`), one the user hands back to the terminal and one that times out leave
-/// the notch unanswered, so the `codex` TUI keeps its own prompt. A finished turn glows with the
-/// project name, and from there the user jumps to the TUI's terminal.
+/// the notch unanswered, so the `codex` TUI keeps its own prompt. A finished or failed turn and a
+/// closed thread glow with the Codex mark and the project name, and from there the user jumps to the
+/// TUI's terminal.
 @MainActor
 final class CodexBridge {
     nonisolated static let allowButtonID = "allow"
@@ -34,6 +35,8 @@ final class CodexBridge {
     let screen: AgentsScreenModel
     private let context: NotchContext
     private let activator: any TerminalActivating
+    /// The marks alerts show; nil shows the agent's symbol.
+    private let logos: (any AgentLogoProviding)?
     /// The terminal of the `codex` TUI working in a folder, looked up when it is needed.
     private let terminal: @MainActor (String?) -> TerminalLocation?
     private let wait: @MainActor () -> Duration
@@ -77,6 +80,7 @@ final class CodexBridge {
         activator: any TerminalActivating,
         screen: AgentsScreenModel = AgentsScreenModel(),
         terminal: @escaping @MainActor (String?) -> TerminalLocation?,
+        logos: (any AgentLogoProviding)? = nil,
         initializeTimeout: Duration = .seconds(10),
         wait: @escaping @MainActor () -> Duration = { .seconds(ApprovalWait.defaultSeconds) },
         retryDelay: @escaping @MainActor (Int) -> Duration = CodexSupervisor.backoff(attempt:)
@@ -85,6 +89,7 @@ final class CodexBridge {
         self.activator = activator
         self.screen = screen
         self.terminal = terminal
+        self.logos = logos
         self.wait = wait
         self.initializeTimeout = initializeTimeout
         self.retryDelay = retryDelay
@@ -298,7 +303,12 @@ final class CodexBridge {
         case "turn/started":
             if let thread = params["threadId"]?.string { track(thread, .working) }
         case "thread/closed":
-            if let thread = params["threadId"]?.string { screen.sessions.remove(AgentSession.Key(agent: .codex, id: thread)) }
+            // One alert per thread: only a thread the list still has ends here. The TUI may be gone
+            // already, so the alert keeps the terminal the row knew.
+            guard let thread = params["threadId"]?.string,
+                  let session = screen.sessions[AgentSession.Key(agent: .codex, id: thread)] else { return nil }
+            screen.sessions.remove(session.id)
+            return notify(thread, message: "Codex 세션이 끝났어요.", known: session.terminal)
         case "turn/completed":
             guard let thread = params["threadId"]?.string else { return nil }
             track(thread, .idle)
@@ -505,23 +515,24 @@ final class CodexBridge {
         )
     }
 
-    private func notify(_ thread: String, message: String) -> Task<Void, Never> {
+    /// `known` is the terminal to use when the TUI's own can no longer be found.
+    private func notify(_ thread: String, message: String, known: TerminalLocation? = nil) -> Task<Void, Never> {
         notices[thread]?.task.cancel()
         noticeCount += 1
         let id = noticeCount
-        let found = terminal(threads[thread])
+        let found = terminal(threads[thread]) ?? known
         let request = AttentionRequest(
             title: projectName(.object(["threadId": .string(thread)])),
             message: message,
             accent: Self.accent,
-            sourceIcon: found.flatMap(ClaudeBridge.appIcon),
+            sourceIcon: AgentKind.codex.alertIcon(logos),
             buttons: [AttentionButton(id: Self.jumpButtonID, title: found == nil ? "노치 열기" : "터미널로 이동", role: .primary)],
             timeout: ClaudeBridge.noticeTimeout
         )
         let task = Task { [context] in
             let response = await context.requestAttention(request)
             if case .answered(let answer) = response, answer.buttonID == Self.jumpButtonID {
-                self.jump(to: thread)
+                self.jump(to: thread, known: known)
             }
             if self.notices[thread]?.id == id {
                 self.notices[thread] = nil
@@ -532,8 +543,8 @@ final class CodexBridge {
     }
 
     /// Brings the thread's TUI terminal forward, or opens the notch when it is unknown or gone.
-    private func jump(to thread: String) {
-        if let found = terminal(threads[thread]), activator.activate(found) {
+    private func jump(to thread: String, known: TerminalLocation? = nil) {
+        if let found = terminal(threads[thread]) ?? known, activator.activate(found) {
             return
         }
         context.expand()

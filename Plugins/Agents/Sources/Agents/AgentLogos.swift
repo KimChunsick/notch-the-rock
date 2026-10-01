@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// The marks the session rows show. The plugin bundles no brand files: the marks come from the
 /// agents' own apps when they are installed.
@@ -7,6 +8,16 @@ protocol AgentLogoProviding: AnyObject {
     /// The agent's mark, or nil when it is not available. A template image is tinted to the row's
     /// foreground.
     func logo(for agent: AgentKind) -> NSImage?
+}
+
+extension AgentKind {
+    /// What an alert shows next to its title: the agent's mark, tinted to the notch's foreground when
+    /// it is a template, or the agent's symbol when the mark is not available.
+    @MainActor
+    func alertIcon(_ logos: (any AgentLogoProviding)?) -> Image {
+        guard let logo = logos?.logo(for: self) else { return Image(systemName: symbol) }
+        return Image(nsImage: logo).renderingMode(logo.isTemplate ? .template : .original)
+    }
 }
 
 /// Reads the marks from the installed apps, once per agent: Claude's menu bar mark (a template
