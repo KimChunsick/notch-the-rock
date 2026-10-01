@@ -123,18 +123,7 @@ private func expectDefinite(_ size: CGSize, within limit: CGSize, _ what: String
 /// size. The host adds the notch's margin around a tab, so a tab's own outer padding shows here.
 @MainActor
 private func inkInsets(_ view: some View) throws -> (left: CGFloat, right: CGFloat, bottom: CGFloat) {
-    let hosting = NSHostingView(rootView: view.environment(\.colorScheme, .dark))
-    let window = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
-    window.appearance = NSAppearance(named: .darkAqua)
-    window.contentView = hosting
-    // Measured in the window, at its backing scale, as the app measures a tab.
-    let size = hosting.fittingSize
-    window.setContentSize(size)
-    hosting.layoutSubtreeIfNeeded()
-    RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-    let rep = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
-    hosting.cacheDisplay(in: hosting.bounds, to: rep)
-    let image = try #require(rep.cgImage)
+    let (image, scale) = try renderOffscreen(view)
     let width = image.width, height = image.height
     var pixels = [UInt8](repeating: 0, count: width * height * 4)
     let context = try #require(CGContext(
@@ -153,8 +142,7 @@ private func inkInsets(_ view: some View) throws -> (left: CGFloat, right: CGFlo
             }
         }
     }
-    try #require(maxX >= 0, "no ink in \(size)")
-    let scale = window.backingScaleFactor
+    try #require(maxX >= 0, "no ink in \(width)x\(height) px")
     return (CGFloat(minX) / scale, CGFloat(width - 1 - maxX) / scale, CGFloat(height - 1 - maxY) / scale)
 }
 

@@ -2,6 +2,8 @@ import AppKit
 import CryptoKit
 import Foundation
 import os
+import SwiftUI
+import Testing
 @testable import Clipboard
 
 /// A private pasteboard for one test. Release it with `releaseGlobally()`; the user's general
@@ -125,4 +127,20 @@ func makeHistory(directory: URL, key: SymmetricKey, errors: ErrorLog = ErrorLog(
     let history = ClipboardHistory(logError: errors.append)
     history.open(ClipboardStore(directory: directory, key: key))
     return history
+}
+
+/// `view` drawn offscreen in a dark window at its ideal size, at the window's backing scale, as
+/// the app draws a tab.
+@MainActor
+func renderOffscreen(_ view: some View) throws -> (image: CGImage, scale: CGFloat) {
+    let hosting = NSHostingView(rootView: view.environment(\.colorScheme, .dark))
+    let window = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
+    window.appearance = NSAppearance(named: .darkAqua)
+    window.contentView = hosting
+    window.setContentSize(hosting.fittingSize)
+    hosting.layoutSubtreeIfNeeded()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    let rep = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+    hosting.cacheDisplay(in: hosting.bounds, to: rep)
+    return (try #require(rep.cgImage), window.backingScaleFactor)
 }
