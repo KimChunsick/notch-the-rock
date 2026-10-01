@@ -29,11 +29,22 @@ struct ClipboardStore: Sendable {
     }
 
     /// The stored list, newest first, empty when none was written yet. Throws when the file cannot
-    /// be read or opened with this key.
+    /// be read or opened with this key, or when the directory cannot be listed.
+    ///
+    /// Only a read that finds no such file means no list was written: `fileExists` also says no
+    /// when the directory cannot be searched, and taking that for a first run would let this
+    /// session's list replace the stored one once access comes back.
     func loadList() throws -> [ClipItem] {
         let url = directory.appendingPathComponent(Self.listFileName)
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
-        return try JSONDecoder().decode([ClipItem].self, from: open(Data(contentsOf: url)))
+        let sealed: Data
+        do {
+            sealed = try Data(contentsOf: url)
+        } catch CocoaError.fileReadNoSuchFile {
+            // Image files are checked against the list next, so the directory must be listable.
+            _ = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            return []
+        }
+        return try JSONDecoder().decode([ClipItem].self, from: open(sealed))
     }
 
     func saveList(_ items: [ClipItem]) throws {
@@ -49,9 +60,7 @@ struct ClipboardStore: Sendable {
     }
 
     func deleteImage(for id: UUID) throws {
-        let url = imageURL(id)
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
-        try FileManager.default.removeItem(at: url)
+        try removeIfPresent(imageURL(id))
     }
 
     /// Deletes every image file whose entry id is not in `kept`.
@@ -68,10 +77,15 @@ struct ClipboardStore: Sendable {
     /// unreadable and none of its remaining image files is loaded as a new entry.
     func deleteAll() throws {
         try deleteImages(except: [])
-        let list = directory.appendingPathComponent(Self.listFileName)
-        if FileManager.default.fileExists(atPath: list.path) {
-            try FileManager.default.removeItem(at: list)
-        }
+        try removeIfPresent(directory.appendingPathComponent(Self.listFileName))
+    }
+
+    /// Removes the file at `url`; only a file that is not there counts as removed, so a file that
+    /// cannot be reached is reported instead of being taken for gone.
+    private func removeIfPresent(_ url: URL) throws {
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch CocoaError.fileNoSuchFile {}
     }
 
     private func imageURL(_ id: UUID) -> URL {

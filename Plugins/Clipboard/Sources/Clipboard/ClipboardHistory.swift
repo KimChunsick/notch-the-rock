@@ -11,18 +11,23 @@ import Observation
 /// An entry is saved once its image file, if it has one, and a list on disk that names it are both
 /// written; the image file always comes first. Until then the entry lives in memory only, image
 /// original included, and `open(_:)` drops it: turning the plugin off and on, or quitting, loses
-/// it. Without a writable store (no key, or a stored list that cannot be read) every entry lives in
+/// it. Without a writable store (no key, or a store that cannot be read) every entry lives in
 /// memory only.
 @MainActor
 @Observable
 final class ClipboardHistory {
     static let unpinnedLimit = 200
+    /// How long `unsavedCount` stays above zero before the tab mentions it, so a list that is
+    /// written a moment after a copy shows no notice.
+    static let unsavedNoticeDelay: TimeInterval = 2
 
     private(set) var items: [ClipItem] = []
-    /// How many entries are not saved: every entry without a writable store; with one, each image
-    /// whose file could not be written and, while the last list could not be written, each entry
-    /// the list on disk does not name. A list that is still being written does not count.
+    /// How many entries are not saved: every entry without a writable store; with one, each entry
+    /// the list last written does not name, whether its list is queued, being written or could
+    /// not be written. An image without a file is never in a list, so it counts too.
     private(set) var unsavedCount = 0
+    /// When `unsavedCount` last rose above zero; nil while it is zero.
+    private(set) var unsavedSince: Date?
     /// A stored list that could not be read. It is left untouched, and nothing is written, until
     /// `resetUnreadableStore()`.
     private var unreadableStore: ClipboardStore?
@@ -33,9 +38,19 @@ final class ClipboardHistory {
     /// writer leave these entries out. Dropped with its entry.
     @ObservationIgnored private var originals: [ClipItem.ID: Data] = [:]
     @ObservationIgnored private let logError: @MainActor (String) -> Void
+    @ObservationIgnored private let now: @MainActor () -> Date
 
-    init(logError: @escaping @MainActor (String) -> Void) {
+    /// `now` gives the time `unsavedSince` records; tests pass a clock they move themselves.
+    init(logError: @escaping @MainActor (String) -> Void, now: @escaping @MainActor () -> Date = { .now }) {
         self.logError = logError
+        self.now = now
+    }
+
+    /// Whether the tab mentions the unsaved entries at `date`: `unsavedCount` has stayed above zero
+    /// for `unsavedNoticeDelay`.
+    func showsUnsavedNotice(at date: Date) -> Bool {
+        guard let unsavedSince else { return false }
+        return date >= unsavedSince + Self.unsavedNoticeDelay
     }
 
     /// Whether the stored history could not be read, so this session is kept in memory only.
@@ -43,9 +58,9 @@ final class ClipboardHistory {
 
     /// Replaces the history with what `store` holds and saves every later change there; entries
     /// that were not saved are dropped. Image files the stored list does not name were never saved,
-    /// or belong to removed entries, and are deleted. A list that exists but cannot be read leaves
-    /// the history empty and in memory, and the store untouched. With nil the history starts empty
-    /// and keeps its entries in memory only.
+    /// or belong to removed entries, and are deleted. A list that cannot be read, or a directory
+    /// that cannot be listed, leaves the history empty and in memory, and the store untouched. With
+    /// nil the history starts empty and keeps its entries in memory only.
     func open(_ store: ClipboardStore?) {
         flush()
         self.store = nil
@@ -250,14 +265,16 @@ final class ClipboardHistory {
     private func refreshUnsavedCount() {
         var count = items.count
         if let writer {
-            let listedAfterFailure = writer.listedIDsAfterFailure
-            count = items.count { item in
-                originals[item.id] != nil || listedAfterFailure.map { !$0.contains(item.id) } ?? false
-            }
+            let listedIDs = writer.listedIDs
+            count = items.count { !listedIDs.contains($0.id) }
         }
-        if count != unsavedCount {
-            unsavedCount = count
+        guard count != unsavedCount else { return }
+        if count == 0 {
+            unsavedSince = nil
+        } else if unsavedCount == 0 {
+            unsavedSince = now()
         }
+        unsavedCount = count
     }
 
     private func attach(_ store: ClipboardStore, listedIDs: Set<ClipItem.ID>) {

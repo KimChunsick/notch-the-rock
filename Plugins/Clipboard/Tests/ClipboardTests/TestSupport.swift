@@ -82,6 +82,32 @@ final class WriteFault: Sendable {
     }
 }
 
+/// A disk whose list writes wait until `open()` is called, so a test sees a list write in
+/// progress; image files, written on the main actor, go through. Pass `write(_:to:)` as the store's
+/// `writeFile`, and open the gate before any flush.
+final class WriteGate: Sendable {
+    private let isOpen = OSAllocatedUnfairLock(initialState: false)
+
+    func open() {
+        isOpen.withLock { $0 = true }
+    }
+
+    func write(_ data: Data, to url: URL) throws {
+        if url.pathExtension != ClipboardStore.imageExtension {
+            while !isOpen.withLock({ $0 }) {
+                Thread.sleep(forTimeInterval: 0.001)
+            }
+        }
+        try data.write(to: url, options: .atomic)
+    }
+}
+
+/// A clock that moves only when a test sets `now`.
+@MainActor
+final class ManualClock {
+    var now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+}
+
 /// Where the store keeps the image file of the entry `id`.
 func imageFile(for id: UUID, in directory: URL) -> URL {
     directory.appendingPathComponent(id.uuidString).appendingPathExtension(ClipboardStore.imageExtension)

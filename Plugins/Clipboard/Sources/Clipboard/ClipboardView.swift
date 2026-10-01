@@ -8,12 +8,23 @@ struct ClipboardView: View {
     @State private var query = ""
 
     var body: some View {
+        // Drawn again when the unsaved notice is due. Until then the timeline's date is the moment
+        // the count rose, so a list written within the delay never shows the notice. An explicit
+        // timeline is not drawn at its last date, so a date that never comes follows the due one.
+        TimelineView(.explicit(history.unsavedSince.map { since in
+            [since, since + ClipboardHistory.unsavedNoticeDelay, .distantFuture]
+        } ?? [])) { timeline in
+            content(now: timeline.date)
+        }
+    }
+
+    private func content(now: Date) -> some View {
         VStack(spacing: 6) {
             SearchField(query: $query)
             if history.isStoreUnreadable {
                 notice("저장된 기록을 읽지 못했어요. 설정에서 초기화할 수 있어요.")
             }
-            if history.unsavedCount > 0 {
+            if history.showsUnsavedNotice(at: now) {
                 notice("기록 \(history.unsavedCount)개는 저장하지 못했어요. 앱을 종료하거나 클립보드 기능을 끄면 사라져요.")
             }
             let visible = history.matching(query)

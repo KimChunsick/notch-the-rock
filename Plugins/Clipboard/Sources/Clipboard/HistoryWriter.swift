@@ -22,8 +22,6 @@ final class HistoryWriter: Sendable {
         var removedImages: Set<UUID> = []
         /// The entry ids of the list on disk.
         var listedIDs: Set<UUID>
-        /// Whether the last list tried could not be written. It stays set until a list is written.
-        var lastWriteFailed = false
     }
 
     private let store: ClipboardStore
@@ -64,10 +62,10 @@ final class HistoryWriter: Sendable {
         queue.sync {}
     }
 
-    /// The entry ids of the list on disk while the last list tried could not be written; nil when
-    /// it was written, or none was tried yet.
-    var listedIDsAfterFailure: Set<UUID>? {
-        state.withLock { $0.lastWriteFailed ? $0.listedIDs : nil }
+    /// The entry ids of the list last written. They change only once a write succeeds, so an entry
+    /// of a list that is queued, being written or kept after a failed write is not among them.
+    var listedIDs: Set<UUID> {
+        state.withLock { $0.listedIDs }
     }
 
     private func scheduleWrite() {
@@ -95,7 +93,6 @@ final class HistoryWriter: Sendable {
             // A newer list queued meanwhile replaces this one; otherwise this one is kept.
             state.withLock { state in
                 if state.items == nil { state.items = work.items }
-                state.lastWriteFailed = true
             }
             reportError("could not save the clipboard history, keeping it to write again: \(error)")
             didTryWrite()
@@ -105,7 +102,6 @@ final class HistoryWriter: Sendable {
         // comes back, so the list just written names none of them.
         state.withLock { state in
             state.listedIDs = Set(work.items.map(\.id))
-            state.lastWriteFailed = false
             state.removedImages.subtract(work.removed)
         }
         didTryWrite()

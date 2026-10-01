@@ -115,6 +115,59 @@ import Testing
     #expect(makeHistory(directory: fresh, key: key).items.map(\.content) == [.text("first run")])
 }
 
+/// A list is missing only when reading it finds no such file in a directory that can be listed.
+/// A directory that cannot be opened or listed, or a list that is a directory, makes the store
+/// unreadable: nothing is written or cleaned up there until a reset, even once access comes back.
+@MainActor
+@Test func R09__a_store_that_cannot_be_accessed_is_not_taken_for_an_empty_one() throws {
+    let manager = FileManager.default
+    let directory = try makeDirectory()
+    defer { try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path) }
+    let key = makeKey()
+    let first = makeHistory(directory: directory, key: key)
+    first.record(.text("saved before access was lost"))
+    first.record(try #require(ClipCapture(png: samplePNG(seed: 22))))
+    first.flush()
+    let saved = first.items
+    let stored = try contents(of: directory)
+
+    try manager.setAttributes([.posixPermissions: 0o000], ofItemAtPath: directory.path)
+    let errors = ErrorLog()
+    let locked = makeHistory(directory: directory, key: key, errors: errors)
+    #expect(locked.isStoreUnreadable)
+    #expect(locked.items.isEmpty)
+    #expect(errors.messages.count == 1)
+    locked.record(.text("captured while access was lost"))
+    try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+    locked.flush()
+    #expect(try contents(of: directory) == stored)
+    #expect(makeHistory(directory: directory, key: key).items == saved)
+
+    // A list that is a directory cannot be read either; the image file next to it stays.
+    let blockedDirectory = try makeDirectory()
+    try manager.createDirectory(
+        at: blockedDirectory.appendingPathComponent(ClipboardStore.listFileName), withIntermediateDirectories: false
+    )
+    let stray = UUID()
+    try ClipboardStore(directory: blockedDirectory, key: key).saveImage(samplePNG(seed: 23), for: stray)
+    let blocked = makeHistory(directory: blockedDirectory, key: key)
+    #expect(blocked.isStoreUnreadable)
+    blocked.record(.text("captured next to a blocked list"))
+    blocked.flush()
+    #expect(try files(in: blockedDirectory).map(\.lastPathComponent) == [imageFile(for: stray, in: blockedDirectory).lastPathComponent])
+
+    // No list file in a directory that cannot be listed is not a first run.
+    let unlistedDirectory = try makeDirectory()
+    defer { try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: unlistedDirectory.path) }
+    try manager.setAttributes([.posixPermissions: 0o300], ofItemAtPath: unlistedDirectory.path)
+    let unlisted = makeHistory(directory: unlistedDirectory, key: key)
+    #expect(unlisted.isStoreUnreadable)
+    unlisted.record(.text("captured where nothing can be listed"))
+    unlisted.flush()
+    try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: unlistedDirectory.path)
+    #expect(try files(in: unlistedDirectory).isEmpty)
+}
+
 /// Resetting deletes the unreadable files and saves what this session captured in a new store.
 @MainActor
 @Test func R09__resetting_an_unreadable_store_writes_a_new_one() throws {
@@ -242,14 +295,51 @@ import Testing
     history.flush()
     #expect(FileManager.default.fileExists(atPath: imageFile(for: image.id, in: directory).path))
     #expect(history.unsavedCount == 1)
+    #expect(history.showsUnsavedNotice(at: .now + ClipboardHistory.unsavedNoticeDelay))
     #expect(try ClipboardStore(directory: directory, key: key).loadList().map(\.id) == [saved.id])
 
     fault.failsList = false
     history.flush()
     #expect(history.unsavedCount == 0)
+    #expect(!history.showsUnsavedNotice(at: .distantFuture))
     let reloaded = makeHistory(directory: directory, key: key)
     #expect(reloaded.items == history.items)
     #expect(reloaded.imageData(for: image) == png)
+}
+
+/// The count measures the list last written, so an entry whose list is queued or still being
+/// written is not saved yet. The tab mentions it only once the count has stayed above zero for
+/// `unsavedNoticeDelay`, so a write in progress does not flash a notice on every copy.
+@MainActor
+@Test func R09__an_entry_counts_as_unsaved_while_its_list_is_being_written() throws {
+    let directory = try makeDirectory()
+    let key = makeKey()
+    let gate = WriteGate()
+    defer { gate.open() }
+    let clock = ManualClock()
+    let history = ClipboardHistory(logError: { _ in }, now: { clock.now })
+    history.open(ClipboardStore(directory: directory, key: key) { try gate.write($0, to: $1) })
+    #expect(history.unsavedSince == nil)
+
+    history.record(.text("first copy"))
+    #expect(history.unsavedCount == 1)
+    let since = try #require(history.unsavedSince)
+    #expect(since == clock.now)
+    #expect(!history.showsUnsavedNotice(at: since + 1.9))
+    #expect(history.showsUnsavedNotice(at: since + ClipboardHistory.unsavedNoticeDelay))
+
+    // Another change while the count stays above zero keeps the moment it rose.
+    clock.now += 1
+    history.record(.text("second copy"))
+    #expect(history.unsavedCount == 2)
+    #expect(history.unsavedSince == since)
+
+    gate.open()
+    history.flush()
+    #expect(history.unsavedCount == 0)
+    #expect(history.unsavedSince == nil)
+    #expect(!history.showsUnsavedNotice(at: since + 60))
+    #expect(try ClipboardStore(directory: directory, key: key).loadList() == history.items)
 }
 
 /// A list that could not be written is kept: the next change writes again, its newer list
