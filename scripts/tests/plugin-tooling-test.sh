@@ -2,7 +2,9 @@
 # R03: a plugin scaffolded by new-plugin.sh builds with build-plugin.sh into a .notchplugin that
 # links the shared NotchKit exactly once, carries its SwiftPM resources where the installed plugin
 # finds them, and notchkit-probe loads it and rejects a wrong SDK major. check-plugin-deps.sh has
-# its own checks in check-plugin-deps-test.sh. Requires bash 3.2 or later.
+# its own checks in check-plugin-deps-test.sh. R16: the built plugin records the SDK version written
+# in SDKVersion.swift (1.1 added the tile API), read from the source rather than repeated here.
+# Requires bash 3.2 or later.
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd -P)
@@ -28,6 +30,13 @@ probe() {
     "$(swift build -c release --package-path "$ROOT/SDK/NotchKit/Probe" --show-bin-path)/notchkit-probe" "$@"
 }
 
+# Prints NotchKitSDK.version as major.minor from SDKVersion.swift, the one place it is written, or
+# nothing when the declaration no longer has that shape.
+source_sdk_version() {
+    sed -n 's/.*static var version: SDKVersion { SDKVersion(major: \([0-9][0-9]*\), minor: \([0-9][0-9]*\)) }.*/\1.\2/p' \
+        "$ROOT/SDK/NotchKit/Sources/NotchKit/SDKVersion.swift"
+}
+
 R03__new_plugin_scaffolds_and_builds() {
     current=${FUNCNAME[0]}
     local built
@@ -38,9 +47,19 @@ R03__new_plugin_scaffolds_and_builds() {
     [ -d "$BUNDLE/Contents/Resources" ] || fail "missing Contents/Resources"
     local plist="$BUNDLE/Contents/Info.plist"
     [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "com.example.sample" ] || fail "CFBundleIdentifier is not com.example.sample"
-    [ "$(/usr/libexec/PlistBuddy -c 'Print :NotchKitSDKVersion' "$plist")" = "1.0" ] || fail "NotchKitSDKVersion is not 1.0"
     [ "$(/usr/libexec/PlistBuddy -c 'Print :NotchPluginEntry' "$plist")" = "notchkit_plugin_entry" ] || fail "NotchPluginEntry is not notchkit_plugin_entry"
     codesign --verify --strict "$BUNDLE" || fail "bundle signature does not verify"
+}
+
+R16__plugin_records_sdk_version_from_source() {
+    current=${FUNCNAME[0]}
+    local expected stamped
+    [ -f "$BUNDLE/Contents/Info.plist" ] || { fail "no bundle to inspect"; return; }
+    expected=$(source_sdk_version)
+    [ -n "$expected" ] || { fail "could not read NotchKitSDK.version from SDKVersion.swift"; return; }
+    stamped=$(/usr/libexec/PlistBuddy -c 'Print :NotchKitSDKVersion' "$BUNDLE/Contents/Info.plist")
+    printf 'SDKVersion.swift: %s, Info.plist NotchKitSDKVersion: %s\n' "$expected" "$stamped"
+    [ "$stamped" = "$expected" ] || fail "NotchKitSDKVersion is '$stamped', SDKVersion.swift says '$expected'"
 }
 
 R03__plugin_links_single_shared_notchkit() {
@@ -126,6 +145,7 @@ EOF
 }
 
 R03__new_plugin_scaffolds_and_builds
+R16__plugin_records_sdk_version_from_source
 R03__plugin_links_single_shared_notchkit
 R03__probe_loads_plugin_with_one_notchkit
 R03__probe_rejects_wrong_major_sdk
@@ -135,4 +155,4 @@ if [ "$failures" -ne 0 ]; then
     printf '%d check(s) failed\n' "$failures"
     exit 1
 fi
-printf 'all R03 tooling checks passed\n'
+printf 'all R03 and R16 tooling checks passed\n'
