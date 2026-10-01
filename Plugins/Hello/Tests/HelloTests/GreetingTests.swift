@@ -326,12 +326,19 @@ extension HelloTimeline.Frame {
             #expect(timeline.frame(at: timeline.total).opacity == 0)
         }
         #expect(longest <= 4.0, "\(longest)")
-        // The takeover lasts as long as the greeting the plugin picked.
-        let durations = Set(HelloPhrases.phrases(for: Date(), calendar: .current).map { HelloGreeting(phrase: $0).timeline.duration })
-        try withContext { context, host in
-            HelloPlugin(context: context).activate()
-            let duration = try #require(host.takeovers.first?.duration)
-            #expect(durations.contains(duration))
+    }
+
+    /// The takeover lasts exactly as long as the greeting the plugin writes, so a long Korean phrase
+    /// is never cut short at hello's length.
+    @Test func R21__takeover_lasts_as_long_as_the_written_greeting() throws {
+        let long = HelloGreeting(phrase: "즐거운 주말 저녁 보내세요")
+        #expect(long.timeline.duration > HelloTimeline.hello.duration)
+        for (phrase, expected) in [(long.phrase, long.timeline.duration), (HelloPhrases.hello, HelloTimeline.hello.duration)] {
+            try withContext { context, host in
+                HelloPlugin(context: context) { HelloGreeting(phrase: phrase) }.activate()
+                let duration = try #require(host.takeovers.first?.duration)
+                #expect(duration == expected, "\(phrase)")
+            }
         }
     }
 
