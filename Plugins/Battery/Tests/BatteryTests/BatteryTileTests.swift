@@ -12,7 +12,7 @@ private func plugin() throws -> BatteryPlugin {
         defaultsSuiteName: "battery-tile-tests.\(id)",
         keychainService: "battery-tile-tests.\(id)"
     )
-    return BatteryPlugin(context: NotchContext(pluginID: id, bundleURL: URL(fileURLWithPath: "/nonexistent"), host: SilentHost(), storage: storage))
+    return BatteryPlugin(context: NotchContext(pluginID: id, bundleURL: URL(fileURLWithPath: "/nonexistent"), host: SilentHost(), storage: storage), sampler: nil)
 }
 
 @MainActor
@@ -60,7 +60,7 @@ private final class SilentHost: NotchHost {
 /// capture counts it) stays from its left, right and bottom edges, drawn offscreen at its ideal
 /// size. The host adds the notch's margin around a tab, so a tab's own outer padding shows here.
 @MainActor
-private func inkInsets(_ view: some View) throws -> (left: CGFloat, right: CGFloat, bottom: CGFloat) {
+func inkInsets(_ view: some View) throws -> (left: CGFloat, right: CGFloat, bottom: CGFloat) {
     let hosting = NSHostingView(rootView: view.environment(\.colorScheme, .dark))
     let window = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
     window.appearance = NSAppearance(named: .darkAqua)
@@ -98,7 +98,7 @@ private func inkInsets(_ view: some View) throws -> (left: CGFloat, right: CGFlo
 
 /// Expects `insets` within R15's 2 pt tolerance: a line's descent or a glyph's side bearing stays
 /// inside it, outer padding or a frame larger than the ink does not.
-private func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom: CGFloat), _ what: String) {
+func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom: CGFloat), _ what: String) {
     print("R15 \(what): ink insets left \(insets.left) right \(insets.right) bottom \(insets.bottom) pt")
     for (side, inset) in [("left", insets.left), ("right", insets.right), ("bottom", insets.bottom)] {
         #expect(inset <= 2, "\(what): \(inset) pt of empty space at the \(side) edge")
