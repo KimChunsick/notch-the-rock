@@ -6,6 +6,15 @@ public enum HookEvent: String, Codable, Sendable, CaseIterable {
     case sessionStart = "SessionStart"
     case stop = "Stop"
     case notification = "Notification"
+    case permissionRequest = "PermissionRequest"
+    /// Installed for `AskUserQuestion` only.
+    case preToolUse = "PreToolUse"
+
+    /// Whether the hook waits for the plugin's decision. The other events are notices: the hook
+    /// returns as soon as it has sent them.
+    public var awaitsDecision: Bool {
+        self == .permissionRequest || self == .preToolUse
+    }
 }
 
 /// The terminal app a Claude Code session runs in, found by walking up the hook's parent processes.
@@ -44,6 +53,27 @@ public struct HookMessage: Codable, Hashable, Sendable {
         self.event = event
         self.payload = payload
         self.context = context
+    }
+}
+
+/// What the user decided in the notch about a request the hook waits on.
+public enum HookDecision: Codable, Hashable, Sendable {
+    /// PermissionRequest: run the tool.
+    case allow
+    /// PermissionRequest: do not run it; `message` goes to Claude.
+    case deny(message: String)
+    /// AskUserQuestion: answers keyed by question text, each an option label, an array of labels
+    /// (multiple choice) or typed text.
+    case answers([String: JSONValue])
+}
+
+/// The plugin's one reply to a hook that waits. No decision (released, timed out, closed in the
+/// notch) leaves the request to the terminal.
+public struct HookResponse: Codable, Hashable, Sendable {
+    public var decision: HookDecision?
+
+    public init(decision: HookDecision?) {
+        self.decision = decision
     }
 }
 

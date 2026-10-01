@@ -15,6 +15,8 @@ final class FakeHost: NotchHost {
     var responses: [AttentionResponse] = []
     var waitsForCancellation = false
     var requests: [AttentionRequest] = []
+    /// Requests withdrawn by cancelling the task that asked.
+    var cancellations = 0
     var expansions = 0
     var logs: [String] = []
 
@@ -28,6 +30,7 @@ final class FakeHost: NotchHost {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(10))
             }
+            cancellations += 1
             return .cancelled
         }
         return responses.isEmpty ? .dismissed : responses.removeFirst()

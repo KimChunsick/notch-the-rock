@@ -5,8 +5,10 @@ import SwiftUI
 /// Brings Claude Code to the notch. Claude Code's hooks run the bundled `notch-hook` helper, which
 /// forwards each hook to this plugin over a Unix socket in a folder only the user can enter. When a
 /// session finishes its turn or waits for input, the notch glows with the project name and the
-/// message, and from there the user jumps to the session's terminal. The settings page installs and
-/// removes the hooks in `~/.claude/settings.json`.
+/// message, and from there the user jumps to the session's terminal. Permission requests are allowed
+/// or denied, and AskUserQuestion answered, in the notch; "터미널에서 답하기" or the end of the wait
+/// hands them back to the terminal. The settings page installs and removes the hooks in
+/// `~/.claude/settings.json` and sets the wait.
 @MainActor
 public final class AgentsPlugin: NotchPlugin {
     public static let manifest = PluginManifest(
@@ -36,7 +38,10 @@ public final class AgentsPlugin: NotchPlugin {
     init(context: NotchContext, socketPath: String, settingsURL: URL, activator: any TerminalActivating) {
         self.context = context
         self.socketPath = socketPath
-        bridge = ClaudeBridge(context: context, activator: activator)
+        let defaults = context.storage.defaults
+        bridge = ClaudeBridge(context: context, activator: activator) {
+            .seconds(ApprovalWait.seconds(in: defaults))
+        }
         hooks = ClaudeHooksModel(installer: HookInstaller(
             settingsURL: settingsURL,
             recordURL: context.storage.directory.appendingPathComponent("claude-install.json"),
@@ -51,7 +56,7 @@ public final class AgentsPlugin: NotchPlugin {
         let server = HookServer(
             path: socketPath,
             log: { message in Task { @MainActor in log.error(message) } },
-            handler: { message in Task { @MainActor in bridge.receive(message) } }
+            handler: { message, reply in Task { @MainActor in bridge.handle(message, reply: reply) } }
         )
         do {
             try server.start()
@@ -69,7 +74,7 @@ public final class AgentsPlugin: NotchPlugin {
     }
 
     public var settingsView: AnyView? {
-        AnyView(AgentsSettingsView(model: hooks))
+        AnyView(AgentsSettingsView(model: hooks, defaults: context.storage.defaults))
     }
 }
 

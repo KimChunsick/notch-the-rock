@@ -21,7 +21,7 @@ struct TestServer {
     init(peerUID: @escaping @Sendable (Int32) -> uid_t? = HookServer.peerUID(of:)) throws {
         (folder, path) = makeSocketPath()
         let inbox = inbox
-        server = HookServer(path: path, peerUID: peerUID, log: { _ in }) { message in
+        server = HookServer(path: path, peerUID: peerUID, log: { _ in }) { message, _ in
             inbox.append(message)
         }
         try server.start()

@@ -6,25 +6,56 @@ struct HookServerError: Error, CustomStringConvertible {
     let description: String
 }
 
+/// The way back to one helper that waits for a decision.
+struct HookReply: Sendable {
+    fileprivate let server: HookServer
+    fileprivate let connection: Int
+
+    /// Sends the decision and closes the connection; does nothing once the connection is closed.
+    func send(_ decision: HookDecision?) {
+        server.send(decision, to: connection)
+    }
+
+    /// Runs `handler` once when the helper's end closes before a decision was sent (the user answered
+    /// in the terminal and Claude Code ended the hook, or its timeout did), or at once when it
+    /// already has.
+    func onClose(_ handler: @escaping @Sendable () -> Void) {
+        server.onClose(of: connection, handler)
+    }
+}
+
 /// Listens for `notch-hook` on the Agents socket: a Unix socket, 0600, in a folder only the user can
 /// enter (0700). A connection from a process of another user is closed before anything is read. Each
-/// connection carries one `HookWire` line from the helper, handed to `handler` on the server's queue.
+/// connection carries one `HookWire` line from the helper, handed to `handler` on the server's queue
+/// with a reply when the helper waits for a decision (`HookEvent.awaitsDecision`); a notice's
+/// connection is closed at once.
 final class HookServer: @unchecked Sendable {
     private let path: String
     private let peerUID: @Sendable (Int32) -> uid_t?
     private let log: @Sendable (String) -> Void
-    private let handler: @Sendable (HookMessage) -> Void
+    private let handler: @Sendable (HookMessage, HookReply?) -> Void
     private let queue = DispatchQueue(label: "com.notchtherock.agents.hook-server")
     // Touched only on `queue`.
     private var listener: DispatchSourceRead?
-    private var connections: [Int32: Connection] = [:]
+    /// Open connections by a number that, unlike the descriptor, is never reused.
+    private var connections: [Int: Connection] = [:]
+    private var connectionCount = 0
     /// The socket file this server bound, so `stop()` removes only that file.
     private var boundFile: (device: dev_t, inode: ino_t)?
 
     private final class Connection {
+        let fd: Int32
         let source: DispatchSourceRead
         var buffer = Data()
-        init(source: DispatchSourceRead) { self.source = source }
+        /// Set once the message went to the handler with a reply; the connection then stays open
+        /// until the reply is sent or the helper goes away.
+        var awaitsReply = false
+        var closeHandlers: [@Sendable () -> Void] = []
+
+        init(fd: Int32, source: DispatchSourceRead) {
+            self.fd = fd
+            self.source = source
+        }
     }
 
     /// `peerUID` returns the user id of the process at the other end of a connected socket.
@@ -32,7 +63,7 @@ final class HookServer: @unchecked Sendable {
         path: String,
         peerUID: @escaping @Sendable (Int32) -> uid_t? = HookServer.peerUID(of:),
         log: @escaping @Sendable (String) -> Void,
-        handler: @escaping @Sendable (HookMessage) -> Void
+        handler: @escaping @Sendable (HookMessage, HookReply?) -> Void
     ) {
         self.path = path
         self.peerUID = peerUID
@@ -133,42 +164,76 @@ final class HookServer: @unchecked Sendable {
                 continue
             }
             _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+            connectionCount += 1
+            let id = connectionCount
             let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-            source.setEventHandler { [weak self] in self?.read(fd) }
+            source.setEventHandler { [weak self] in self?.read(id) }
             source.setCancelHandler { close(fd) }
-            connections[fd] = Connection(source: source)
+            connections[id] = Connection(fd: fd, source: source)
             source.resume()
         }
     }
 
-    private func read(_ fd: Int32) {
-        guard let connection = connections[fd] else { return }
+    private func read(_ id: Int) {
+        guard let connection = connections[id] else { return }
         var chunk = [UInt8](repeating: 0, count: 64 * 1024)
-        let count = Darwin.read(fd, &chunk, chunk.count)
+        let count = Darwin.read(connection.fd, &chunk, chunk.count)
         if count < 0 && (errno == EAGAIN || errno == EINTR) { return }
         guard count > 0 else {
-            // Closed (or failed) before a whole message arrived.
-            finish(fd)
+            // The helper went away: before a whole message arrived, or while it waited for a reply.
+            let handlers = connection.awaitsReply ? connection.closeHandlers : []
+            finish(id)
+            handlers.forEach { $0() }
             return
         }
+        // A helper sends one line; anything after it is ignored.
+        guard !connection.awaitsReply else { return }
         connection.buffer.append(contentsOf: chunk[..<count])
         guard let end = connection.buffer.firstIndex(of: UInt8(ascii: "\n")) else {
             if connection.buffer.count > HookWire.maxLineLength {
                 log("Dropped a hook message longer than \(HookWire.maxLineLength) bytes.")
-                finish(fd)
+                finish(id)
             }
             return
         }
-        let line = connection.buffer[..<end]
-        finish(fd)
-        guard let message = HookWire.decode(HookMessage.self, from: Data(line)) else {
+        let line = Data(connection.buffer[..<end])
+        connection.buffer = Data()
+        guard let message = HookWire.decode(HookMessage.self, from: line) else {
+            finish(id)
             log("Dropped a hook message the plugin cannot read.")
             return
         }
-        handler(message)
+        guard message.event.awaitsDecision else {
+            finish(id)
+            handler(message, nil)
+            return
+        }
+        connection.awaitsReply = true
+        handler(message, HookReply(server: self, connection: id))
     }
 
-    private func finish(_ fd: Int32) {
-        connections.removeValue(forKey: fd)?.source.cancel()
+    fileprivate func send(_ decision: HookDecision?, to id: Int) {
+        queue.async { [self] in
+            guard let connection = connections[id] else { return }
+            // A few hundred bytes: the socket's send buffer takes them at once.
+            if let line = try? HookWire.line(HookResponse(decision: decision)) {
+                _ = HookSocket.write(line, to: connection.fd)
+            }
+            finish(id)
+        }
+    }
+
+    fileprivate func onClose(of id: Int, _ handler: @escaping @Sendable () -> Void) {
+        queue.async { [self] in
+            guard let connection = connections[id] else {
+                handler()
+                return
+            }
+            connection.closeHandlers.append(handler)
+        }
+    }
+
+    private func finish(_ id: Int) {
+        connections.removeValue(forKey: id)?.source.cancel()
     }
 }

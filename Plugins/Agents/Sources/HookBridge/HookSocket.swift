@@ -67,6 +67,24 @@ public enum HookSocket {
         }
     }
 
+    /// Reads up to the first `\n` (not included); nil when the peer closes before a whole line or the
+    /// line grows past `HookWire.maxLineLength`.
+    public static func readLine(from fd: Int32) -> Data? {
+        var line = Data()
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        while line.count <= HookWire.maxLineLength {
+            let count = read(fd, &chunk, chunk.count)
+            if count < 0 && errno == EINTR { continue }
+            guard count > 0 else { return nil }
+            if let end = chunk[..<count].firstIndex(of: UInt8(ascii: "\n")) {
+                line.append(contentsOf: chunk[..<end])
+                return line
+            }
+            line.append(contentsOf: chunk[..<count])
+        }
+        return nil
+    }
+
     private static func wait(_ fd: Int32, for events: Int16, timeout: Duration) -> Bool {
         var descriptor = pollfd(fd: fd, events: events, revents: 0)
         let milliseconds = Int32(timeout.components.seconds * 1000 + timeout.components.attoseconds / 1_000_000_000_000_000)

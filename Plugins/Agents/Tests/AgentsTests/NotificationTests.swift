@@ -156,8 +156,11 @@ import Testing
         try capture(settingsPage(model), named: "R05-render-settings-unreadable")
     }
 
+    /// Read only: the settings page shows the default wait.
+    let renderDefaults = UserDefaults(suiteName: "com.notchtherock.agents.tests.render")!
+
     func settingsPage(_ model: ClaudeHooksModel) -> some View {
-        Form { AgentsSettingsView(model: model) }
+        Form { AgentsSettingsView(model: model, defaults: renderDefaults) }
             .formStyle(.grouped)
             .frame(width: 560, height: 360)
     }

@@ -71,7 +71,8 @@ import Testing
         #expect(object["env"] as? [String: String] == ["FOO": "bar"])
         let stop = HookInstaller.command(helper: helper, event: .stop)
         #expect(try commands("Stop") == ["afplay /System/Library/Sounds/Glass.aiff", stop])
-        #expect(try commands("PreToolUse") == ["/usr/local/bin/guard"])
+        #expect(try commands("PreToolUse") == ["/usr/local/bin/guard", HookInstaller.command(helper: helper, event: .preToolUse)])
+        #expect(try commands("PermissionRequest") == [HookInstaller.command(helper: helper, event: .permissionRequest)])
         #expect(try commands("SessionStart") == [HookInstaller.command(helper: helper, event: .sessionStart)])
         #expect(try commands("Notification") == [HookInstaller.command(helper: helper, event: .notification)])
         let mode = try FileManager.default.attributesOfItem(atPath: settings.path)[.posixPermissions] as? Int

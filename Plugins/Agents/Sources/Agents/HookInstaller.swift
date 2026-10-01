@@ -12,11 +12,26 @@ struct HookEntry: Hashable, Sendable {
     /// Seconds Claude Code waits for the hook.
     let timeout: Int
 
-    /// The entries for Claude Code: `notch-hook <event>` for each event the plugin handles.
+    /// The entries for Claude Code: `notch-hook <event>` for each event the plugin handles. Notices
+    /// return at once; requests may wait for the notch, so their timeout outlasts any wait.
     static func claude(helper: URL) -> [HookEntry] {
-        [HookEvent.sessionStart, .stop, .notification].map {
+        let notices = [HookEvent.sessionStart, .stop, .notification].map {
             HookEntry(event: $0.rawValue, matcher: nil, command: HookInstaller.command(helper: helper, event: $0), timeout: 10)
         }
+        return notices + [
+            HookEntry(
+                event: HookEvent.permissionRequest.rawValue,
+                matcher: nil,
+                command: HookInstaller.command(helper: helper, event: .permissionRequest),
+                timeout: ApprovalWait.hookTimeout
+            ),
+            HookEntry(
+                event: HookEvent.preToolUse.rawValue,
+                matcher: "AskUserQuestion",
+                command: HookInstaller.command(helper: helper, event: .preToolUse),
+                timeout: ApprovalWait.hookTimeout
+            ),
+        ]
     }
 }
 
