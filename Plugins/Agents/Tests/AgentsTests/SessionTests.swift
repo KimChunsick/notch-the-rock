@@ -77,6 +77,7 @@ func share(of rect: CGRect, in view: NSView, where matches: (UInt8, UInt8, UInt8
     }
 
     static let bash = #","tool_name":"Bash","tool_input":{"command":"ls"}"#
+    static let read = #","tool_name":"Read","tool_input":{"file_path":"/Users/me/work/rock-garden/README.md"}"#
     static let question = #","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which format?","header":"Format","options":[{"label":"Summary","description":""},{"label":"Detailed","description":""}],"multiSelect":false}]}"#
 
     /// Runs a request that waits in the notch until the hook goes away, as when the user answers in
@@ -212,6 +213,72 @@ func share(of rect: CGRect, in view: NSView, where matches: (UInt8, UInt8, UInt8
         #expect(state == .working)
     }
 
+    @Test func R40__a_request_handed_to_the_terminal_waits_until_its_tool_ends_or_the_session_moves_on() async throws {
+        bridge.receive(try message(.userPromptSubmit, #","prompt":"build it""#))
+        // Approved in the terminal, the tool fails: its failure ends the wait.
+        host.responses = [.released]
+        #expect(await bridge.decide(try message(.permissionRequest, Self.bash)) == nil)
+        #expect(state == .awaitingApproval)
+        bridge.receive(try message(.postToolUseFailure, Self.bash + #","tool_use_id":"toolu_1","error":"exit 1","is_interrupt":false"#))
+        #expect(state == .working)
+
+        // Timed out: another tool's end and the terminal's own permission notice keep the wait; the
+        // finished turn ends it.
+        host.responses = [.timedOut]
+        #expect(await bridge.decide(try message(.permissionRequest, Self.bash)) == nil)
+        bridge.receive(try message(.postToolUse, Self.read + #","tool_use_id":"toolu_2","tool_response":{}"#))
+        #expect(state == .awaitingApproval)
+        bridge.receive(try message(.notification, #","notification_type":"permission_prompt","message":"Claude needs your permission""#))
+        #expect(state == .awaitingApproval)
+        bridge.receive(try message(.stop, #","stop_reason":"end_turn""#))
+        #expect(state == .idle)
+        // No wait is left behind: the next turn's tool ends move the session as before.
+        bridge.receive(try message(.userPromptSubmit, #","prompt":"again""#))
+        bridge.receive(try message(.postToolUse, Self.read + #","tool_use_id":"toolu_3","tool_response":{}"#))
+        #expect(state == .working)
+
+    }
+
+    @Test func R33__a_tool_end_ends_only_the_wait_it_belongs_to() async throws {
+        bridge.receive(try message(.userPromptSubmit, #","prompt":"build it""#))
+        let bashRequest = try message(.permissionRequest, Self.bash)
+        let questionRequest = try message(.preToolUse, Self.question + #","tool_use_id":"toolu_q""#)
+        host.waitsForCancellation = true
+        let permission = Task { await bridge.decide(bashRequest) }
+        #expect(await eventually { host.requests.count == 1 })
+        #expect(state == .awaitingApproval)
+        // Another tool of the same session ends while the request waits in the notch.
+        bridge.receive(try message(.postToolUse, Self.read + #","tool_use_id":"toolu_2","tool_response":{}"#))
+        #expect(state == .awaitingApproval)
+
+        // A question joins it; answering one of the two leaves the other one waiting.
+        let question = Task { await bridge.decide(questionRequest) }
+        #expect(await eventually { host.requests.count == 2 })
+        #expect(state == .awaitingAnswer)
+        question.cancel()
+        _ = await question.value
+        #expect(state == .awaitingApproval)
+
+        // The request's own tool end (the same tool and input; PermissionRequest carries no
+        // tool_use_id) ends it, and no wait is left.
+        bridge.receive(try message(.postToolUse, Self.bash + #","tool_use_id":"toolu_1","tool_response":{}"#))
+        #expect(state == .working)
+        permission.cancel()
+        _ = await permission.value
+        #expect(state == .working)
+
+        // A question handed to the terminal ends with its own tool_use_id, not with another call of
+        // the same tool and input.
+        host.waitsForCancellation = false
+        host.responses = [.released]
+        #expect(await bridge.decide(try message(.preToolUse, Self.question + #","tool_use_id":"toolu_q2""#)) == nil)
+        #expect(state == .awaitingAnswer)
+        bridge.receive(try message(.postToolUse, Self.question + #","tool_use_id":"toolu_q3","tool_response":{}"#))
+        #expect(state == .awaitingAnswer)
+        bridge.receive(try message(.postToolUse, Self.question + #","tool_use_id":"toolu_q2","tool_response":{}"#))
+        #expect(state == .working)
+    }
+
     @Test func R33__under_a_request_the_list_scrolls_to_its_last_row() async throws {
         let offer = CGSize(width: 390, height: 210)
         for index in 1...12 {
@@ -312,14 +379,17 @@ func share(of rect: CGRect, in view: NSView, where matches: (UInt8, UInt8, UInt8
         func installer(_ entries: [HookEntry]) -> HookInstaller {
             HookInstaller(settingsURL: settings, recordURL: home.appendingPathComponent("storage/claude-install.json"), entries: entries)
         }
-        for event in [HookEvent.userPromptSubmit, .sessionEnd, .postToolUse] {
+        for event in [HookEvent.userPromptSubmit, .sessionEnd, .postToolUse, .postToolUseFailure] {
             let entry = try #require(entries.first { $0.event == event.rawValue })
             #expect(entry.matcher == nil && entry.timeout == 10 && entry.command == HookInstaller.command(helper: helper, event: event))
         }
-        // What earlier versions installed: before the session hooks, and before PostToolUse.
-        try installer(entries.filter { $0.event != "UserPromptSubmit" && $0.event != "SessionEnd" && $0.event != "PostToolUse" }).install()
+        // What earlier versions installed: before the session hooks, before PostToolUse, and before
+        // PostToolUseFailure.
+        try installer(entries.filter { !["UserPromptSubmit", "SessionEnd", "PostToolUse", "PostToolUseFailure"].contains($0.event) }).install()
         #expect(installer(entries).status() == .partial)
-        try installer(entries.filter { $0.event != "PostToolUse" }).install()
+        try installer(entries.filter { $0.event != "PostToolUse" && $0.event != "PostToolUseFailure" }).install()
+        #expect(installer(entries).status() == .partial)
+        try installer(entries.filter { $0.event != "PostToolUseFailure" }).install()
         #expect(installer(entries).status() == .partial)
 
         try installer(entries).install()
@@ -332,6 +402,7 @@ func share(of rect: CGRect, in view: NSView, where matches: (UInt8, UInt8, UInt8
         #expect(commands("UserPromptSubmit") == [HookInstaller.command(helper: helper, event: .userPromptSubmit)])
         #expect(commands("SessionEnd") == [HookInstaller.command(helper: helper, event: .sessionEnd)])
         #expect(commands("PostToolUse") == [HookInstaller.command(helper: helper, event: .postToolUse)])
+        #expect(commands("PostToolUseFailure") == [HookInstaller.command(helper: helper, event: .postToolUseFailure)])
         #expect(commands("Stop").count == 1 && commands("SessionStart").count == 1)
     }
 

@@ -99,8 +99,9 @@ func run(_ runner: HookRunner, _ arguments: [String]) async -> Data {
         #expect(server.inbox.all.isEmpty)
     }
 
-    /// PostToolUse runs after every tool call, so its hook must return as fast as the others.
-    @Test(arguments: [false, true], ["Stop", "PostToolUse"])
+    /// PostToolUse and PostToolUseFailure run after every tool call, so their hooks must return as
+    /// fast as the others.
+    @Test(arguments: [false, true], ["Stop", "PostToolUse", "PostToolUseFailure"])
     func R05__offline_hook_exits_at_once_with_empty_output(staleSocket: Bool, event: String) throws {
         let paths = makeSocketPath()
         defer { try? FileManager.default.removeItem(atPath: paths.folder) }

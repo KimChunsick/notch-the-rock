@@ -72,6 +72,9 @@ final class CodexBridge {
     /// Server requests waiting for the user, by request id.
     private var pending: [JSONValue: (number: Int, task: Task<Void, Never>)] = [:]
     private var pendingCount = 0
+    /// The requests each thread waits on, the notch's and the TUI's alike, oldest first. A thread
+    /// works again once none of its requests is left.
+    private var waits: [(request: JSONValue, thread: String, state: AgentSessionState)] = []
     private var notices: [String: (id: Int, task: Task<Void, Never>)] = [:]
     private var noticeCount = 0
 
@@ -147,6 +150,7 @@ final class CodexBridge {
         callCount = 0
         resumed.removeAll()
         joined.removeAll()
+        waits.removeAll()
         fileChanges.removeAll()
         for request in pending.values {
             request.task.cancel()
@@ -306,12 +310,13 @@ final class CodexBridge {
             }
             // Answered elsewhere, in the TUI for one.
             if let thread = params["threadId"]?.string {
-                screen.sessions.answered(AgentSession.Key(agent: .codex, id: thread))
+                endWait(params["requestId"], of: thread)
             }
         case "turn/started":
             if let thread = params["threadId"]?.string { track(thread, .working) }
         case "thread/closed":
             guard let thread = params["threadId"]?.string else { return nil }
+            waits.removeAll { $0.thread == thread }
             screen.sessions.remove(AgentSession.Key(agent: .codex, id: thread))
             // One alert per thread that joined, whether or not the list still shows it. The TUI may
             // be gone already; the alert takes the user to the terminal the thread joined in.
@@ -319,6 +324,7 @@ final class CodexBridge {
             return notify(thread, message: "Codex 세션이 끝났어요.", saved: terminals.removeValue(forKey: thread))
         case "turn/completed":
             guard let thread = params["threadId"]?.string else { return nil }
+            waits.removeAll { $0.thread == thread }
             track(thread, .idle)
             switch params["turn"]?["status"]?.string {
             case "completed": return notify(thread, message: "Codex가 작업을 마쳤어요.", saved: terminals[thread])
@@ -347,8 +353,8 @@ final class CodexBridge {
         let thread = params["threadId"]?.string
         if let thread {
             switch method {
-            case "item/commandExecution/requestApproval", "item/fileChange/requestApproval": track(thread, .awaitingApproval)
-            case "item/tool/requestUserInput": track(thread, .awaitingAnswer)
+            case "item/commandExecution/requestApproval", "item/fileChange/requestApproval": wait(on: id, thread, .awaitingApproval)
+            case "item/tool/requestUserInput": wait(on: id, thread, .awaitingAnswer)
             default: break
             }
         }
@@ -381,7 +387,7 @@ final class CodexBridge {
             let current = !Task.isCancelled && self.connection == connection && self.pending[id]?.number == number
             if current, let result {
                 self.send?(.object(["id": id, "result": result]))
-                if let thread { self.screen.sessions.answered(AgentSession.Key(agent: .codex, id: thread)) }
+                if let thread { self.endWait(id, of: thread) }
             }
             if self.pending[id]?.number == number {
                 self.pending[id] = nil
@@ -389,6 +395,20 @@ final class CodexBridge {
         }
         pending[id] = (number, task)
         return task
+    }
+
+    /// The thread waits on `request` until it is answered, in the notch or elsewhere.
+    private func wait(on request: JSONValue, _ thread: String, _ state: AgentSessionState) {
+        waits.removeAll { $0.request == request }
+        waits.append((request, thread, state))
+        track(thread, state)
+    }
+
+    /// `request` of `thread` was answered: the thread works again once none of its requests waits,
+    /// and shows the one still open otherwise.
+    private func endWait(_ request: JSONValue?, of thread: String) {
+        waits.removeAll { $0.request == request }
+        screen.sessions.answered(AgentSession.Key(agent: .codex, id: thread), waiting: waits.last { $0.thread == thread }?.state)
     }
 
     private func decideCommand(_ params: JSONValue) async -> String? {
@@ -512,11 +532,12 @@ final class CodexBridge {
 
     // MARK: Notices and the terminal
 
-    /// A thread started, or was listed and resumed: it joins, and its terminal is looked up. Only
-    /// here: the lookup walks the running processes.
+    /// A thread started, or was listed and resumed: it joins. Its terminal is looked up only when
+    /// none was saved for it: a rejoin after a reconnect keeps the one it joined in, since another TUI
+    /// may work in the same folder by now. Only here: the lookup walks the running processes.
     private func join(_ thread: String, _ state: AgentSessionState) {
         joined.insert(thread)
-        if let found = terminal(threads[thread]) {
+        if terminals[thread] == nil, let found = terminal(threads[thread]) {
             terminals[thread] = found
         }
         track(thread, state)

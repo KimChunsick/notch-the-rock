@@ -10,6 +10,27 @@ struct SessionRecord: Hashable {
     /// The session finished its turn and said so; Claude Code's idle reminder (`idle_prompt`) in the
     /// same pause adds no alert. A prompt, a request or a new session starts the next pause.
     var alertedPause = false
+    /// The session's requests that wait for the user, oldest first.
+    var waits: [OpenWait] = []
+}
+
+/// A request of a Claude Code session that waits for the user: held in the notch, or handed to the
+/// terminal (released, or its wait ran out) and not answered there yet.
+struct OpenWait: Hashable {
+    let id: Int
+    let state: AgentSessionState
+    /// The tool call the request is about. PreToolUse names it by `tool_use_id`; PermissionRequest
+    /// carries no id, so its call is known by tool name and input.
+    let toolUseID: String?
+    let tool: String?
+    let input: JSONValue?
+    var released = false
+
+    /// Whether the call a PostToolUse or PostToolUseFailure `payload` ends is this request's.
+    func isCall(_ payload: JSONValue) -> Bool {
+        if let toolUseID, let ended = payload["tool_use_id"]?.string { return toolUseID == ended }
+        return tool == payload["tool_name"]?.string && input == payload["tool_input"]
+    }
 }
 
 /// Turns Claude Code hook messages into notch requests: records where each session runs, makes the
@@ -55,6 +76,7 @@ final class ClaudeBridge {
     /// Requests whose hook waits for a decision, by number.
     private var decisions: [Int: Task<HookDecision?, Never>] = [:]
     private var decisionCount = 0
+    private var waitCount = 0
 
     init(
         context: NotchContext,
@@ -91,7 +113,7 @@ final class ClaudeBridge {
     func decide(_ message: HookMessage) async -> HookDecision? {
         let sessionID = message.payload["session_id"]?.string ?? ""
         record(sessionID, message)
-        let waits = track(sessionID, message)
+        let wait = track(sessionID, message)
         let title = projectName(sessionID, message)
         let decision: HookDecision?
         switch message.event {
@@ -99,13 +121,21 @@ final class ClaudeBridge {
             decision = await decidePermission(message, title: title)
         case .preToolUse:
             decision = await answerQuestions(message, title: title)
-        case .sessionStart, .userPromptSubmit, .stop, .notification, .sessionEnd, .postToolUse:
+        case .sessionStart, .userPromptSubmit, .stop, .notification, .sessionEnd, .postToolUse, .postToolUseFailure:
             decision = nil
         }
-        // Answered in the notch, or in the terminal (the hook went away and cancelled this task).
-        // Released or timed out, the terminal asks now, so the session still waits.
-        if waits, decision != nil || Task.isCancelled {
-            screen.sessions.answered(Key(agent: .claude, id: sessionID))
+        guard let wait else { return decision }
+        if decision != nil || Task.isCancelled {
+            // Answered in the notch, or in the terminal while the notch held it (the hook went away
+            // and cancelled this task).
+            endWait(wait, of: sessionID)
+        } else if let index = sessions[sessionID]?.waits.firstIndex(where: { $0.id == wait }) {
+            // Released or timed out, the terminal asks now, so the session still waits. Claude Code
+            // fires no hook when the user answers there, so the time between that answer and the
+            // tool's end cannot be observed: the wait ends with the tool's own PostToolUse or
+            // PostToolUseFailure, or with the session's next event of any other kind, and until then
+            // the row keeps its waiting state.
+            sessions[sessionID]?.waits[index].released = true
         }
         return decision
     }
@@ -119,7 +149,7 @@ final class ClaudeBridge {
         track(sessionID, message)
         let title = projectName(sessionID, message)
         switch message.event {
-        case .sessionStart, .userPromptSubmit, .postToolUse:
+        case .sessionStart, .userPromptSubmit, .postToolUse, .postToolUseFailure:
             return nil
         case .sessionEnd:
             // Every end alerts, /clear's too: it ends this conversation, and the next one in the same
@@ -292,40 +322,83 @@ final class ClaudeBridge {
         switch message.event {
         case .stop, .notification:
             break
-        case .sessionStart, .userPromptSubmit, .permissionRequest, .preToolUse, .postToolUse, .sessionEnd:
+        case .sessionStart, .userPromptSubmit, .permissionRequest, .preToolUse, .postToolUse, .postToolUseFailure, .sessionEnd:
             record.alertedPause = false
         }
         sessions[sessionID] = record
     }
 
-    /// Moves the session's row on the Agents screen. True when a request made the session wait.
+    /// Moves the session's row on the Agents screen. Returns the wait a request opened.
     @discardableResult
-    private func track(_ sessionID: String, _ message: HookMessage) -> Bool {
-        guard !sessionID.isEmpty else { return false }
+    private func track(_ sessionID: String, _ message: HookMessage) -> Int? {
+        guard !sessionID.isEmpty else { return nil }
         let key = Key(agent: .claude, id: sessionID)
         let state: AgentSessionState?
+        var opened: Int?
         switch message.event {
         case .sessionEnd:
+            sessions[sessionID]?.waits.removeAll()
             screen.sessions.remove(key)
-            return false
+            return nil
         case .sessionStart, .stop:
+            endReleasedWaits(of: sessionID)
             state = .idle
-        case .userPromptSubmit, .postToolUse:
-            // A finished tool also ends a wait that was answered in the terminal.
+        case .userPromptSubmit:
+            endReleasedWaits(of: sessionID)
             state = .working
-        case .permissionRequest:
-            // AskUserQuestion waits through its PreToolUse hook.
-            state = message.payload["tool_name"]?.string == "AskUserQuestion" ? nil : .awaitingApproval
-        case .preToolUse:
-            state = .awaitingAnswer
         case .notification:
+            endReleasedWaits(of: sessionID)
             state = Self.waitingState(payload: message.payload)
+        case .postToolUse, .postToolUseFailure:
+            state = toolEnded(sessionID, message.payload)
+        case .permissionRequest, .preToolUse:
+            endReleasedWaits(of: sessionID)
+            // AskUserQuestion waits through its PreToolUse hook.
+            if message.event == .preToolUse {
+                state = .awaitingAnswer
+            } else {
+                state = message.payload["tool_name"]?.string == "AskUserQuestion" ? nil : .awaitingApproval
+            }
+            opened = state.map { openWait(sessionID, $0, message.payload) }
         }
         screen.sessions.update(
             key, folder: projectName(sessionID, message), state: state,
             terminal: sessions[sessionID]?.terminal, pid: message.context.claudePID
         )
-        return state == .awaitingApproval || state == .awaitingAnswer
+        return opened
+    }
+
+    private func openWait(_ sessionID: String, _ state: AgentSessionState, _ payload: JSONValue) -> Int {
+        waitCount += 1
+        sessions[sessionID]?.waits.append(OpenWait(
+            id: waitCount, state: state, toolUseID: payload["tool_use_id"]?.string,
+            tool: payload["tool_name"]?.string, input: payload["tool_input"]
+        ))
+        return waitCount
+    }
+
+    /// The request `id` of the session was answered. The session works again once no wait is left;
+    /// otherwise it shows the wait still open.
+    private func endWait(_ id: Int, of sessionID: String) {
+        guard sessions[sessionID]?.waits.contains(where: { $0.id == id }) == true else { return }
+        sessions[sessionID]?.waits.removeAll { $0.id == id }
+        screen.sessions.answered(Key(agent: .claude, id: sessionID), waiting: sessions[sessionID]?.waits.last?.state)
+    }
+
+    /// Any later event of the session but another tool's end means the terminal no longer asks what
+    /// was handed to it. Requests still held in the notch stay.
+    private func endReleasedWaits(of sessionID: String) {
+        sessions[sessionID]?.waits.removeAll(where: \.released)
+    }
+
+    /// A tool call of the session ended, done or failed: the request about that call ends. The
+    /// session works again once no wait is left; another call's end leaves a waiting session as it is.
+    private func toolEnded(_ sessionID: String, _ payload: JSONValue) -> AgentSessionState? {
+        guard var waits = sessions[sessionID]?.waits, !waits.isEmpty else { return .working }
+        guard let index = waits.firstIndex(where: { $0.isCall(payload) }) else { return nil }
+        waits.remove(at: index)
+        sessions[sessionID]?.waits = waits
+        return waits.last?.state ?? .working
     }
 
     private typealias Key = AgentSession.Key

@@ -187,6 +187,28 @@ final class FolderTerminals {
         #expect(activator.activated == [ghostty, ghostty])
     }
 
+    @Test func R40__a_rejoining_codex_thread_keeps_the_terminal_it_joined_in() async throws {
+        let terminals = FolderTerminals()
+        let codex = try joinedCodex(terminals)
+        let key = AgentSession.Key(agent: .codex, id: Self.thread1)
+        #expect(codex.screen.sessions[key]?.terminal == ghostty)
+        // Another Codex TUI now works in the same folder, in another terminal; the connection drops and
+        // the thread is listed and resumed again.
+        let other = TerminalLocation(bundleID: "com.apple.Terminal", tty: "/dev/ttys009")
+        terminals.byFolder["/Users/me/notch-the-rock"] = other
+        codex.close()
+        codex.open { _ in }
+        codex.receive(try codexFixture("initializeResponse"))
+        codex.receive(try codexFixture("loadedListPage1"))
+        codex.receive(try codexFixture("resumeResponse"))
+        #expect(codex.screen.sessions[key]?.terminal == ghostty)
+        host.responses = [Self.jump]
+        await codex.receive(try codexFixture("turnCompleted"))?.value
+        host.responses = [Self.jump]
+        await codex.receive(try jsonValue(#"{"method":"thread/closed","params":{"threadId":"\#(Self.thread1)"}}"#))?.value
+        #expect(activator.activated == [ghostty, ghostty])
+    }
+
     @Test func R40__render_alerts_with_a_fake_logo() throws {
         logos.images[.claude] = solidLogo(Self.magenta, template: false)
         claude.receive(try hook(.sessionStart))

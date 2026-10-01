@@ -81,6 +81,24 @@ import Testing
         #expect(list.sessions.map(\.id.id) == [Self.thread1])
     }
 
+    @Test func R33__a_codex_thread_waits_until_each_of_its_requests_is_resolved() async throws {
+        try connect()
+        let turn = #"{"id":"019a0000-0000-7000-8000-0000000000a1","items":[],"status":"inProgress"}"#
+        bridge.receive(try notification("turn/started", #"{"threadId":"\#(Self.thread1)","turn":\#(turn)}"#))
+        host.waitsForCancellation = true
+        let approval = bridge.receive(try codexFixture("commandApproval"))
+        let question = bridge.receive(try codexFixture("userInput"))
+        #expect(await eventually { host.requests.count == 2 })
+        #expect(session(Self.thread1)?.state == .awaitingAnswer)
+        // The question is answered in the TUI; the approval still waits.
+        bridge.receive(try notification("serverRequest/resolved", #"{"threadId":"\#(Self.thread1)","requestId":12}"#))
+        await question?.value
+        #expect(session(Self.thread1)?.state == .awaitingApproval)
+        bridge.receive(try notification("serverRequest/resolved", #"{"threadId":"\#(Self.thread1)","requestId":7}"#))
+        await approval?.value
+        #expect(session(Self.thread1)?.state == .working)
+    }
+
     @Test func R33__claude_and_codex_sessions_render_with_their_own_logos() throws {
         world.now = .now - 240
         let logos = FakeLogos()
