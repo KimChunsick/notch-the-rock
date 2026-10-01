@@ -376,7 +376,8 @@ final class PluginCatalog {
                 name: entry.manifest.name,
                 symbol: entry.manifest.symbol,
                 tab: entry.tab,
-                tile: entry.tile
+                tile: entry.tile,
+                hasSettings: entry.plugin.settingsView != nil
             )
         }
     }

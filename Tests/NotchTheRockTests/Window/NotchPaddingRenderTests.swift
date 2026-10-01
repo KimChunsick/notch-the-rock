@@ -8,7 +8,7 @@ import Testing
 /// The visible gaps between what the expanded notch draws and the shape's edges, measured on an
 /// offscreen render the way the end-to-end capture measures them. The host's composition is the
 /// app's own (`NotchSurface`, `IntrinsicSizeLayout`, `NotchLayout.metrics`, `HomeView`, `HomeBand`,
-/// `PluginScreenView`). The root package cannot import the plugin packages, and activating the real
+/// `PluginBand`). The root package cannot import the plugin packages, and activating the real
 /// plugins would read the machine (battery, audio, pasteboard, sensors) or ask for permissions, so
 /// each plugin screen is a stand-in that repeats its tab view's layout code with fixed values.
 @MainActor
@@ -142,13 +142,26 @@ import Testing
         }
     }
 
-    /// A plugin's screen as the host shows it: the back control over the plugin's tab view.
-    func pluginScreen(_ name: String, _ tab: some View) -> some View {
-        PluginScreenView(
-            host: NotchHostModel(),
-            plugin: HomePlugin(pluginID: "com.example.\(name)", name: name, symbol: "square", tab: nil, tile: nil),
-            tab: PluginTab(title: name, symbol: "square") { tab }
-        )
+    /// A plugin's screen as the host shows it: the plugin's tab view under the band, which holds ‹
+    /// and the plugin's name left of the camera and, with a settings page, the gear right of it.
+    func measureScreen(_ name: String, _ pluginName: String, hasSettings: Bool, _ tab: some View) async throws -> Gaps {
+        let plugin = HomePlugin(pluginID: "com.example.\(name)", name: pluginName, symbol: "square", tab: nil, tile: nil, hasSettings: hasSettings)
+        let host = NotchHostModel()
+        return try await measure(name, minWidth: PluginBand.minimumWidth(notch: Self.notch, plugin: plugin), tab) { width in
+            PluginBand(host: host, plugin: plugin, notchSize: Self.notch, width: width, openSettings: { _ in })
+        }
+    }
+
+    /// The same padding on every side, when the plugin's view decides the shape's width. When the
+    /// band needs a wider shape for the plugin's name, the view stays centred under the camera: the
+    /// back control keeps the padding on the left and nothing comes closer on the right.
+    func expectScreenPadding(_ gaps: Gaps, _ name: String) {
+        guard gaps.content.width + 2 * (NotchLayout.openShoulder + NotchSizing.padding) < gaps.shape.width - 0.5 else {
+            return expectEqualPadding(gaps, name)
+        }
+        #expect(abs(gaps.left - NotchSizing.padding) <= 2, "\(name) left gap \(gaps.left) pt: \(gaps)")
+        #expect(abs(gaps.bottom - NotchSizing.padding) <= 2, "\(name) bottom gap \(gaps.bottom) pt: \(gaps)")
+        #expect(gaps.right >= NotchSizing.padding - 2, "\(name) right gap \(gaps.right) pt: \(gaps)")
     }
 
     // MARK: Screens
@@ -167,56 +180,56 @@ import Testing
         catalog.loadAll()
         let minWidth = BandLayout.minimumWidth(notch: Self.notch, leading: HomeChrome.editWidth, trailing: HomeChrome.gearWidth)
         let gaps = try await measure("home", minWidth: minWidth, HomeView(host: host)) { width in
-            HomeBand(home: host.home, notchSize: Self.notch, width: width, openSettings: {})
+            HomeBand(home: host.home, notchSize: Self.notch, width: width, openSettings: { _ in })
         }
         expectEqualPadding(gaps, "home")
     }
 
     @Test func R15__the_battery_screen_keeps_the_same_padding_on_every_side() async throws {
-        let gaps = try await measure("battery", pluginScreen("배터리", BatteryStandIn()))
-        expectEqualPadding(gaps, "battery")
+        let gaps = try await measureScreen("battery", "배터리", hasSettings: false, BatteryStandIn())
+        expectScreenPadding(gaps, "battery")
     }
 
     @Test func R15__the_volume_screen_keeps_the_same_padding_on_every_side() async throws {
-        let gaps = try await measure("volume", pluginScreen("볼륨", VolumeStandIn()))
-        expectEqualPadding(gaps, "volume")
+        let gaps = try await measureScreen("volume", "볼륨", hasSettings: true, VolumeStandIn())
+        expectScreenPadding(gaps, "volume")
     }
 
     @Test func R15__the_brightness_screen_keeps_the_same_padding_on_every_side() async throws {
-        let gaps = try await measure("brightness", pluginScreen("밝기", BrightnessStandIn()))
-        expectEqualPadding(gaps, "brightness")
+        let gaps = try await measureScreen("brightness", "밝기", hasSettings: true, BrightnessStandIn())
+        expectScreenPadding(gaps, "brightness")
     }
 
     @Test func R15__the_now_playing_screen_keeps_the_same_padding_on_every_side() async throws {
-        let gaps = try await measure("nowplaying", pluginScreen("지금 재생 중", NowPlayingStandIn()))
-        expectEqualPadding(gaps, "nowplaying")
+        let gaps = try await measureScreen("nowplaying", "지금 재생 중", hasSettings: false, NowPlayingStandIn())
+        expectScreenPadding(gaps, "nowplaying")
     }
 
     @Test func R15__the_now_playing_screen_keeps_the_same_padding_on_every_side_while_a_track_plays() async throws {
-        let gaps = try await measure("nowplaying-track", pluginScreen("지금 재생 중", NowPlayingTrackStandIn()))
-        expectEqualPadding(gaps, "nowplaying-track")
+        let gaps = try await measureScreen("nowplaying-track", "지금 재생 중", hasSettings: false, NowPlayingTrackStandIn())
+        expectScreenPadding(gaps, "nowplaying-track")
     }
 
     @Test func R15__the_clipboard_screen_keeps_the_same_padding_on_every_side() async throws {
-        let gaps = try await measure("clipboard", pluginScreen("클립보드", ClipboardStandIn()))
-        expectEqualPadding(gaps, "clipboard")
+        let gaps = try await measureScreen("clipboard", "클립보드", hasSettings: true, ClipboardStandIn())
+        expectScreenPadding(gaps, "clipboard")
     }
 
     @Test func R15__the_clipboard_screen_keeps_the_same_padding_on_every_side_with_a_short_history() async throws {
-        let gaps = try await measure("clipboard-rows", pluginScreen("클립보드", ClipboardRowsStandIn()))
-        expectEqualPadding(gaps, "clipboard-rows")
+        let gaps = try await measureScreen("clipboard-rows", "클립보드", hasSettings: true, ClipboardRowsStandIn())
+        expectScreenPadding(gaps, "clipboard-rows")
     }
 
     @Test func R15__the_system_stats_screen_keeps_the_same_padding_on_every_side() async throws {
-        let gaps = try await measure("systemstats", pluginScreen("시스템 상태", SystemStatsStandIn()))
-        expectEqualPadding(gaps, "systemstats")
+        let gaps = try await measureScreen("systemstats", "시스템 상태", hasSettings: false, SystemStatsStandIn())
+        expectScreenPadding(gaps, "systemstats")
     }
 }
 
 // MARK: Stand-ins: each repeats its plugin's tab view layout (Plugins/<Name>/Sources) with fixed values.
 
 /// `BatteryView`, fully charged.
-private struct BatteryStandIn: View {
+struct BatteryStandIn: View {
     var body: some View {
         HStack(spacing: 16) {
             Image(systemName: "battery.100percent")

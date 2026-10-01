@@ -29,4 +29,9 @@ struct BandLayout: Equatable {
     static func minimumWidth(notch: CGSize, leading: CGFloat, trailing: CGFloat) -> CGFloat {
         notch.width + 2 * (edgeInset + max(leading, trailing) + cameraClearance)
     }
+
+    /// The widest control a wing of an expanded shape `width` wide holds clear of the camera.
+    static func wingRoom(notch: CGSize, width: CGFloat) -> CGFloat {
+        max(0, (width - notch.width) / 2 - edgeInset - cameraClearance)
+    }
 }

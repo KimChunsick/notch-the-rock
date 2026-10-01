@@ -42,7 +42,7 @@ import Testing
         let host = NotchHostModel()
         host.post(LiveActivity(id: "stand-in") { leading } trailing: { trailing }, from: "com.example.activity")
         let canvas = NotchLayout.canvasSize
-        let image = try await settledCapture(NotchRootView(host: host, notchSize: notch, openSettings: {}), size: canvas)
+        let image = try await settledCapture(NotchRootView(host: host, notchSize: notch, openSettings: { _ in }), size: canvas)
         let scale = CGFloat(image.width) / canvas.width
         let top = try #require(image.cropping(to: CGRect(x: 0, y: 0, width: image.width, height: Int((notchHeight + 12) * scale))))
         if let directory = ProcessInfo.processInfo.environment["NOTCH_RENDER_DIR"] {

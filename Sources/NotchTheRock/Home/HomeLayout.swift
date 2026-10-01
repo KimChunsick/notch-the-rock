@@ -12,6 +12,9 @@ struct HomePlugin {
     let symbol: String
     let tab: PluginTab?
     let tile: PluginTile?
+    /// Whether the plugin has a page in the Settings window (`NotchPlugin.settingsView`), which the
+    /// gear on its screen opens.
+    var hasSettings = false
 
     /// Whether the plugin appears in the home at all.
     var isInHome: Bool { tab != nil || tile != nil }
