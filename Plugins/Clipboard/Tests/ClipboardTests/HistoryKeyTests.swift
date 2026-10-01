@@ -379,3 +379,255 @@ private func makePlugin(directory: URL, keychain: FakeKeychain, pasteboard: NSPa
     let key = SymmetricKey(data: try #require(keychain.items[HistoryKey.account]).data)
     #expect(makeHistory(directory: directory, key: key).items.map(\.content) == [.text("copied before the plugin started")])
 }
+
+/// Puts `text` on `pasteboard` as a new copy.
+private func put(_ text: String, on pasteboard: NSPasteboard) {
+    pasteboard.clearContents()
+    pasteboard.setString(text, forType: .string)
+}
+
+/// Whether `history` lists `content` within a second, the time R09 gives a copy to show. Tests run
+/// in parallel and some hold the main actor for seconds (offscreen windows); the monitor polls on
+/// the main actor as well, so a wait step that took longer than five steps counts as five: only the
+/// time the main actor was free for the monitor counts against the copy.
+@MainActor
+private func showsWithinASecond(_ content: ClipItem.Content, in history: ClipboardHistory) async -> Bool {
+    let step = Duration.milliseconds(20)
+    var waited = Duration.zero
+    while waited < .seconds(1) {
+        if history.items.contains(where: { $0.content == content }) { return true }
+        let start = ContinuousClock.now
+        try? await Task.sleep(for: step)
+        waited += min(ContinuousClock.now - start, step * 5)
+    }
+    return history.items.contains { $0.content == content }
+}
+
+/// The list on disk, opened with the key now under the key's account.
+private func storedContents(in directory: URL, keychain: FakeKeychain) throws -> [ClipItem.Content] {
+    let key = SymmetricKey(data: try #require(keychain.items[HistoryKey.account]).data)
+    return try ClipboardStore(directory: directory, key: key).loadList().map(\.content)
+}
+
+/// However long the key takes to load, a copy shows in the list within a second, and it is saved
+/// once the history opens.
+@MainActor
+@Test func R09__a_copy_shows_within_a_second_while_the_key_loads() async throws {
+    let directory = try makeDirectory()
+    let keychain = FakeKeychain()
+    keychain.isHeld = true
+    defer { keychain.isHeld = false }
+    let pasteboard = makePasteboard()
+    defer { pasteboard.releaseGlobally() }
+    let plugin = try makePlugin(directory: directory, keychain: keychain, pasteboard: pasteboard)
+
+    plugin.activate()
+    put("copied while the key loads", on: pasteboard)
+    #expect(await showsWithinASecond(.text("copied while the key loads"), in: plugin.history))
+    #expect(keychain.calls.isEmpty, "the key is still loading")
+
+    keychain.isHeld = false
+    await plugin.opening?.value
+    plugin.deactivate()
+    #expect(plugin.history.items.map(\.content) == [.text("copied while the key loads")])
+    #expect(try storedContents(in: directory, keychain: keychain) == [.text("copied while the key loads")])
+}
+
+/// Turning the feature off while the key loads loses no copy made meanwhile: turned on again, the
+/// history opens with every one of them, newest first, and saves them.
+@MainActor
+@Test func R09__copies_survive_turning_off_while_the_key_loads() async throws {
+    let directory = try makeDirectory()
+    let keychain = FakeKeychain()
+    keychain.isHeld = true
+    defer { keychain.isHeld = false }
+    let pasteboard = makePasteboard()
+    defer { pasteboard.releaseGlobally() }
+    let plugin = try makePlugin(directory: directory, keychain: keychain, pasteboard: pasteboard)
+
+    plugin.activate()
+    for text in ["copy A", "copy B"] {
+        put(text, on: pasteboard)
+        #expect(await showsWithinASecond(.text(text), in: plugin.history))
+    }
+    plugin.deactivate()
+    keychain.isHeld = false
+    plugin.activate()
+    await plugin.opening?.value
+    plugin.deactivate()
+
+    let expected: [ClipItem.Content] = [.text("copy B"), .text("copy A")]
+    #expect(plugin.history.items.map(\.content) == expected)
+    #expect(try storedContents(in: directory, keychain: keychain) == expected)
+}
+
+/// A new key that could not be stored leaves the marker; later the old key can be read and is
+/// saved under the new account, and the process stops before the marker goes. The next open finds
+/// a list that opens with its key: it keeps that history and only drops the marker.
+@MainActor
+@Test func R09__a_stale_marker_never_deletes_a_history_the_key_opens() throws {
+    let directory = try makeDirectory()
+    let key = makeKey()
+    writeHistory(in: directory, key: key, text: "readable with the key")
+    let marker = directory.appendingPathComponent(ClipboardStore.oldHistoryMarkerName)
+    let keychain = FakeKeychain()
+    keychain.items[HistoryKey.legacyAccount] = FakeKeychain.Item(data: bytes(of: key), access: nil)
+    keychain.needsAccess = [HistoryKey.legacyAccount]
+    keychain.failingSets = [HistoryKey.account: .refused]
+    #expect(throws: KeychainError.self) { try ClipboardStore.open(in: directory, keychain: keychain) }
+    #expect(FileManager.default.fileExists(atPath: marker.path))
+
+    keychain.needsAccess = []
+    keychain.failingSets = [HistoryKey.account: .afterStoring]
+    #expect(throws: KeychainError.self) { try ClipboardStore.open(in: directory, keychain: keychain) }
+    #expect(keychain.items[HistoryKey.account]?.data == bytes(of: key))
+    #expect(FileManager.default.fileExists(atPath: marker.path))
+    keychain.failingSets = [:]
+
+    let opened = try ClipboardStore.open(in: directory, keychain: keychain)
+    #expect(opened.origin == .stored)
+    #expect(!FileManager.default.fileExists(atPath: marker.path))
+    #expect(makeHistory(directory: directory, key: opened.key).items.map(\.content) == [.text("readable with the key")])
+}
+
+/// SplitMix64, so a seed always gives the same session.
+private struct SeededGenerator: RandomNumberGenerator {
+    var state: UInt64
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+}
+
+/// What is on disk and in the keychain when a random session starts.
+private enum SessionStart: CaseIterable {
+    case firstRun, readableOldKey, oldKeyThatNeedsAccess, staleMarkerOnReadableHistory
+}
+
+/// How the keychain answers: waiting, as it should, refusing the key's account, or storing a key
+/// and then failing like a process that stops right after.
+private enum KeyState {
+    case held, healthy, failing, interruptedAfterSave
+}
+
+private enum SessionStep {
+    case copy, activate, deactivate, holdKey, releaseKey, failKey, interruptAfterKeySave, reopen
+}
+
+private func apply(_ state: KeyState, to keychain: FakeKeychain, needingAccess base: Set<String>) {
+    keychain.needsAccess = state == .failing ? base.union([HistoryKey.account]) : base
+    keychain.failingSets = state == .interruptedAfterSave ? [HistoryKey.account: .afterStoring] : [:]
+    keychain.isHeld = state == .held
+}
+
+/// Random sessions from fixed seeds: copies, turning the feature off and on, and a key that waits,
+/// fails or is saved right before an interruption. After each copy it must show within a second;
+/// once the keychain answers again and the history opens: every copy is listed and saved, newest
+/// first; a history that the final key opens was never deleted; no marker is left; and no keychain
+/// call ran on the main thread.
+@MainActor
+@Test func R09__random_sessions_keep_every_copy_and_every_readable_history() async throws {
+    for seed in UInt64(1)...12 {
+        try await runRandomSession(seed: seed)
+    }
+}
+
+@MainActor
+private func runRandomSession(seed: UInt64) async throws {
+    var random = SeededGenerator(state: seed)
+    let start = SessionStart.allCases[Int(seed % UInt64(SessionStart.allCases.count))]
+    let directory = try makeDirectory()
+    let marker = directory.appendingPathComponent(ClipboardStore.oldHistoryMarkerName)
+    let keychain = FakeKeychain()
+    defer { keychain.isHeld = false }
+    var initialKey: SymmetricKey?
+    if start != .firstRun {
+        let key = makeKey()
+        writeHistory(in: directory, key: key, text: "from before")
+        initialKey = key
+        switch start {
+        case .readableOldKey:
+            keychain.items[HistoryKey.legacyAccount] = FakeKeychain.Item(data: bytes(of: key), access: nil)
+        case .oldKeyThatNeedsAccess:
+            keychain.items[HistoryKey.legacyAccount] = FakeKeychain.Item(data: bytes(of: key), access: nil)
+            keychain.needsAccess = [HistoryKey.legacyAccount]
+        case .staleMarkerOnReadableHistory:
+            keychain.items[HistoryKey.account] = FakeKeychain.Item(data: bytes(of: key), access: .anyApplication)
+            try Data().write(to: marker)
+        case .firstRun:
+            break
+        }
+    }
+    let needingAccess = keychain.needsAccess
+    // Even seeds start with a key save that is interrupted, so a first key or a moved one is saved
+    // and the open still fails; odd seeds start with a key that waits.
+    var keyState: KeyState = seed.isMultiple(of: 2) ? .interruptedAfterSave : .held
+    apply(keyState, to: keychain, needingAccess: needingAccess)
+    let pasteboard = makePasteboard()
+    defer { pasteboard.releaseGlobally() }
+    let plugin = try makePlugin(directory: directory, keychain: keychain, pasteboard: pasteboard)
+
+    var log = ["seed \(seed)", "\(start)", "\(keyState)"]
+    var copies: [String] = []
+    var isActive = false
+    let steps: [SessionStep] = [.copy, .copy, .copy, .activate, .deactivate, .holdKey, .releaseKey, .failKey, .interruptAfterKeySave, .reopen]
+    for _ in 0..<18 {
+        let step = steps.randomElement(using: &random)!
+        log.append("\(step)")
+        switch step {
+        case .copy where !isActive, .activate where !isActive:
+            plugin.activate()
+            isActive = true
+        case .copy:
+            let text = "copy \(seed).\(copies.count)"
+            put(text, on: pasteboard)
+            copies.append(text)
+            let shows = await showsWithinASecond(.text(text), in: plugin.history)
+            #expect(shows, Comment(rawValue: "\(text) did not show within a second: \(log)"))
+        case .activate:
+            break
+        case .deactivate:
+            if isActive { plugin.deactivate() }
+            isActive = false
+        case .holdKey, .releaseKey, .failKey, .interruptAfterKeySave:
+            let states: [SessionStep: KeyState] = [.holdKey: .held, .releaseKey: .healthy, .failKey: .failing, .interruptAfterKeySave: .interruptedAfterSave]
+            keyState = states[step]!
+            apply(keyState, to: keychain, needingAccess: needingAccess)
+        case .reopen:
+            if isActive { plugin.deactivate() }
+            plugin.activate()
+            isActive = true
+        }
+        if isActive && keyState != .held {
+            await plugin.opening?.value
+        }
+    }
+
+    // The keychain answers again and the feature is turned off and on, so an opening finishes.
+    apply(.healthy, to: keychain, needingAccess: needingAccess)
+    if isActive { plugin.deactivate() }
+    plugin.activate()
+    await plugin.opening?.value
+    plugin.deactivate()
+
+    let comment = Comment(rawValue: log.joined(separator: ", "))
+    let copied = copies.reversed().map { ClipItem.Content.text($0) }
+    #expect(plugin.history.items.map(\.content).filter { copied.contains($0) } == copied, comment)
+    #expect(plugin.history.unsavedCount == 0, comment)
+    let finalKey = SymmetricKey(data: try #require(keychain.items[HistoryKey.account], comment).data)
+    let stored = try #require(try? ClipboardStore(directory: directory, key: finalKey).loadList(), comment)
+    #expect(stored.map(\.content) == plugin.history.items.map(\.content), comment)
+    #expect(!FileManager.default.fileExists(atPath: marker.path), comment)
+    if let initialKey {
+        let historyOpensWithFinalKey = bytes(of: initialKey) == bytes(of: finalKey)
+        #expect(stored.map(\.content).contains(.text("from before")) == historyOpensWithFinalKey, comment)
+        if start != .oldKeyThatNeedsAccess {
+            #expect(historyOpensWithFinalKey, comment)
+        }
+    }
+    #expect(keychain.calls.allSatisfy { !$0.onMain }, comment)
+}

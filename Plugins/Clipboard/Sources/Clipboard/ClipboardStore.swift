@@ -116,22 +116,36 @@ extension ClipboardStore {
     /// instead of unreadable.
     ///
     /// The marker makes that deletion survive an interruption: any later call that finds it deletes
-    /// the old files, and until the marker is gone this throws, so no list is written under the new
-    /// key beside them. A marker left by a new key that could not be stored is dropped without
-    /// deleting anything when the old key turns out to be readable: its history is readable too.
+    /// the files there when their list does not open with the key it got, and until the marker is
+    /// gone this throws, so no list is written under the new key beside them. A list that opens with
+    /// that key is that key's history, whatever left the marker (a new key that could not be
+    /// stored, then an old key that became readable and moved): it is kept, and only the marker goes.
     static func open(in directory: URL, keychain: some HistoryKeychain) throws -> (store: ClipboardStore, key: SymmetricKey, origin: HistoryKey.Origin) {
         let marker = directory.appendingPathComponent(oldHistoryMarkerName)
         let (key, origin) = try HistoryKey.load(from: keychain) {
             try Data().write(to: marker)
         }
         let store = ClipboardStore(directory: directory, key: key)
-        if origin == .movedFromOldAccount {
-            try store.removeIfPresent(marker)
-        } else if try isPresent(marker) {
-            try store.deleteAll()
+        if try isPresent(marker) {
+            if try !store.listOpensWithKey() {
+                try store.deleteAll()
+            }
             try store.removeIfPresent(marker)
         }
         return (store, key, origin)
+    }
+
+    /// Whether the stored list opens with this key, true when no list was written. Throws when the
+    /// list cannot be read, so a list out of reach is never taken for one sealed with another key.
+    /// Only decryption counts: a list that opens but cannot be decoded is this key's.
+    private func listOpensWithKey() throws -> Bool {
+        let sealed: Data
+        do {
+            sealed = try Data(contentsOf: directory.appendingPathComponent(Self.listFileName))
+        } catch CocoaError.fileReadNoSuchFile {
+            return true
+        }
+        return (try? open(sealed)) != nil
     }
 
     /// Whether there is a file at `url`. Only a read that finds no such file says no, as in

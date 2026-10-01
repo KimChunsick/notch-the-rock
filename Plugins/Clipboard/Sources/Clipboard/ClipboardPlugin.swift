@@ -42,13 +42,12 @@ public final class ClipboardPlugin: NotchPlugin {
         history = ClipboardHistory { log.error($0) }
     }
 
-    /// Starts watching the pasteboard and records what it holds now, like a new copy. Loads the key
-    /// in the background, then reloads the history from disk. Copies seen until then are held and
-    /// recorded into the history once it opens; until then it shows what it showed before, nothing
-    /// at launch.
+    /// Starts watching the pasteboard and records what it holds now, like a new copy; every copy
+    /// shows in the list at once. Loads the key in the background, then reopens the history from
+    /// disk, keeping the copies made meanwhile and saving them there.
     public func activate() {
         guard opening == nil else { return }
-        history.holdCopiesUntilOpen()
+        history.beginOpening()
         let monitor = PasteboardMonitor(pasteboard: pasteboard) { [history] pasteboard in
             history.record(from: pasteboard)
         }
@@ -70,7 +69,9 @@ public final class ClipboardPlugin: NotchPlugin {
         }
     }
 
-    /// Stops watching and waits for the pending history write, so quitting loses no change.
+    /// Stops watching and waits for the pending history write, so quitting loses no change that can
+    /// be written. An opening still loading the key is dropped; the history keeps the copies made
+    /// meanwhile, and the next opening that finishes saves them.
     public func deactivate() {
         opening?.cancel()
         opening = nil
@@ -98,7 +99,7 @@ public final class ClipboardPlugin: NotchPlugin {
 
     /// Opens the history with the encrypted store, or without one when the Keychain cannot give a
     /// key or an old history cannot be deleted yet: then the history, image originals included,
-    /// stays in memory for this session and nothing is written to disk.
+    /// stays in memory and nothing is written to disk until an opening succeeds.
     private func finishOpening(_ opened: Result<(store: ClipboardStore, key: SymmetricKey, origin: HistoryKey.Origin), any Error>) {
         switch opened {
         case .success(let opened):

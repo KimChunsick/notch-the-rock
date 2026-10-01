@@ -106,7 +106,7 @@ struct ClipboardView: View {
                 notice("저장된 기록을 읽지 못했어요. 설정에서 초기화할 수 있어요.")
             }
             if history.showsUnsavedNotice(at: now) {
-                notice("기록 \(history.unsavedCount)개는 저장하지 못했어요. 앱을 종료하거나 클립보드 기능을 끄면 사라져요.")
+                notice("기록 \(history.unsavedCount)개는 저장하지 못했어요. 앱을 종료하면 사라져요.")
             }
             let cards = Self.cards(history.matching(query))
             if history.items.isEmpty {
@@ -472,7 +472,7 @@ struct ClipboardSettingsView: View {
                 }
             } label: {
                 Text("저장된 기록을 읽지 못했어요")
-                Text("지금은 기록을 저장하지 않아서 앱을 종료하거나 클립보드 기능을 끄면 사라져요. 초기화하면 다시 저장해요.")
+                Text("지금은 기록을 저장하지 않아서 앱을 종료하면 사라져요. 초기화하면 다시 저장해요.")
             }
         }
     }

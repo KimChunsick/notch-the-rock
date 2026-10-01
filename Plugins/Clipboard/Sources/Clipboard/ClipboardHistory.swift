@@ -10,9 +10,9 @@ import Observation
 ///
 /// An entry is saved once its image file, if it has one, and a list on disk that names it are both
 /// written; the image file always comes first. Until then the entry lives in memory only, image
-/// original included, and `open(_:)` drops it: turning the plugin off and on, or quitting, loses
-/// it. Without a writable store (no key, or a store that cannot be read) every entry lives in
-/// memory only.
+/// original included, and `open(_:)` keeps it and saves it in the store it opens; only quitting
+/// loses it. Without a writable store (no key yet, none, or a store that cannot be read) every entry
+/// lives in memory only. Every copy shows in the list as soon as it is recorded, whatever the store.
 @MainActor
 @Observable
 final class ClipboardHistory {
@@ -40,9 +40,11 @@ final class ClipboardHistory {
     @ObservationIgnored private let logError: @MainActor (String) -> Void
     @ObservationIgnored private let now: @MainActor () -> Date
     @ObservationIgnored private let sources: SourceAppLookup
-    /// Copies seen while the plugin opens the history, oldest first, each with when and where it
-    /// was copied; the next `open(_:)` records them. Nil while copies are recorded as they come.
-    @ObservationIgnored private var heldCopies: [(capture: ClipCapture, date: Date, source: SourceApp?)]?
+    /// Whether a store is being opened: set by `beginOpening()`, cleared by `open(_:)`.
+    @ObservationIgnored private var isOpening = false
+    /// The entries copied while a store was being opened. One may have been written to the store
+    /// opened before, which need not be the next one, so `open(_:)` keeps them whatever it finds.
+    @ObservationIgnored private var copiedWhileOpening: Set<ClipItem.ID> = []
 
     /// `now` gives the time `unsavedSince` records; tests pass a clock they move themselves.
     /// `sources` finds the app a pasteboard change came from.
@@ -66,36 +68,73 @@ final class ClipboardHistory {
     /// Whether the stored history could not be read, so this session is kept in memory only.
     var isStoreUnreadable: Bool { unreadableStore != nil }
 
-    /// Replaces the history with what `store` holds and saves every later change there; entries
-    /// that were not saved are dropped. Image files the stored list does not name were never saved,
-    /// or belong to removed entries, and are deleted. A list that cannot be read, or a directory
-    /// that cannot be listed, leaves the history empty and in memory, and the store untouched. With
-    /// nil the history starts empty and keeps its entries in memory only. Then the copies held since
-    /// `holdCopiesUntilOpen()` are recorded, oldest first, by the same rules as any copy.
+    /// Replaces the history with what `store` holds and saves every later change there, keeping the
+    /// entries this session still owes: every entry that no list on disk names and every entry
+    /// copied since `beginOpening()`. Each goes back where its date puts it, newest first; one whose
+    /// content is stored already merges into that entry, which takes the later date and keeps a pin
+    /// of either. Then the oldest unpinned entries beyond the limit go, and the list is saved. Image
+    /// files the stored list does not name were never saved, or belong to removed entries, and are
+    /// deleted. A list that cannot be read, or a directory that cannot be listed, leaves the store
+    /// untouched and the owed entries in memory until `resetUnreadableStore()`. With nil only the
+    /// owed entries remain, in memory, for the next opening.
     func open(_ store: ClipboardStore?) {
-        let held = heldCopies ?? []
-        heldCopies = nil
+        let owed = takeOwedEntries()
         replaceContents(with: store)
-        for copy in held {
-            record(copy.capture, at: copy.date, source: copy.source)
+        guard !owed.isEmpty else {
+            refreshUnsavedCount()
+            return
+        }
+        for entry in owed {
+            merge(entry.item, png: entry.png)
+        }
+        dropUnpinnedOverLimit()
+    }
+
+    /// Call when a store starts opening: the copies recorded until the next `open(_:)` are kept by
+    /// it whatever that store holds. An opening that never finishes keeps them for the next one.
+    func beginOpening() {
+        isOpening = true
+    }
+
+    /// The entries the next store must keep, oldest first, each image with its PNG: from memory, or
+    /// read from the current store before the next one deletes the files its list does not name. An
+    /// image that cannot be read is reported and left out.
+    private func takeOwedEntries() -> [(item: ClipItem, png: Data?)] {
+        flush()
+        let listedIDs = writer?.listedIDs ?? []
+        let copied = copiedWhileOpening
+        copiedWhileOpening = []
+        isOpening = false
+        return items.reversed().compactMap { item in
+            guard !listedIDs.contains(item.id) || copied.contains(item.id) else { return nil }
+            guard item.kind == .image else { return (item, nil) }
+            guard let png = imageData(for: item) else { return nil }
+            return (item, png)
         }
     }
 
-    /// Makes every later `record(from:)` keep the copy aside until the next `open(_:)`, so copies
-    /// made while the store is being opened are not lost. Copies held for an earlier opening that
-    /// never finished are dropped, as `open(_:)` drops entries that were not saved.
-    func holdCopiesUntilOpen() {
-        heldCopies = []
+    /// Puts an owed entry back before the first entry that is not newer. A stored entry with the
+    /// same content stays instead, with the later date, the owed entry's source when it has one and
+    /// a pin of either; otherwise the owed entry's image file is written first.
+    private func merge(_ owed: ClipItem, png: Data?) {
+        var entry = owed
+        if let index = items.firstIndex(where: { $0.content.isSameClip(as: owed.content) }) {
+            entry = items.remove(at: index)
+            entry.date = max(entry.date, owed.date)
+            if let source = owed.source { entry.source = source }
+            entry.isPinned = entry.isPinned || owed.isPinned
+        } else if let png, !writeImageFile(png, for: owed.id) {
+            originals[owed.id] = png
+        }
+        items.insert(entry, at: items.firstIndex { $0.date <= entry.date } ?? items.endIndex)
     }
 
     private func replaceContents(with store: ClipboardStore?) {
-        flush()
         self.store = nil
         writer = nil
         unreadableStore = nil
         originals = [:]
         items = []
-        defer { refreshUnsavedCount() }
         guard let store else { return }
         do {
             items = try store.loadList()
@@ -140,20 +179,20 @@ final class ClipboardHistory {
     }
 
     /// Records the pasteboard's current content, with the app it came from, unless it is excluded
-    /// or empty. While copies are held, it is kept for the next `open(_:)` instead.
+    /// or empty. While a store is being opened, the next `open(_:)` keeps it.
     func record(from pasteboard: NSPasteboard) {
         guard let capture = ClipCapture.read(from: pasteboard) else { return }
-        let source = sources.source(of: pasteboard)
-        if heldCopies != nil {
-            heldCopies?.append((capture, .now, source))
-        } else {
-            record(capture, source: source)
+        let id = record(capture, source: sources.source(of: pasteboard))
+        if isOpening {
+            copiedWhileOpening.insert(id)
         }
     }
 
-    /// A repeat keeps the app it was copied from before when `source` is nil, so copying an entry
-    /// back from this app does not lose it.
-    func record(_ capture: ClipCapture, at date: Date = .now, source: SourceApp? = nil) {
+    /// Returns the id of the entry that holds the copy, at the top. A repeat keeps the app it was
+    /// copied from before when `source` is nil, so copying an entry back from this app does not lose
+    /// it.
+    @discardableResult
+    func record(_ capture: ClipCapture, at date: Date = .now, source: SourceApp? = nil) -> ClipItem.ID {
         let content: ClipItem.Content
         var png: Data?
         switch capture {
@@ -172,7 +211,7 @@ final class ClipboardHistory {
             if let source { item.source = source }
             items.insert(item, at: 0)
             save()
-            return
+            return item.id
         }
 
         let item = ClipItem(id: UUID(), content: content, date: date, isPinned: false, source: source)
@@ -182,6 +221,7 @@ final class ClipboardHistory {
         }
         items.insert(item, at: 0)
         dropUnpinnedOverLimit()
+        return item.id
     }
 
     func setPinned(_ pinned: Bool, for id: ClipItem.ID) {
