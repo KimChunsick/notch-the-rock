@@ -133,9 +133,10 @@ extension TransportButton {
 }
 
 /// The expanded tab: the art, the title and artist, the progress with elapsed and total time, and
-/// previous, play/pause and next. 332 pt wide while a track plays, and offered more (under a wider
-/// band) the column stretches beside the art; without one the message is as wide as its text. The
-/// host adds the margin around it.
+/// previous, play/pause and next. 332 pt wide in every state, and offered more (under a wider band)
+/// the column stretches beside the art. With nothing playing, or when playback cannot be read, the
+/// message takes the title line over a dimmed track and dimmed controls, so the screen keeps the
+/// same skeleton and reaches the same edges. The host adds the margin around it.
 struct NowPlayingView: View {
     let model: NowPlayingModel
     let send: (NowPlayingCommand) -> Void
@@ -146,22 +147,41 @@ struct NowPlayingView: View {
     var body: some View {
         HStack(spacing: 14) {
             AlbumArt(image: model.artwork, side: Self.artSide, cornerRadius: 10)
-            switch model.state {
-            case .track(let info):
-                track(info)
-                    .frame(minWidth: Self.columnWidth, idealWidth: Self.columnWidth, maxWidth: .infinity, alignment: .leading)
-            case .nothing:
-                message("재생 중인 음악이 없어요.")
-            case .unavailable:
-                message("이 Mac에서 재생 정보를 읽을 수 없어요.")
+            Group {
+                switch model.state {
+                case .track(let info):
+                    track(info)
+                case .nothing:
+                    message("재생 중인 음악이 없어요.")
+                case .unavailable:
+                    message("이 Mac에서 재생 정보를 읽을 수 없어요.")
+                }
             }
+            .frame(minWidth: Self.columnWidth, idealWidth: Self.columnWidth, maxWidth: .infinity, alignment: .leading)
         }
     }
 
+    /// The track's column without a track: the message in the title line, then the progress track
+    /// and previous, play and next, dimmed and disabled.
     private func message(_ text: String) -> some View {
-        Text(text)
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 4) {
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Capsule()
+                .fill(.white.opacity(0.15))
+                .frame(height: 4)
+                .padding(.top, 4)
+            HStack(spacing: 24) {
+                TransportButton(symbol: "backward.fill", label: "이전 곡", size: 16) {}
+                TransportButton(symbol: "play.fill", label: "재생", size: 22) {}
+                TransportButton(symbol: "forward.fill", label: "다음 곡", size: 16) {}
+            }
+            .frame(maxWidth: .infinity)
+            .foregroundStyle(.tertiary)
+            .disabled(true)
+        }
+        .lineLimit(1)
     }
 
     private func track(_ info: TrackInfo) -> some View {

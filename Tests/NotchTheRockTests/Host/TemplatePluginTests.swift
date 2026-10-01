@@ -1,5 +1,7 @@
+import AppKit
 import Foundation
 import NotchKit
+import SwiftUI
 import Testing
 @testable import NotchTheRock
 
@@ -101,5 +103,65 @@ enum SampleFixture {
         #expect(catalog.records.map(\.state) == [.off])
         #expect(host.tabs.isEmpty)
         #expect(host.liveActivity == nil)
+    }
+
+    /// R15 for a generated plugin: its screen, loaded through the real loader, spreads its symbol and
+    /// text to the two edges of what it is offered, at its own width and 80 pt wider, so under a
+    /// band wider than the screen the host's margins stay equal.
+    @Test func R15__template_screen_spreads_across_a_wider_offer() async throws {
+        let built = try await Task.detached { try SampleFixture.bundle.get() }.value
+        let fixture = try PluginFixture()
+        defer { fixture.cleanUp() }
+        let host = NotchHostModel()
+        let catalog = fixture.catalog(host: host)
+        catalog.loadAll()
+        let installed = fixture.locations.user.appendingPathComponent("Sample.notchplugin")
+        try FileManager.default.copyItem(at: built, to: installed)
+        catalog.reload()
+        try catalog.consent(to: installed.path)
+        catalog.reload()
+        let content = try #require(host.tabs.first?.tab.content)
+        let ideal = NSHostingView(rootView: content).fittingSize
+        for width in [ideal.width, ideal.width + 80] {
+            let insets = try inkInsets(content.frame(width: width))
+            print("R15 template screen at \(width) pt (ideal \(ideal)): ink insets left \(insets.left) right \(insets.right) pt")
+            #expect(insets.left <= 2 && insets.right <= 2, "the template screen does not reach both edges of \(width) pt: \(insets)")
+        }
+        catalog.setEnabled(false, for: installed.path)
+    }
+
+    /// How far the outermost ink of `view` (any channel at least 14 over black, as the end-to-end
+    /// capture counts it) stays from its left and right edges, drawn offscreen at its fitting size.
+    private func inkInsets(_ view: some View) throws -> (left: CGFloat, right: CGFloat) {
+        let hosting = NSHostingView(rootView: view.environment(\.colorScheme, .dark))
+        let window = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.contentView = hosting
+        window.setContentSize(hosting.fittingSize)
+        hosting.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        let rep = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+        hosting.cacheDisplay(in: hosting.bounds, to: rep)
+        let image = try #require(rep.cgImage)
+        let width = image.width, height = image.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let context = try #require(CGContext(
+            data: &pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        var minX = width, maxX = -1
+        for y in 0..<height {
+            for x in 0..<width {
+                let i = (y * width + x) * 4
+                if max(pixels[i], pixels[i + 1], pixels[i + 2]) >= 14 {
+                    minX = min(minX, x)
+                    maxX = max(maxX, x)
+                }
+            }
+        }
+        try #require(maxX >= 0, "no ink in \(hosting.bounds.size)")
+        let scale = CGFloat(width) / hosting.bounds.width
+        return (CGFloat(minX) / scale, CGFloat(width - 1 - maxX) / scale)
     }
 }

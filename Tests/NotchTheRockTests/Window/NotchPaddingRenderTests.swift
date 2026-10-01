@@ -161,13 +161,14 @@ import Testing
         expectEqualPadding(gaps, name)
     }
 
-    /// A view that keeps its own width under a wider band (a third-party view, or a message alone)
-    /// stays centred under the camera: the back control keeps the padding on the left and nothing
-    /// comes closer on the right.
+    /// A third-party view that keeps its own width under a wider band stays centred under the
+    /// camera: the back control keeps the padding on the left, the view keeps it at the bottom, and
+    /// the view sits in the middle of the shape within 2 pt.
     func expectCentredScreen(_ gaps: Gaps, _ name: String) {
         #expect(abs(gaps.left - NotchSizing.padding) <= 2, "\(name) left gap \(gaps.left) pt: \(gaps)")
         #expect(abs(gaps.bottom - NotchSizing.padding) <= 2, "\(name) bottom gap \(gaps.bottom) pt: \(gaps)")
-        #expect(gaps.right >= NotchSizing.padding - 2, "\(name) right gap \(gaps.right) pt: \(gaps)")
+        let centred = (gaps.shape.width - gaps.content.width) / 2 - NotchLayout.openShoulder
+        #expect(abs(gaps.right - centred) <= 2, "\(name) not centred under the camera: right gap \(gaps.right) pt, centred \(centred) pt: \(gaps)")
     }
 
     // MARK: Screens
@@ -207,8 +208,13 @@ import Testing
     }
 
     @Test func R15__the_now_playing_screen_keeps_the_same_padding_on_every_side() async throws {
-        let gaps = try await measureScreen("nowplaying", "지금 재생 중", hasSettings: false, NowPlayingStandIn())
-        expectCentredScreen(gaps, "nowplaying")
+        let gaps = try await measureScreen("nowplaying-empty", "지금 재생 중", hasSettings: false, NowPlayingMessageStandIn(message: "재생 중인 음악이 없어요."))
+        expectScreenPadding(gaps, "nowplaying-empty")
+    }
+
+    @Test func R15__the_now_playing_screen_keeps_the_same_padding_on_every_side_when_playback_cannot_be_read() async throws {
+        let gaps = try await measureScreen("nowplaying-unavailable", "지금 재생 중", hasSettings: false, NowPlayingMessageStandIn(message: "이 Mac에서 재생 정보를 읽을 수 없어요."))
+        expectScreenPadding(gaps, "nowplaying-unavailable")
     }
 
     @Test func R15__the_now_playing_screen_keeps_the_same_padding_on_every_side_while_a_track_plays() async throws {
@@ -237,8 +243,6 @@ import Testing
         let gaps = try await measureScreen("fixed", "고정된 화면이에요", hasSettings: false, Color.white.frame(width: 160, height: 60))
         expectCentredScreen(gaps, "fixed")
         #expect(abs(gaps.content.width - 160) <= 0.5, "the fixed view took the offer: \(gaps)")
-        let centred = (gaps.shape.width - gaps.content.width) / 2 - NotchLayout.openShoulder
-        #expect(abs(gaps.right - centred) <= 2, "fixed view not centred under the camera: right gap \(gaps.right) pt, centred \(centred) pt: \(gaps)")
         #expect(gaps.right > NotchSizing.padding + 2, "the band is not wider than the fixed view: \(gaps)")
     }
 
@@ -329,9 +333,11 @@ private struct BrightnessStandIn: View {
     }
 }
 
-/// `NowPlayingView` with nothing playing, as on the end-to-end capture: the message keeps its own
-/// width.
-private struct NowPlayingStandIn: View {
+/// `NowPlayingView` with nothing playing, as on the end-to-end capture, or when playback cannot be
+/// read: the message in the title line over the dimmed track and controls, across what it is offered.
+private struct NowPlayingMessageStandIn: View {
+    let message: String
+
     var body: some View {
         HStack(spacing: 14) {
             ZStack {
@@ -342,11 +348,33 @@ private struct NowPlayingStandIn: View {
             }
             .frame(width: 88, height: 88)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            Text("재생 중인 음악이 없어요.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(message)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Capsule()
+                    .fill(.white.opacity(0.15))
+                    .frame(height: 4)
+                    .padding(.top, 4)
+                HStack(spacing: 24) {
+                    transportLabel("backward.fill", size: 16)
+                    transportLabel("play.fill", size: 22)
+                    transportLabel("forward.fill", size: 16)
+                }
+                .frame(maxWidth: .infinity)
+                .foregroundStyle(.tertiary)
+            }
+            .lineLimit(1)
+            .frame(minWidth: 230, idealWidth: 230, maxWidth: .infinity, alignment: .leading)
         }
     }
+}
+
+/// `TransportButton`'s label.
+private func transportLabel(_ symbol: String, size: CGFloat) -> some View {
+    Image(systemName: symbol)
+        .font(.system(size: size, weight: .semibold))
+        .frame(width: size + 12, height: size)
 }
 
 /// `NowPlayingView` while a track plays (grey art): the column stretches beside the art.
@@ -381,22 +409,15 @@ private struct NowPlayingTrackStandIn: View {
                 }
                 .padding(.top, 4)
                 HStack(spacing: 24) {
-                    transport("backward.fill", size: 16)
-                    transport("pause.fill", size: 22)
-                    transport("forward.fill", size: 16)
+                    transportLabel("backward.fill", size: 16)
+                    transportLabel("pause.fill", size: 22)
+                    transportLabel("forward.fill", size: 16)
                 }
                 .frame(minWidth: 230, idealWidth: 230, maxWidth: .infinity)
             }
             .lineLimit(1)
             .frame(minWidth: 230, idealWidth: 230, maxWidth: .infinity, alignment: .leading)
         }
-    }
-
-    /// `TransportButton`'s label.
-    private func transport(_ symbol: String, size: CGFloat) -> some View {
-        Image(systemName: symbol)
-            .font(.system(size: size, weight: .semibold))
-            .frame(width: size + 12, height: size)
     }
 }
 
