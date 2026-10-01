@@ -10,7 +10,7 @@ struct BandLayoutTests {
     /// by the camera clearance, at the home's width and at the narrowest width that still holds them.
     @Test(arguments: notches)
     func R02__band_controls_stay_clear_of_the_camera(notch: CGSize) {
-        let homeWidth = NotchLayout.metrics(for: .expanded, notch: notch, hasActivity: false, content: HomeGrid.size).size.width
+        let homeWidth = NotchLayout.metrics(for: .expanded, notch: notch, content: HomeGrid.size).size.width
         let narrowest = BandLayout.minimumWidth(notch: notch, leading: HomeChrome.editWidth, trailing: HomeChrome.gearWidth)
         #expect(narrowest <= homeWidth, "the home is wide enough for its controls")
         for width in [homeWidth, narrowest] {

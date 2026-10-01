@@ -51,20 +51,22 @@ struct PlaybackBars: View {
     var body: some View {
         // A paused timeline stops redrawing, so the still bars cost nothing.
         TimelineView(.animation(minimumInterval: 1.0 / 24, paused: !isPlaying)) { context in
-            HStack(spacing: Self.spacing) {
+            // The bars stand on the bottom edge, so the wing's inset below them is the host's.
+            HStack(alignment: .bottom, spacing: Self.spacing) {
                 ForEach(Array(Self.levels(at: context.date, isPlaying: isPlaying).enumerated()), id: \.offset) { _, level in
                     Capsule()
                         .frame(width: Self.barWidth, height: Self.maxHeight * level)
                 }
             }
-            .frame(height: Self.maxHeight)
+            .frame(height: Self.maxHeight, alignment: .bottom)
             .foregroundStyle(.white.opacity(isPlaying ? 0.95 : 0.45))
         }
     }
 }
 
-/// The views beside the collapsed notch. They read the model, so they follow every change of the
-/// posted activity's item.
+/// The views beside the collapsed notch, without space of their own: the host keeps the same space
+/// beside and below each. They read the model, so they follow every change of the posted activity's
+/// item.
 enum NowPlayingWings {
     static let artSide: CGFloat = 22
 
@@ -85,19 +87,21 @@ enum NowPlayingWings {
     }
 }
 
-/// A transport button: an SF Symbol without a bezel, as tall as the symbol so the screen's last row
-/// ends where its ink does.
+/// A transport button: an SF Symbol without a bezel, by default as tall as the symbol so the
+/// screen's last row ends where its ink does.
 struct TransportButton: View {
     let symbol: String
     let label: String
     var size: CGFloat = 16
+    /// The hit target's height when it should be taller than the symbol.
+    var height: CGFloat?
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: size, weight: .semibold))
-                .frame(width: size + 12, height: size)
+                .frame(width: size + 12, height: height ?? size)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -107,15 +111,24 @@ struct TransportButton: View {
 }
 
 extension TransportButton {
+    static func previous(size: CGFloat, height: CGFloat? = nil, send: @escaping (NowPlayingCommand) -> Void) -> TransportButton {
+        TransportButton(symbol: "backward.fill", label: "이전 곡", size: size, height: height) { send(.previous) }
+    }
+
     /// Pause while playing, play otherwise.
-    static func playPause(for info: TrackInfo, size: CGFloat, send: @escaping (NowPlayingCommand) -> Void) -> TransportButton {
+    static func playPause(for info: TrackInfo, size: CGFloat, height: CGFloat? = nil, send: @escaping (NowPlayingCommand) -> Void) -> TransportButton {
         TransportButton(
             symbol: info.isPlaying ? "pause.fill" : "play.fill",
             label: info.isPlaying ? "일시정지" : "재생",
-            size: size
+            size: size,
+            height: height
         ) {
             send(info.playPauseCommand)
         }
+    }
+
+    static func next(size: CGFloat, height: CGFloat? = nil, send: @escaping (NowPlayingCommand) -> Void) -> TransportButton {
+        TransportButton(symbol: "forward.fill", label: "다음 곡", size: size, height: height) { send(.next) }
     }
 }
 
@@ -160,9 +173,9 @@ struct NowPlayingView: View {
             ProgressRow(info: info, width: Self.columnWidth)
                 .padding(.top, 4)
             HStack(spacing: 24) {
-                TransportButton(symbol: "backward.fill", label: "이전 곡") { send(.previous) }
+                TransportButton.previous(size: 16, send: send)
                 TransportButton.playPause(for: info, size: 22, send: send)
-                TransportButton(symbol: "forward.fill", label: "다음 곡") { send(.next) }
+                TransportButton.next(size: 16, send: send)
             }
             .frame(width: Self.columnWidth)
         }

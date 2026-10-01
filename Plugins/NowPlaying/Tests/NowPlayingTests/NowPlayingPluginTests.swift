@@ -76,9 +76,9 @@ private func makePlugin(launcher: FakeLauncher, clock: VirtualClock = VirtualClo
     #expect(model.artwork == nil)
 }
 
-/// The wings appear while an item plays (priority 100) or is paused (priority 0) and go away when
-/// nothing plays or the plugin is deactivated. A line that changes neither keeps the posted
-/// activity, whose views follow the model; a line the plugin cannot read changes nothing.
+/// The wings appear while an item plays (priority 100) and go away when nothing plays or the
+/// plugin is deactivated. A line that changes neither keeps the posted activity, whose views follow
+/// the model; a line the plugin cannot read changes nothing. A pause keeps them for a grace (R23).
 @MainActor
 @Test func R08__wings_follow_playback() throws {
     let host = RecordingHost()
@@ -99,10 +99,10 @@ private func makePlugin(launcher: FakeLauncher, clock: VirtualClock = VirtualClo
     #expect(plugin.model.track?.title == "Flamenco Sketches")
 
     stream.emit(infoLine(title: "Flamenco Sketches", rate: 0, playing: false))
-    #expect(host.events.last == .post(id: activityID, priority: 0))
+    #expect(host.events.count == 1)
     stream.emit("{\"type\":\"info\"")
     #expect(plugin.model.track?.title == "Flamenco Sketches")
-    #expect(host.events.count == 2)
+    #expect(host.events.count == 1)
 
     stream.emit(#"{"type":"none"}"#)
     #expect(host.events.last == .clear(id: activityID))
@@ -118,6 +118,55 @@ private func makePlugin(launcher: FakeLauncher, clock: VirtualClock = VirtualClo
     stream.emit(infoLine())
     #expect(plugin.model.state == .nothing)
     #expect(host.events.last == .clear(id: activityID))
+}
+
+/// A pause takes the wings down after a grace of at most 2 s, so a track change that reports paused
+/// for a moment does not make them flicker; playing again brings them back with the line that says
+/// so. An item that is paused when it first appears posts nothing.
+@MainActor
+@Test func R23__a_pause_takes_the_wings_down_after_a_grace_and_play_brings_them_back() async throws {
+    let host = RecordingHost()
+    let launcher = FakeLauncher()
+    let clock = VirtualClock()
+    let plugin = try makePlugin(launcher: launcher, clock: clock, host: host)
+    plugin.activate()
+    let stream = try #require(launcher.streams.first)
+    #expect(NowPlayingPlugin.pauseGrace <= .seconds(2))
+
+    stream.emit(infoLine(rate: 0, playing: false))
+    #expect(host.events.isEmpty)
+    stream.emit(infoLine())
+    #expect(host.events == [.post(id: activityID, priority: 100)])
+
+    // Paused for a moment between two tracks: the grace is still running when play comes back.
+    clock.parksSleeps = true
+    stream.emit(infoLine(rate: 0, playing: false))
+    await waitUntil { clock.sleeps.count == 1 }
+    #expect(clock.sleeps == [NowPlayingPlugin.pauseGrace])
+    stream.emit(infoLine(title: "Flamenco Sketches"))
+    try await Task.sleep(for: .milliseconds(50))
+    #expect(host.events == [.post(id: activityID, priority: 100)])
+
+    // Paused for good: the grace runs out and the wings go.
+    clock.parksSleeps = false
+    stream.emit(infoLine(title: "Flamenco Sketches", rate: 0, playing: false))
+    await waitUntil { host.events.count == 2 }
+    #expect(host.events == [.post(id: activityID, priority: 100), .clear(id: activityID)])
+    #expect(clock.sleeps.last == NowPlayingPlugin.pauseGrace)
+    #expect(plugin.model.track?.title == "Flamenco Sketches")
+
+    // Playing again: back at once, with the line.
+    stream.emit(infoLine(title: "Flamenco Sketches"))
+    #expect(host.events.last == .post(id: activityID, priority: 100))
+    #expect(host.events.count == 3)
+
+    // Nothing playing still ends them at once, and no grace is left to end them again.
+    stream.emit(infoLine(title: "Flamenco Sketches", rate: 0, playing: false))
+    stream.emit(#"{"type":"none"}"#)
+    #expect(host.events.last == .clear(id: activityID))
+    try await Task.sleep(for: .milliseconds(50))
+    #expect(host.events.count == 4)
+    plugin.deactivate()
 }
 
 /// A helper that ends on its own is started again after 1 s, the delay doubling while runs stay
