@@ -59,9 +59,11 @@ enum NotchLayout {
     static let openShoulder: CGFloat = 14
     static let openBottom: CGFloat = 30
 
-    /// The space a live activity's view keeps in its wing, on the outer side and below it: what the
-    /// notch height leaves above and below the view, halved, so it sits as far from the shape's side
-    /// edge as from its bottom. Toward the camera it keeps at least as much.
+    /// What the notch height leaves above and below a live activity view's layout box, halved: the
+    /// box is centred there. Below a box drawn edge to edge this is the inset its wing keeps beside
+    /// and below it; `ActivityWings` adds the blank space a box keeps under its ink, so what it
+    /// draws sits as far from the shape's side edge as from its bottom. Toward the camera it keeps
+    /// at least as much.
     static func activityInset(contentHeight: CGFloat, notchHeight: CGFloat) -> CGFloat {
         max(0, (notchHeight - contentHeight) / 2)
     }

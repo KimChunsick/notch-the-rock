@@ -5,11 +5,11 @@ import SwiftUI
 import Testing
 @testable import NotchTheRock
 
-/// The collapsed notch with a live activity, drawn offscreen by the app's own root view: each view
-/// beside the camera keeps as much space to the shape's side edge as to its bottom. The root package
-/// cannot import the plugins, so each activity is a stand-in: opaque rectangles of the sizes the
-/// plugin's views lay out at (NowPlaying's 22 pt album art and 18 x 14 pt bars, Battery's symbol and
-/// percentage measured here), which the ink measurement sees edge to edge.
+/// The collapsed notch with a live activity, drawn offscreen by the app's own root view: what each
+/// view beside the camera draws keeps as much space to the shape's side edge as to its bottom. The
+/// root package cannot import the plugins, so NowPlaying's views are stand-ins of the same build (its
+/// 22 pt album art, also as the placeholder shown without artwork, and its 18 x 14 pt bars), and
+/// Battery's are the views it posts: a symbol and a percentage whose ink sits inside their layout boxes.
 @MainActor
 @Suite struct NotchActivityRenderTests {
     /// Blue like the menu bar around the shape. Its red channel is zero, so ink is told apart from it
@@ -36,7 +36,7 @@ import Testing
 
     /// Draws the root view collapsed with `leading` and `trailing` posted as a live activity, until
     /// two captures in a row are the same (the shape springs to the measured wings), and measures
-    /// the ink. Writes `R22-render-<name>-T83.png` (the top of the canvas) when NOTCH_RENDER_DIR is set.
+    /// the ink. Writes `R22-render-<name>-T86.png` (the top of the canvas) when NOTCH_RENDER_DIR is set.
     func measure(_ name: String, notchHeight: CGFloat, leading: some View, trailing: some View) async throws -> Insets {
         let notch = CGSize(width: Self.notchWidth, height: notchHeight)
         let host = NotchHostModel()
@@ -47,7 +47,7 @@ import Testing
         let top = try #require(image.cropping(to: CGRect(x: 0, y: 0, width: image.width, height: Int((notchHeight + 12) * scale))))
         if let directory = ProcessInfo.processInfo.environment["NOTCH_RENDER_DIR"] {
             let data = try #require(NSBitmapImageRep(cgImage: top).representation(using: .png, properties: [:]))
-            try data.write(to: URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent("R22-render-\(name)-T83.png"))
+            try data.write(to: URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent("R22-render-\(name)-T86.png"))
         }
         let insets = try #require(await Task.detached { Self.insets(top, scale: scale, notch: notch) }.value, "no ink in \(name)")
         print("R22 \(name) (notch \(notchHeight) pt): \(insets)")
@@ -146,6 +146,21 @@ import Testing
         expectEven(insets, "now playing at \(notchHeight) pt")
     }
 
+    /// NowPlaying without artwork: the art's faint square with a note in it, built like AlbumArt's
+    /// placeholder. The note's text baseline reaches the art's layout, yet the square is what shows.
+    @Test(arguments: [CGFloat(32), 37])
+    func R22__placeholder_art_keeps_side_and_bottom_insets_equal(notchHeight: CGFloat) async throws {
+        let art = ZStack {
+            Color.white.opacity(0.12)
+            Image(systemName: "music.note").font(.system(size: 22 * 0.45, weight: .medium)).foregroundStyle(.secondary)
+        }
+        .frame(width: 22, height: 22)
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        let insets = try await measure("nowplaying-placeholder-\(Int(notchHeight))", notchHeight: notchHeight,
+                                       leading: art, trailing: Color.white.frame(width: 18, height: 14))
+        expectEven(insets, "placeholder art at \(notchHeight) pt")
+    }
+
     /// Battery's wings: the charging symbol and the percentage, as rectangles of the size they lay
     /// out at in the wing's font.
     @Test(arguments: [CGFloat(32), 37])
@@ -159,12 +174,14 @@ import Testing
         expectEven(insets, "battery at \(notchHeight) pt")
     }
 
-    /// Battery's real views, to look at: the symbol's and the text's ink sit inside their layout
-    /// boxes, so only the render is kept and the insets printed.
-    @Test func R22__battery_wings_render_as_drawn() async throws {
-        let insets = try await measure("battery-real-32", notchHeight: 32,
+    /// Battery's real wings as it posts them: the charging symbol and the percentage. Both carry
+    /// blank space inside their layout boxes (side bearings, the room below the baseline), which the
+    /// visible insets must not count.
+    @Test(arguments: [CGFloat(32), 37])
+    func R22__battery_wings_render_as_drawn(notchHeight: CGFloat) async throws {
+        let insets = try await measure("battery-real-\(Int(notchHeight))", notchHeight: notchHeight,
                                        leading: Image(systemName: "battery.100percent.bolt").symbolRenderingMode(.hierarchical).foregroundStyle(.green),
                                        trailing: Text("100%").monospacedDigit())
-        #expect(insets.leftSide > 0 && insets.rightSide > 0, "\(insets)")
+        expectEven(insets, "battery as drawn at \(notchHeight) pt")
     }
 }
