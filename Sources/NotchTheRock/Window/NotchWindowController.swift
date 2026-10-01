@@ -17,6 +17,8 @@ final class NotchPanel: NSPanel {
         isReleasedWhenClosed = false
         acceptsMouseMovedEvents = true
         ignoresMouseEvents = true
+        // The app stays inactive behind the notch; its controls' tooltips (`.help`) show anyway.
+        allowsToolTipsWhenApplicationIsInactive = true
     }
 
     /// Key so an attention text field can take typing; the app itself stays inactive.

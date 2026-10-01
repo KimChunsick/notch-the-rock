@@ -110,12 +110,13 @@ extension PluginFixture {
         #expect(host.plugins.map { $0.tile?.supportedSizes } == [[.small, .wide], nil, [.wide], nil])
         let refused = catalog.records.filter { [mismatch, crashed].contains($0.identifier ?? "") }
         #expect(refused.count == 2 && refused.allSatisfy { if case .failed = $0.state { true } else { false } })
-        // Tile and tab: a tile that opens the screen; tab only: a list row; tile only: a tile that
-        // opens nothing; neither: not in the home.
+        // Tile and tab: a tile that opens the screen; tab only: a strip icon that opens it; tile
+        // only: a tile that opens nothing; neither: a strip icon that opens nothing (R35, R36).
         #expect(host.homeEntries == [
             entry(both, "타일과 화면", "a.circle", .tile(.small), opens: true),
             entry(tileOnly, "타일만", "c.circle", .tile(.wide), opens: false),
             entry(tabOnly, "화면만", "b.circle", .row, opens: true),
+            entry(neither, "둘 다 없음", "d.circle", .row, opens: false),
         ])
     }
 

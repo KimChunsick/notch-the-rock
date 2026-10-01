@@ -156,9 +156,11 @@ struct HomeLayoutTests {
         let stored = HomeLayout(tiles: [TilePlacement(pluginID: "a", size: .large, origin: origin(0, 0))], known: ["a"])
         let shown = stored.reconciled(with: [homePlugin("a", sizes: [.small, .wide])])
         #expect(shown.tile(for: "a") == nil)
-        // A plugin that lost its tile cannot keep a grid place either.
+        // A plugin that lost its tile keeps a small place as the host's default tile, not a larger one.
         let tabOnly = HomeLayout(tiles: [TilePlacement(pluginID: "t", size: .small, origin: origin(0, 0))], known: ["t"])
-        #expect(tabOnly.reconciled(with: [homePlugin("t", sizes: [])]).tiles.isEmpty)
+        #expect(tabOnly.reconciled(with: [homePlugin("t", sizes: [])]).tiles.map(\.pluginID) == ["t"])
+        let wide = HomeLayout(tiles: [TilePlacement(pluginID: "t", size: .wide, origin: origin(0, 0))], known: ["t"])
+        #expect(wide.reconciled(with: [homePlugin("t", sizes: [])]).tiles.isEmpty)
     }
 }
 
@@ -166,7 +168,7 @@ struct HomeLayoutTests {
 struct HomeModelTests {
     let fixture = HomeDefaults()
 
-    @Test func R16__four_home_rules_classify_tiles_rows_and_absent_plugins() {
+    @Test func R16__four_home_rules_classify_tiles_and_strip_icons() {
         defer { fixture.cleanUp() }
         let home = HomeModel(store: fixture.store)
         home.plugins = [
@@ -179,11 +181,12 @@ struct HomeModelTests {
             HomeEntry(pluginID: "both", name: "둘 다", symbol: "circle", kind: .tile(.wide), opensDetail: true),
             HomeEntry(pluginID: "tileOnly", name: "타일만", symbol: "circle", kind: .tile(.small), opensDetail: false),
             HomeEntry(pluginID: "tabOnly", name: "탭만", symbol: "circle", kind: .row, opensDetail: true),
+            HomeEntry(pluginID: "neither", name: "없음", symbol: "circle", kind: .row, opensDetail: false),
         ])
-        // A tile-only plugin taken off the grid is a display-only row, so it can be added back.
+        // A tile-only plugin taken off the grid is a display-only strip icon, so it can be added back.
         home.remove("tileOnly")
-        #expect(home.list.map(\.pluginID) == ["tabOnly", "tileOnly"])
-        #expect(home.entries.last == HomeEntry(pluginID: "tileOnly", name: "타일만", symbol: "circle", kind: .row, opensDetail: false))
+        #expect(home.list.map(\.pluginID) == ["tabOnly", "tileOnly", "neither"])
+        #expect(home.entries[2] == HomeEntry(pluginID: "tileOnly", name: "타일만", symbol: "circle", kind: .row, opensDetail: false))
     }
 
     @Test func R16__layout_survives_a_relaunch() {
@@ -266,9 +269,11 @@ struct HomeModelTests {
         #expect(home.tiles.first?.placement.size == .small)
         #expect(home.canResize("a", to: .wide))
         #expect(!home.canResize("a", to: .large))
-        // A plugin without a tile cannot be added to the grid.
-        #expect(!home.canAdd("t"))
-        #expect(!home.add("t"))
+        // A plugin without a tile goes on the grid as the host's small default tile (R35).
+        #expect(!home.canResize("t", to: .wide))
+        #expect(home.canAdd("t"))
+        #expect(home.add("t"))
+        #expect(home.layout.tile(for: "t")?.size == .small)
     }
 
     @Test func R16__a_full_grid_refuses_adding() {

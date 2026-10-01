@@ -41,7 +41,7 @@ struct KeyboardTests {
     let optionSpace = KeyShortcut(keyCode: UInt16(kVK_Space), modifiers: [.control, .option])
     let commandK = KeyShortcut(keyCode: UInt16(kVK_ANSI_K), modifiers: [.command, .shift])
 
-    /// A large tile (A), two small ones (B, C) and a wide one (D) under them, then two list rows
+    /// A large tile (A), two small ones (B, C) and a wide one (D) under them, then two strip icons
     /// (E, F) and a display-only tile (G) that no longer fits the grid.
     ///
     ///     ┌─────────┬────┬────┐
@@ -49,8 +49,7 @@ struct KeyboardTests {
     ///     │    A    ├────┴────┤
     ///     │         │    D    │
     ///     └─────────┴─────────┘
-    ///     E 메모
-    ///     F Weather
+    ///     (E) (F)
     func sampleHost() -> NotchHostModel {
         let host = NotchHostModel(now: { .now }, homeStore: fixture.store)
         host.plugins = [
@@ -205,12 +204,14 @@ struct KeyboardTests {
         #expect(press(.down) == "D")
         #expect(press(.left) == "A")
         #expect(press(.up) == "A")
-        // Down from the grid's last row enters the list; up from its first row goes back.
+        // Down from the grid's last row enters the strip, left and right move along it, and up
+        // goes back to the grid.
         #expect(press(.down) == "E")
+        #expect(press(.right) == "F")
+        #expect(press(.right) == "F")
         #expect(press(.down) == "F")
-        #expect(press(.down) == "F")
-        #expect(press(.left) == "F")
-        #expect(press(.up) == "E")
+        #expect(press(.left) == "E")
+        #expect(press(.left) == "E")
         #expect(press(.up) == "A")
         #expect(press(.right) == "B")
         #expect(press(.down) == "D")
@@ -483,7 +484,7 @@ struct KeyboardTests {
 
     // MARK: Long list
 
-    /// A large tile and eight list rows, two more than the list shows without scrolling.
+    /// A large tile and eight strip icons.
     func longListHost() -> NotchHostModel {
         let host = NotchHostModel(now: { .now }, homeStore: fixture.store)
         host.plugins = [homePlugin("A", sizes: [.large], name: "배터리")]
@@ -491,7 +492,7 @@ struct KeyboardTests {
         return host
     }
 
-    @Test func R17__focus_on_a_list_row_past_the_sixth_scrolls_it_into_view() {
+    @Test func R17__focus_on_a_strip_icon_scrolls_it_into_view() {
         defer { fixture.cleanUp() }
         let host = longListHost()
         host.toggleFromKeyboard()
@@ -500,10 +501,10 @@ struct KeyboardTests {
 
         _ = host.handleKey(.down)
         #expect(host.listScrollTarget == "L1")
-        for _ in 0..<6 { _ = host.handleKey(.down) }
+        for _ in 0..<6 { _ = host.handleKey(.right) }
         #expect(host.keyboard.focus == "L7")
         #expect(host.listScrollTarget == "L7")
-        _ = host.handleKey(.down)
+        _ = host.handleKey(.right)
         #expect(host.listScrollTarget == "L8")
     }
 
@@ -606,7 +607,8 @@ struct KeyboardTests {
 
         let long = longListHost()
         long.toggleFromKeyboard()
-        for _ in 0..<8 { _ = long.handleKey(.down) }
+        _ = long.handleKey(.down)
+        for _ in 0..<7 { _ = long.handleKey(.right) }
         try render(HomeView(host: long).padding(NotchSizing.padding).background(Color.black), to: folder.appendingPathComponent("R17-render-list-scroll-T72.png"))
 
         let registrar = FakeRegistrar()

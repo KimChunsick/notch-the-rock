@@ -6,7 +6,7 @@ import Observation
 @MainActor
 @Observable
 final class HomeKeyboard {
-    /// The plugin whose tile or row has the focus ring; nil until the hotkey or an arrow key.
+    /// The plugin whose tile or strip icon has the focus ring; nil until the hotkey or an arrow key.
     var focus: String?
     /// The quick search text while the search is open (possibly empty); nil when it is closed.
     var query: String? {
@@ -99,8 +99,8 @@ extension NotchHostModel {
         return true
     }
 
-    /// The list row to scroll into view: the focused plugin when it is a list row. The list shows
-    /// six rows at a time, so a focus further down would otherwise be out of sight.
+    /// The strip icon to scroll into view: the focused plugin when it is in the strip, which shows as
+    /// many icons as the grid is wide, so a focus further right would otherwise be out of sight.
     var listScrollTarget: String? {
         guard let focus = keyboard.focus, home.list.contains(where: { $0.pluginID == focus }) else { return nil }
         return focus
