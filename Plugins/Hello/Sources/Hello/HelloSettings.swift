@@ -30,7 +30,7 @@ struct HelloSettingsView: View {
     var body: some View {
         Form {
             Toggle("앱을 켤 때 인사 애니메이션 보여주기", isOn: $showsGreeting)
-            Text("앱을 켜거나 로그인할 때 자동으로 실행되면 노치가 펼쳐지고 시간과 요일에 맞는 인사말을 한 획씩 그려요. 끄면 노치가 접힌 채로 시작해요.")
+            Text("앱을 켜거나 로그인할 때 자동으로 실행되면 노치가 펼쳐지고 필기체로 인사를 쓴 다음, 시간과 요일에 맞는 문구를 그 아래에 보여줘요. 끄면 노치가 접힌 채로 시작해요.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
