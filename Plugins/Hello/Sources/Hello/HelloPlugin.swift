@@ -3,8 +3,8 @@ import SwiftUI
 
 /// Greets the user each time the app starts and each time the screen is unlocked: the notch opens,
 /// writes a greeting that suits the time and day by hand, "hello" in one cursive stroke or a Korean
-/// phrase stroke by stroke, holds it long enough to read and collapses. An unlock while a greeting
-/// shows starts a fresh one. The greeting can be turned off in Settings.
+/// phrase stroke by stroke, holds it long enough to read and collapses. Every unlock notification
+/// starts a fresh greeting, even while one shows. The greeting can be turned off in Settings.
 @MainActor
 public final class HelloPlugin: NotchPlugin {
     public static let manifest = PluginManifest(
@@ -20,17 +20,8 @@ public final class HelloPlugin: NotchPlugin {
     /// time; tests force a phrase.
     private let pickGreeting: () -> HelloGreeting
     private let unlocks: any ScreenUnlockSource
-    private let now: @MainActor () -> ContinuousClock.Instant
-    /// When the last unlock that counted was signalled. Only unlocks set it, so the launch greeting
-    /// never holds back an unlock.
-    private var lastUnlock: ContinuousClock.Instant?
     /// Numbers each greeting, so a greeting that replaces one still on screen starts writing anew.
     private var greetingCount = 0
-
-    /// Unlock signals less than this long after the last unlock that counted are the same unlock:
-    /// the lock screen has to appear and the user has to authenticate before the next unlock, which
-    /// takes longer than a second.
-    static let unlockMergeWindow: Duration = .seconds(1)
 
     public convenience init(context: NotchContext) {
         self.init(context: context) {
@@ -42,12 +33,10 @@ public final class HelloPlugin: NotchPlugin {
     init(
         context: NotchContext,
         unlocks: any ScreenUnlockSource = DistributedScreenUnlocks(),
-        now: @escaping @MainActor () -> ContinuousClock.Instant = { .now },
         pickGreeting: @escaping () -> HelloGreeting
     ) {
         self.context = context
         self.unlocks = unlocks
-        self.now = now
         self.pickGreeting = pickGreeting
     }
 
@@ -56,9 +45,10 @@ public final class HelloPlugin: NotchPlugin {
     }
 
     /// The host calls this at every app launch, including launch at login, and when the plugin is
-    /// enabled again. It greets and then greets again at every unlock until `deactivate()`.
+    /// enabled again. It greets and then greets again at every unlock notification until
+    /// `deactivate()`, however close together they arrive.
     public func activate() {
-        unlocks.start { [weak self] in self?.screenDidUnlock() }
+        unlocks.start { [weak self] in self?.greet() }
         greet()
     }
 
@@ -66,17 +56,9 @@ public final class HelloPlugin: NotchPlugin {
         unlocks.stop()
     }
 
-    /// Every unlock greets, even while a greeting still shows; only a repeated signal of the same
-    /// unlock is merged.
-    private func screenDidUnlock() {
-        let signalled = now()
-        if let lastUnlock, signalled - lastUnlock < Self.unlockMergeWindow { return }
-        lastUnlock = signalled
-        greet()
-    }
-
     /// Reads the toggle each time, so turning it back on applies from the next unlock. The host shows
-    /// one takeover at a time, so a greeting replaces one still on screen and takes its full time.
+    /// one takeover at a time, so a greeting replaces one still on screen and takes its full time;
+    /// a repeated system signal for one unlock only restarts the greeting, never stacks a second.
     /// The new identity makes the view start writing from the first stroke instead of keeping the
     /// replaced greeting's start.
     private func greet() {

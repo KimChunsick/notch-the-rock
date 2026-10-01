@@ -14,22 +14,13 @@ final class FakeUnlocks: ScreenUnlockSource {
     func fire() { onUnlock?() }
 }
 
-/// A clock the test moves by hand.
-@MainActor
-final class ManualClock {
-    private(set) var now = ContinuousClock.now
-    func advance(by duration: Duration) { now = now.advanced(by: duration) }
-}
-
 @MainActor
 @Suite struct UnlockGreetingTests {
     let unlocks = FakeUnlocks()
-    let clock = ManualClock()
 
-    /// A plugin wired to the fake source and clock; `picked` counts the greetings it picks.
+    /// A plugin wired to the fake source; `picked` counts the greetings it picks.
     func plugin(_ context: NotchContext, picked: @escaping () -> Void = {}) -> HelloPlugin {
-        let clock = clock
-        return HelloPlugin(context: context, unlocks: unlocks, now: { clock.now }) {
+        HelloPlugin(context: context, unlocks: unlocks) {
             picked()
             return HelloGreeting(phrase: HelloPhrases.hello)
         }
@@ -43,7 +34,6 @@ final class ManualClock {
             #expect(host.takeovers.count == 1)
 
             for unlock in 1...3 {
-                clock.advance(by: .seconds(60))
                 unlocks.fire()
                 #expect(host.takeovers.count == 1 + unlock)
                 #expect(picks == 1 + unlock)
@@ -59,7 +49,6 @@ final class ManualClock {
             var picks = 0
             let plugin = plugin(context) { picks += 1 }
             plugin.activate()
-            clock.advance(by: .seconds(1))
             unlocks.fire()
             #expect(host.takeovers.count == 2)
             #expect(picks == 2)
@@ -68,36 +57,31 @@ final class ManualClock {
     }
 
     /// A second unlock while the first unlock's greeting still shows greets again.
-    @Test func R30__distinct_unlocks_seconds_apart_greet_each_time() throws {
+    @Test func R30__an_unlock_while_a_greeting_shows_greets_again() throws {
         try withContext { context, host in
             let plugin = plugin(context)
             plugin.activate()
-            clock.advance(by: .seconds(60))
             unlocks.fire()
             #expect(host.takeovers.count == 2)
-            clock.advance(by: .seconds(3))
             unlocks.fire()
             #expect(host.takeovers.count == 3)
         }
     }
 
-    /// Signals less than a second after the unlock that counted are the same unlock; the first
-    /// signal a second or more after it greets.
-    @Test func R30__a_duplicate_unlock_signal_greets_once() throws {
+    /// Signals at t, t+0.3 s and t+0.9 s are three notifications, so they greet three times. The
+    /// plugin reads no clock, so firing them back to back covers every spacing, these included.
+    @Test func R30__every_unlock_signal_greets_however_close() throws {
         try withContext { context, host in
-            let plugin = plugin(context)
+            var picks = 0
+            let plugin = plugin(context) { picks += 1 }
             plugin.activate()
-            clock.advance(by: .seconds(60))
-            unlocks.fire()
-            clock.advance(by: .milliseconds(300))
-            unlocks.fire()
-            clock.advance(by: .milliseconds(600))
             unlocks.fire()
             #expect(host.takeovers.count == 2)
-
-            clock.advance(by: .milliseconds(100))
             unlocks.fire()
             #expect(host.takeovers.count == 3)
+            unlocks.fire()
+            #expect(host.takeovers.count == 4)
+            #expect(picks == 4)
         }
     }
 
@@ -108,14 +92,12 @@ final class ManualClock {
             let plugin = plugin(context)
             plugin.activate()
             for _ in 1...2 {
-                clock.advance(by: .seconds(60))
                 unlocks.fire()
             }
             #expect(host.takeovers.isEmpty)
 
             // Turned back on in Settings, the next unlock greets without restarting the app.
             preferences.showsGreeting = true
-            clock.advance(by: .seconds(60))
             unlocks.fire()
             #expect(host.takeovers.count == 1)
         }
@@ -128,14 +110,12 @@ final class ManualClock {
             #expect(unlocks.isObserving)
             plugin.deactivate()
             #expect(!unlocks.isObserving)
-            clock.advance(by: .seconds(60))
             unlocks.fire()
             #expect(host.takeovers.count == 1)
 
             // Enabled again, the plugin greets and follows unlocks once more.
             plugin.activate()
             #expect(host.takeovers.count == 2)
-            clock.advance(by: .seconds(60))
             unlocks.fire()
             #expect(host.takeovers.count == 3)
         }
