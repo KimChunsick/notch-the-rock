@@ -198,12 +198,12 @@ import Testing
 
     @Test func R15__the_volume_screen_keeps_the_same_padding_on_every_side() async throws {
         let gaps = try await measureScreen("volume", "볼륨", hasSettings: true, VolumeStandIn())
-        expectCentredScreen(gaps, "volume")
+        expectScreenPadding(gaps, "volume")
     }
 
     @Test func R15__the_brightness_screen_keeps_the_same_padding_on_every_side() async throws {
         let gaps = try await measureScreen("brightness", "밝기", hasSettings: true, BrightnessStandIn())
-        expectCentredScreen(gaps, "brightness")
+        expectScreenPadding(gaps, "brightness")
     }
 
     @Test func R15__the_now_playing_screen_keeps_the_same_padding_on_every_side() async throws {
@@ -218,12 +218,12 @@ import Testing
 
     @Test func R15__the_clipboard_screen_keeps_the_same_padding_on_every_side() async throws {
         let gaps = try await measureScreen("clipboard", "클립보드", hasSettings: true, ClipboardStandIn())
-        expectCentredScreen(gaps, "clipboard")
+        expectScreenPadding(gaps, "clipboard")
     }
 
     @Test func R15__the_clipboard_screen_keeps_the_same_padding_on_every_side_with_a_short_history() async throws {
         let gaps = try await measureScreen("clipboard-rows", "클립보드", hasSettings: true, ClipboardRowsStandIn())
-        expectCentredScreen(gaps, "clipboard-rows")
+        expectScreenPadding(gaps, "clipboard-rows")
     }
 
     @Test func R15__the_system_stats_screen_keeps_the_same_padding_on_every_side() async throws {
@@ -297,7 +297,7 @@ struct BatteryStandIn: View {
     }
 }
 
-/// `VolumeView` with a volume.
+/// `VolumeView` with a volume: the slider stretches across what it is offered.
 private struct VolumeStandIn: View {
     var body: some View {
         HStack(spacing: 10) {
@@ -306,7 +306,7 @@ private struct VolumeStandIn: View {
                 .frame(width: 28)
             Slider(value: .constant(0.06), in: 0...1) { Text("볼륨") }
                 .labelsHidden()
-                .frame(width: 200)
+                .frame(minWidth: 200, idealWidth: 200, maxWidth: .infinity)
             Text("6%")
                 .monospacedDigit()
                 .frame(width: 40, alignment: .trailing)
@@ -314,14 +314,14 @@ private struct VolumeStandIn: View {
     }
 }
 
-/// `BrightnessView` with a brightness.
+/// `BrightnessView` with a brightness: the slider stretches across what it is offered.
 private struct BrightnessStandIn: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "sun.max.fill")
             Slider(value: .constant(0.5), in: 0...1) { Text("밝기") }
                 .labelsHidden()
-                .frame(width: 200)
+                .frame(minWidth: 200, idealWidth: 200, maxWidth: .infinity)
             Text("50%")
                 .monospacedDigit()
                 .frame(width: 40, alignment: .trailing)
@@ -408,9 +408,9 @@ private struct ClipboardStandIn: View {
             Text("복사한 텍스트, 이미지, 링크가 여기에 쌓여요.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
-                .frame(width: 360)
+                .frame(minWidth: 360, idealWidth: 360, maxWidth: .infinity)
         }
-        .frame(width: 360)
+        .frame(minWidth: 360, idealWidth: 360, maxWidth: .infinity)
     }
 }
 
@@ -428,7 +428,7 @@ private struct ClipboardRowsStandIn: View {
             .scrollIndicators(.never)
             .frame(maxHeight: 180)
         }
-        .frame(width: 360)
+        .frame(minWidth: 360, idealWidth: 360, maxWidth: .infinity)
     }
 
     /// `ClipRow`.

@@ -15,8 +15,9 @@ struct BrightnessView: View {
             if let brightness = model.brightness {
                 HStack(spacing: 10) {
                     Image(systemName: "sun.max.fill")
+                    // 200 pt, or as wide as the screen is offered beyond that (under a wider band).
                     BrightnessSlider(model: model, brightness: brightness)
-                        .frame(width: 200)
+                        .frame(minWidth: 200, idealWidth: 200, maxWidth: .infinity)
                     Text(percentText(brightness))
                         .monospacedDigit()
                         .frame(width: 40, alignment: .trailing)

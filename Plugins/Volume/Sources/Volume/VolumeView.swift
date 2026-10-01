@@ -27,8 +27,9 @@ struct VolumeView: View {
                 HStack(spacing: 10) {
                     MuteToggle(model: model, volume: volume)
                         .frame(width: 28)
+                    // 200 pt, or as wide as the screen is offered beyond that (under a wider band).
                     VolumeSlider(model: model, volume: volume)
-                        .frame(width: 200)
+                        .frame(minWidth: 200, idealWidth: 200, maxWidth: .infinity)
                     Text(percentText(volume.level))
                         .monospacedDigit()
                         .frame(width: 40, alignment: .trailing)

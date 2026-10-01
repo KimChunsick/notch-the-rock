@@ -23,7 +23,8 @@ struct UnsavedNoticeTimeline<Content: View>: View {
 /// card shows the start of a text in a fixed-width font, an image's thumbnail or a link in blue,
 /// with "<app or kind> · <time ago>" under it. Clicking a card copies it back to `pasteboard`; the
 /// keys follow `action(for:fieldHasText:isComposing:area:selection:count:)`. The tab is `width`
-/// wide and has a definite height however long the history is. The host adds the margin around it.
+/// wide, or as wide as it is offered beyond that (under a wider band, so more cards show), and has a
+/// definite height however long the history is. The host adds the margin around it.
 struct ClipboardView: View {
     static let width: CGFloat = 360
     static let spacing: CGFloat = 6
@@ -118,7 +119,7 @@ struct ClipboardView: View {
                 }
             }
         }
-        .frame(width: Self.width)
+        .frame(minWidth: Self.width, idealWidth: Self.width, maxWidth: .infinity, alignment: .leading)
         .onKeyPress(phases: [.down, .repeat]) { press in handle(press) }
     }
 
@@ -213,7 +214,7 @@ struct ClipboardView: View {
         Text(text)
             .font(.system(size: 12))
             .foregroundStyle(.secondary)
-            .frame(width: Self.width)
+            .frame(minWidth: Self.width, idealWidth: Self.width, maxWidth: .infinity)
     }
 }
 
