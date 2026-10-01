@@ -37,22 +37,14 @@ struct NotchRootView: View {
             minWidth: showsHomeBand ? BandLayout.minimumWidth(notch: notchSize, leading: HomeChrome.editWidth, trailing: HomeChrome.gearWidth) : 0
         )
         let glow = state == .attention ? host.attention?.request.accent : nil
-        ZStack(alignment: .top) {
-            metrics.shape
-                .fill(Color.black)
-                .background(AttentionGlow(color: glow, shape: metrics.shape))
-            ZStack(alignment: .topLeading) {
-                content(for: state)
-                    .offset(x: metrics.content.minX, y: metrics.content.minY)
-                if showsHomeBand {
-                    HomeBand(home: host.home, notchSize: notchSize, width: metrics.size.width, openSettings: openSettings)
-                        .transition(Self.contentTransition)
-                }
+        NotchSurface(metrics: metrics, glow: glow) {
+            content(for: state)
+        } band: {
+            if showsHomeBand {
+                HomeBand(home: host.home, notchSize: notchSize, width: metrics.size.width, openSettings: openSettings)
+                    .transition(Self.contentTransition)
             }
-            .frame(width: metrics.size.width, height: metrics.size.height, alignment: .topLeading)
-            .clipShape(metrics.shape)
         }
-        .frame(width: metrics.size.width, height: metrics.size.height)
         .contentShape(metrics.shape)
         .contextMenu {
             Button("설정…") { openSettings() }
@@ -122,6 +114,32 @@ struct NotchRootView: View {
         insertion: .opacity.combined(with: .scale(scale: 0.94, anchor: .top)).animation(.easeOut(duration: 0.22).delay(0.1)),
         removal: .opacity.animation(.easeIn(duration: 0.1))
     )
+}
+
+/// The black shape at `metrics`, the measured content at its place in it and the band's controls
+/// over the notch, all clipped to the shape. The host's padding comes from `metrics.content`; the
+/// content adds none of its own.
+struct NotchSurface<Content: View, Band: View>: View {
+    let metrics: NotchLayout.Metrics
+    var glow: Color?
+    @ViewBuilder let content: Content
+    @ViewBuilder let band: Band
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            metrics.shape
+                .fill(Color.black)
+                .background(AttentionGlow(color: glow, shape: metrics.shape))
+            ZStack(alignment: .topLeading) {
+                content
+                    .offset(x: metrics.content.minX, y: metrics.content.minY)
+                band
+            }
+            .frame(width: metrics.size.width, height: metrics.size.height, alignment: .topLeading)
+            .clipShape(metrics.shape)
+        }
+        .frame(width: metrics.size.width, height: metrics.size.height)
+    }
 }
 
 /// Reports the shape's metrics as drawn: animated with the shape, so every frame of a spring is

@@ -200,7 +200,7 @@ public final class ClockPlugin: NotchPlugin {
     public func deactivate() { /* 올린 표시를 지우고 작업을 멈춰요 */ }
 
     public var expandedTab: PluginTab? {           // 선택: 펼친 노치의 플러그인 화면
-        PluginTab(title: "Clock", symbol: "clock") { Text("12:00").padding() }
+        PluginTab(title: "Clock", symbol: "clock") { Text("12:00") }
     }
     public var tile: PluginTile? {                  // 선택: 홈의 타일 (SDK 1.1)
         PluginTile(supportedSizes: [.small]) { _ in Text("12:00").padding(8) }
@@ -316,6 +316,10 @@ public var tile: PluginTile? {
 `tile`의 뷰는 내용으로 정해지는 크기를 스스로 가져야 해요.
 
 - 글자, 이미지, `padding()`, `frame(width:height:)`처럼 크기가 정해지는 뷰로 만들어요.
+- 화면 바깥 여백은 앱이 넣어요. 앱은 노치 모양의 왼쪽, 오른쪽, 아래 가장자리와 화면 내용 사이에 어느
+  화면에서나 같은 여백(16pt)을 둬요. 그래서 `expandedTab` 뷰의 가장 바깥에는 `padding()`을 붙이지 않고,
+  그려지는 내용보다 큰 고정 크기(`frame(width:height:)`)도 주지 않아요. 이런 뷰가 있으면 그 화면만
+  여백이 넓어 보여요.
 - `.frame(maxWidth: .infinity)`나 `.frame(maxHeight: .infinity)`로 남는 공간을 채우지 않아요. 이런 뷰는
   앱이 내준 공간만큼 늘어나서, 노치 크기가 내용과 맞지 않게 돼요.
 - `Color`나 `Rectangle`만 있는 뷰는 자기 크기가 없으니 `frame(width:height:)`로 크기를 정해 줘요.

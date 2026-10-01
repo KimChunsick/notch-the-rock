@@ -8,6 +8,7 @@ final class BatteryModel {
     var status: PowerStatus?
 }
 
+/// The expanded tab at the size of what it draws; the host adds the margin around it.
 struct BatteryView: View {
     let model: BatteryModel
 
@@ -31,11 +32,9 @@ struct BatteryView: View {
                     }
                 }
             }
-            .padding()
         } else {
             Text("이 Mac에서 배터리를 찾지 못했어요.")
                 .foregroundStyle(.secondary)
-                .padding()
         }
     }
 }
