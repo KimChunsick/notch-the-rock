@@ -127,6 +127,13 @@ extension TrackInfo {
     /// The playback rates the reader takes.
     static let rateRange: ClosedRange<Double> = -4...4
 
+    /// Whether the item plays as the notch shows it: the playing flag, unless the rate says it does not
+    /// move (a stale client, or a moment of buffering) — then it counts as paused. Without a rate the
+    /// flag stands. The model applies this, and the stream's fresh-client check compares it.
+    var isEffectivelyPlaying: Bool {
+        isPlaying && rate != 0
+    }
+
     /// Seconds into the item at `date`: the sampled time, moved on at the playback rate while
     /// playing, kept within the item (within `secondsRange` when the app gives no length). Nil when
     /// the app reports no elapsed time.

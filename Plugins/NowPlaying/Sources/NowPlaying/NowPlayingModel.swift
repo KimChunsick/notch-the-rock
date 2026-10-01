@@ -33,7 +33,10 @@ final class NowPlayingModel {
         case .nothing:
             state = .nothing
             artwork = nil
-        case .info(let info, let update):
+        case .info(var info, let update):
+            // Playing at rate 0 counts as paused; the plugin's pause grace keeps the wings while that lasts
+            // no longer than the grace.
+            info.isPlaying = info.isEffectivelyPlaying
             state = .track(info)
             switch update {
             case .unchanged:
