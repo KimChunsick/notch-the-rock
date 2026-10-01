@@ -231,11 +231,15 @@ extension HUD {
     }
 
     /// A volume or mute key the device did not take, with the state the device holds when known.
+    /// The notch draws no text, so a speaker with an exclamation badge (macOS 12+) tells it apart
+    /// from every speaker a change that went through shows.
     static func unchangeable(_ title: String, _ state: VolumeState?) -> HUD {
-        guard let state else {
-            return HUD(symbol: "speaker.slash.fill", title: title, detail: "바꿀 수 없어요")
-        }
-        return HUD(symbol: state.symbol, title: title, value: state.isMuted ? 0 : state.level, detail: "바꿀 수 없어요")
+        HUD(
+            symbol: "speaker.badge.exclamationmark.fill",
+            title: title,
+            value: state.map { $0.isMuted ? 0 : $0.level },
+            detail: "바꿀 수 없어요"
+        )
     }
 }
 
