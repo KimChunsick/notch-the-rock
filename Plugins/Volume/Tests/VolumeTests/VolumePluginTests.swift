@@ -238,7 +238,7 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
         "speaker.wave.2.fill 볼륨 0.5 50%",
         "speaker.wave.1.fill 볼륨 0.25 25%",
         "speaker.wave.3.fill 볼륨 0.9375 94%",
-        "speaker.slash.fill 볼륨 0.0 0%",
+        "speaker.slash.fill 음소거 0.0 -",
     ])
 }
 @MainActor
@@ -714,7 +714,7 @@ private func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom
 @Test func R25__a_refused_change_shows_the_exclamation_speaker() throws {
     let refused = "speaker.badge.exclamationmark.fill"
     #expect(NSImage(systemSymbolName: refused, accessibilityDescription: nil) != nil)
-    let succeeded = ["speaker.slash.fill", "speaker.wave.1.fill", "speaker.wave.2.fill", "speaker.wave.3.fill"]
+    let succeeded = ["speaker.slash.fill", "speaker.fill", "speaker.wave.1.fill", "speaker.wave.2.fill", "speaker.wave.3.fill"]
     #expect(!succeeded.contains(refused))
 
     let h = try Harness(volume: VolumeState(level: 0.5, isMuted: true, canMute: true))
@@ -780,4 +780,65 @@ private func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom
     let insets = try inkInsets(view.frame(width: offered))
     print("R15 volume without a volume offered \(offered) pt: ink insets left \(insets.left) right \(insets.right)")
     #expect(insets.left <= 2 && insets.right <= 2, "the screen does not reach both edges of a \(offered) pt offer: \(insets)")
+}
+
+/// A zero level alone still plays on the built-in speakers, so reaching 0 mutes as the system's keys
+/// do, and the slashed speaker means the device is muted.
+@MainActor
+@Test func R37__stepping_down_to_zero_mutes_the_device() throws {
+    let h = try Harness(volume: VolumeState(level: 1.0 / 16, isMuted: false, canMute: true))
+    h.plugin.activate()
+
+    #expect(h.send(1, down) == true)
+    #expect(h.volume.writes == ["mute true", "level 0.0"])
+    #expect(h.volume.state == VolumeState(level: 0, isMuted: true, canMute: true))
+    #expect(h.plugin.model.volume == h.volume.state)
+    #expect(h.host.huds == ["speaker.slash.fill 음소거 0.0 -"])
+}
+@MainActor
+@Test func R37__the_slider_at_zero_mutes_and_raising_it_unmutes() throws {
+    let h = try Harness()
+    let model = h.plugin.model
+
+    model.setVolumeLevel(0)
+    #expect(h.volume.state == VolumeState(level: 0, isMuted: true, canMute: true))
+    #expect(model.volume?.symbol == "speaker.slash.fill")
+    model.setVolumeLevel(0.5)
+    #expect(h.volume.state == VolumeState(level: 0.5, isMuted: false, canMute: true))
+    #expect(h.volume.writes == ["mute true", "level 0.0", "mute false", "level 0.5"])
+}
+@MainActor
+@Test func R37__a_step_up_from_zero_unmutes_at_one_step() throws {
+    let h = try Harness(volume: VolumeState(level: 0, isMuted: true, canMute: true))
+    h.plugin.activate()
+
+    #expect(h.send(0, down) == true)
+    #expect(h.volume.writes == ["mute false", "level 0.0625"])
+    #expect(h.volume.state == VolumeState(level: 0.0625, isMuted: false, canMute: true))
+    #expect(h.host.huds == ["speaker.wave.1.fill 볼륨 0.0625 6%"])
+}
+@MainActor
+@Test func R37__a_device_without_a_mute_switch_stays_unmuted_at_zero() throws {
+    #expect(NSImage(systemSymbolName: "speaker.fill", accessibilityDescription: nil) != nil)
+    let h = try Harness(volume: VolumeState(level: 1.0 / 16, isMuted: false, canMute: false))
+    h.plugin.activate()
+
+    #expect(h.send(1, down) == true)
+    #expect(h.volume.writes == ["level 0.0"])
+    #expect(h.volume.state == VolumeState(level: 0, isMuted: false, canMute: false))
+    // The speaker without waves: silent only as far as the device goes, not muted.
+    #expect(h.plugin.model.volume?.symbol == "speaker.fill")
+    #expect(h.host.huds == ["speaker.fill 볼륨 0.0 0%"])
+}
+@MainActor
+@Test func R37__a_refused_mute_at_zero_shows_the_refusal_and_the_system_keeps_the_key() throws {
+    let h = try Harness(volume: VolumeState(level: 1.0 / 16, isMuted: false, canMute: true))
+    h.plugin.activate()
+    h.volume.refusesMute = true
+
+    #expect(h.send(1, down) == false)
+    #expect(h.send(1, up) == false)
+    #expect(h.volume.writes == ["mute true"])
+    #expect(h.volume.state == VolumeState(level: 0.0625, isMuted: false, canMute: true))
+    #expect(h.host.huds == ["speaker.badge.exclamationmark.fill 볼륨 0.0625 바꿀 수 없어요"])
 }
