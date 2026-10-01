@@ -184,4 +184,152 @@ struct NotchHostModelTests {
         pinnedCollapsed.expand(toTabOf: "com.example.a")
         #expect(pinnedCollapsed.state == .collapsed)
     }
+
+    // MARK: R40 — notices wait their turn and show for their full time
+
+    /// An alert like the Agents plugin's: title, message and a button, gone after its display time.
+    func notice(_ title: String, for timeout: Duration = .seconds(30)) -> AttentionRequest {
+        AttentionRequest(title: title, message: "", buttons: [AttentionButton(id: "jump", title: "터미널로 이동", role: .primary)], timeout: timeout)
+    }
+
+    /// A request that waits for an answer, like an approval handed over from the terminal.
+    func approval(_ title: String, for timeout: Duration = .seconds(60)) -> AttentionRequest {
+        AttentionRequest(title: title, message: "", buttons: [AttentionButton(id: "allow", title: "허용", role: .primary)], releaseTitle: "터미널에서 답하기", timeout: timeout)
+    }
+
+    /// Lets queued `requestAttention` tasks reach the host.
+    func drain() async {
+        await settle { false }
+    }
+
+    @Test func R40__alert_behind_a_longer_request_shows_for_its_full_time() async throws {
+        let request = Task { await host.requestAttention(approval("허용할까요?"), from: "com.example.agent") }
+        await settle { host.attention != nil }
+        let alert = Task { await host.requestAttention(notice("작업을 마쳤어요"), from: "com.example.agent") }
+        await drain()
+
+        clock.advance(by: .seconds(45))
+        host.expireDue()
+        #expect(host.attention?.request.title == "허용할까요?")
+
+        host.respond(.released, to: try #require(host.attention).id)
+        #expect(await request.value == .released)
+        #expect(host.attention?.request.title == "작업을 마쳤어요")
+
+        clock.advance(by: .seconds(29))
+        host.expireDue()
+        #expect(host.attention?.request.title == "작업을 마쳤어요")
+        clock.advance(by: .seconds(1))
+        host.expireDue()
+        #expect(await alert.value == .timedOut)
+        #expect(host.state == .collapsed)
+    }
+
+    @Test func R40__three_alerts_in_a_row_each_show() async {
+        let alerts = ["입력을 기다려요", "작업을 마쳤어요", "세션이 끝났어요"].map { title in
+            Task { await host.requestAttention(notice(title), from: "com.example.agent") }
+        }
+        await drain()
+        for title in ["입력을 기다려요", "작업을 마쳤어요", "세션이 끝났어요"] {
+            #expect(host.attention?.request.title == title)
+            clock.advance(by: .seconds(29))
+            host.expireDue()
+            #expect(host.attention?.request.title == title)
+            clock.advance(by: .seconds(1))
+            host.expireDue()
+        }
+        for alert in alerts { #expect(await alert.value == .timedOut) }
+        #expect(host.state == .collapsed)
+    }
+
+    @Test func R40__alert_held_by_a_takeover_shows_after_it() async {
+        host.present(Takeover(duration: .seconds(40)) { Text("안녕하세요") }, from: "com.example.hello")
+        let alert = Task { await host.requestAttention(notice("작업을 마쳤어요"), from: "com.example.agent") }
+        await drain()
+        #expect(host.state == .takeover)
+
+        clock.advance(by: .seconds(40))
+        host.expireDue()
+        #expect(host.state == .attention)
+        #expect(host.attention?.request.title == "작업을 마쳤어요")
+
+        // A takeover that covers the alert midway gives it its full time again afterwards.
+        clock.advance(by: .seconds(20))
+        host.expireDue()
+        host.present(Takeover(duration: .seconds(15)) { Text("안녕하세요") }, from: "com.example.hello")
+        clock.advance(by: .seconds(15))
+        host.expireDue()
+        #expect(host.attention?.request.title == "작업을 마쳤어요")
+        clock.advance(by: .seconds(29))
+        host.expireDue()
+        #expect(host.state == .attention)
+        clock.advance(by: .seconds(1))
+        host.expireDue()
+        #expect(await alert.value == .timedOut)
+        #expect(host.state == .collapsed)
+    }
+
+    @Test func R40__newer_alert_of_the_same_session_replaces_the_queued_one() async throws {
+        let request = Task { await host.requestAttention(approval("허용할까요?"), from: "com.example.agent") }
+        await settle { host.attention != nil }
+        let older = Task { await host.requestAttention(notice("입력을 기다려요"), from: "com.example.agent") }
+        await drain()
+        // The Agents plugin cancels a session's older alert before it posts the newer one.
+        older.cancel()
+        #expect(await older.value == .cancelled)
+        let newer = Task { await host.requestAttention(notice("작업을 마쳤어요"), from: "com.example.agent") }
+        await drain()
+
+        clock.advance(by: .seconds(45))
+        host.expireDue()
+        host.respond(.released, to: try #require(host.attention).id)
+        #expect(await request.value == .released)
+        #expect(host.attention?.request.title == "작업을 마쳤어요")
+        clock.advance(by: .seconds(30))
+        host.expireDue()
+        #expect(await newer.value == .timedOut)
+        #expect(host.state == .collapsed)
+    }
+
+    @Test func R40__alerts_of_many_sessions_behind_a_request_all_show() async throws {
+        /// The alerts answered so far, in the order their answers arrived.
+        @MainActor final class Answers {
+            var titles: [String] = []
+        }
+        let answers = Answers()
+        let request = Task { await host.requestAttention(approval("허용할까요?"), from: "com.example.agent") }
+        await settle { host.attention != nil }
+        // One alert from each of twelve sessions, queued in this order.
+        let titles = (1...12).map { "세션 \($0) 작업을 마쳤어요" }
+        var alerts: [Task<AttentionResponse, Never>] = []
+        for title in titles {
+            alerts.append(Task {
+                let response = await host.requestAttention(notice(title), from: "com.example.agent")
+                answers.titles.append(title)
+                return response
+            })
+            await drain()
+        }
+
+        clock.advance(by: .seconds(45))
+        host.expireDue()
+        await drain()
+        #expect(answers.titles.isEmpty)
+        host.respond(.released, to: try #require(host.attention).id)
+        #expect(await request.value == .released)
+
+        for (index, title) in titles.enumerated() {
+            #expect(host.attention?.request.title == title)
+            clock.advance(by: .seconds(29))
+            host.expireDue()
+            await drain()
+            #expect(host.attention?.request.title == title)
+            #expect(answers.titles == Array(titles.prefix(index)))
+            clock.advance(by: .seconds(1))
+            host.expireDue()
+            #expect(await alerts[index].value == .timedOut)
+        }
+        #expect(answers.titles == titles)
+        #expect(host.state == .collapsed)
+    }
 }

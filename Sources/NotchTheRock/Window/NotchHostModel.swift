@@ -26,6 +26,12 @@ enum NotchState: Equatable {
 /// priority tie the most recently posted one wins. Time-bound items are removed by `expireDue()`,
 /// which the model schedules itself for the next deadline.
 ///
+/// Attention requests queue in order and only the first is shown. A notice's display time starts
+/// when it is shown, so one queued behind a longer request or held by a takeover still shows for its
+/// full time; a request that waits for an answer keeps the timeout it was asked with. No notice is
+/// dropped before it is shown. The queue stays short because a plugin cancels a source's older
+/// notice when that source sends a newer one, and a cancelled request leaves the queue by its id.
+///
 /// The expanded notch shows the home (`screen`): plugin tiles and a strip of icons, see `HomeModel`. API for
 /// the keyboard and URL plans (P17, P18): `showHome()`, `open(pluginID:)`, `back()`, `escape()` and
 /// the read-only `homeEntries`.
@@ -60,8 +66,17 @@ final class NotchHostModel: NotchHost {
         let id: Int
         let pluginID: String
         let request: AttentionRequest
-        let deadline: ContinuousClock.Instant?
+        /// When it times out. A request that waits for an answer counts from when it was asked; a
+        /// notice counts from when it is shown, and has none while it waits or a takeover covers it.
+        fileprivate(set) var deadline: ContinuousClock.Instant?
         fileprivate let continuation: CheckedContinuation<AttentionResponse, Never>
+
+        /// A notice only tells the user something (title, message, buttons). A request that hands a
+        /// question over from elsewhere (`releaseTitle`), offers choices or takes text waits for an
+        /// answer. NotchKit has no field for this, so the host reads it from the request.
+        var isNotice: Bool {
+            request.releaseTitle == nil && request.choices.isEmpty && request.textField == nil
+        }
     }
 
     struct ShownTakeover {
@@ -245,6 +260,7 @@ final class NotchHostModel: NotchHost {
         guard let index = attentions.firstIndex(where: { $0.id == id }) else { return }
         let pending = attentions.remove(at: index)
         pending.continuation.resume(returning: response)
+        startShownNotice()
         scheduleExpiry()
     }
 
@@ -259,7 +275,19 @@ final class NotchHostModel: NotchHost {
         for pending in attentions where pending.deadline.map({ $0 <= current }) ?? false {
             respond(.timedOut, to: pending.id)
         }
+        startShownNotice()
         scheduleExpiry()
+    }
+
+    /// Starts the display time of the notice the notch now shows. A takeover hides it, so a notice
+    /// covered by a takeover gets its full time again once the takeover ends.
+    private func startShownNotice() {
+        guard let first = attentions.first, first.isNotice else { return }
+        if takeover != nil {
+            if first.deadline != nil { attentions[0].deadline = nil }
+        } else if first.deadline == nil, let timeout = first.request.timeout {
+            attentions[0].deadline = now() + timeout
+        }
     }
 
     private func setExpanded(_ expanded: Bool) {
@@ -298,6 +326,7 @@ final class NotchHostModel: NotchHost {
         for pending in attentions where pending.pluginID == pluginID {
             respond(.cancelled, to: pending.id)
         }
+        startShownNotice()
         scheduleExpiry()
     }
 
@@ -328,6 +357,7 @@ final class NotchHostModel: NotchHost {
     func present(_ takeover: Takeover, from pluginID: String) {
         self.takeover = ShownTakeover(pluginID: pluginID, takeover: takeover, deadline: now() + takeover.duration)
         setExpanded(false)
+        startShownNotice()
         scheduleExpiry()
     }
 
@@ -337,13 +367,11 @@ final class NotchHostModel: NotchHost {
         let id = attentionCount
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
-                attentions.append(PendingAttention(
-                    id: id,
-                    pluginID: pluginID,
-                    request: request,
-                    deadline: request.timeout.map { now() + $0 },
-                    continuation: continuation
-                ))
+                var pending = PendingAttention(id: id, pluginID: pluginID, request: request, deadline: nil, continuation: continuation)
+                // A notice's time starts when it is shown (`startShownNotice()`).
+                if !pending.isNotice { pending.deadline = request.timeout.map { now() + $0 } }
+                attentions.append(pending)
+                startShownNotice()
                 scheduleExpiry()
             }
         } onCancel: {
