@@ -279,8 +279,9 @@ struct R11LiveReadings {
     /// its hottest sensor, so 120 °C leaves room for a fanless M2 under a long build (averages of
     /// 103 °C were seen here) while still rejecting the 0 °C and garbage readings of idle sensors.
     @Test func R11__temperature_sensor_reads_a_plausible_value() async throws {
-        SMCSensorSampler.discoverNow()
-        let reading = try #require(SMCSensorSampler().sensors())
+        // Finds the keys at once instead of in the background.
+        let discovery = TemperatureKeyDiscovery(start: { $0() }, listKeys: TemperatureKeyDiscovery.listSMCKeys)
+        let reading = try #require(SMCSensorSampler(smc: SMCConnection(), discovery: discovery).sensors())
         let cpu = try #require(reading.cpuTemperature)
         print("R11 SMC: CPU \(StatFormat.temperature(cpu)), GPU \(reading.gpuTemperature.map(StatFormat.temperature) ?? "-")")
         #expect((10...120).contains(cpu))

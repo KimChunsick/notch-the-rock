@@ -49,10 +49,15 @@ struct StatsHistory: Equatable {
     }
 }
 
-/// Six cards in a 3 x 2 grid sized for the expanded notch (about 520 x 150 pt of content).
+/// The six cards in a 2 x 3 grid. The tab shows them with a detail line under each sparkline; the
+/// large home tile shows them compact, with the title, the value and the sparkline only. Every
+/// card has a fixed width and the same lines, so the grid has a definite size: 382 x 210 pt in the
+/// tab, 174 x 174 pt compact.
 struct SystemStatsView: View {
     let model: SystemStatsModel
+    var compact = false
 
+    private static let spacing: CGFloat = 6
     private static let placeholder = "—"
     private static let inColor = Color.cyan
     private static let outColor = Color.orange
@@ -60,21 +65,24 @@ struct SystemStatsView: View {
     var body: some View {
         let snapshot = model.snapshot
         let history = model.history
-        VStack(spacing: 6) {
-            HStack(spacing: 6) {
+        VStack(spacing: Self.spacing) {
+            HStack(spacing: Self.spacing) {
                 cpuCard(snapshot?.cpu, history)
                 StatCard(
                     title: "GPU",
                     value: snapshot?.gpu.map(StatFormat.percent) ?? Self.placeholder,
                     lines: [Sparkline.Line(history.gpu, color: .purple)],
-                    ceiling: 100
+                    ceiling: 100,
+                    compact: compact
                 ) {
                     Text("사용률")
                 }
-                memoryCard(snapshot?.memory, history)
             }
-            HStack(spacing: 6) {
+            HStack(spacing: Self.spacing) {
+                memoryCard(snapshot?.memory, history)
                 diskCard(snapshot?.disk, snapshot?.diskIO, history)
+            }
+            HStack(spacing: Self.spacing) {
                 networkCard(snapshot?.network, history)
                 sensorCard(snapshot?.sensors, history)
             }
@@ -86,9 +94,10 @@ struct SystemStatsView: View {
             title: "CPU",
             value: cpu.map { StatFormat.percent($0.total) } ?? Self.placeholder,
             lines: [Sparkline.Line(history.cpu, color: .green)],
-            ceiling: 100
+            ceiling: 100,
+            compact: compact
         ) {
-            CoreBars(cores: cpu?.cores ?? [])
+            CoreBars(cores: cpu?.cores ?? [], width: CardSize.detailWidth)
         }
     }
 
@@ -97,7 +106,8 @@ struct SystemStatsView: View {
             title: "메모리",
             value: memory.map { StatFormat.memory($0.used) } ?? Self.placeholder,
             lines: [Sparkline.Line(history.memory, color: Self.pressureColor(memory?.pressure))],
-            ceiling: 100
+            ceiling: 100,
+            compact: compact
         ) {
             if let memory {
                 Text("\(StatFormat.memory(memory.total)) 중 · 압력 \(memory.pressure?.title ?? Self.placeholder)")
@@ -107,26 +117,33 @@ struct SystemStatsView: View {
         }
     }
 
+    /// The tab puts the capacity beside the free space so the rates fit on the detail line; the
+    /// compact card has room for the free space only.
     private func diskCard(_ space: DiskSpace?, _ io: Throughput?, _ history: StatsHistory) -> some View {
-        StatCard(
+        let value = space.map { space in
+            let free = "\(StatFormat.diskSize(space.free)) 남음"
+            return compact ? free : "\(StatFormat.diskSize(space.total)) 중 \(free)"
+        }
+        return StatCard(
             title: "디스크",
-            value: space.map { "\(StatFormat.diskSize($0.free)) 남음" } ?? Self.placeholder,
+            value: value ?? Self.placeholder,
             lines: [Sparkline.Line(history.diskRead, color: Self.inColor), Sparkline.Line(history.diskWrite, color: Self.outColor)],
-            ceiling: nil
+            ceiling: nil,
+            compact: compact
         ) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text("전체 \(space.map { StatFormat.diskSize($0.total) } ?? Self.placeholder)")
-                RatePair(inLabel: "읽기", outLabel: "쓰기", rates: io, inColor: Self.inColor, outColor: Self.outColor)
-            }
+            RatePair(inLabel: "읽기", outLabel: "쓰기", rates: io, inColor: Self.inColor, outColor: Self.outColor)
         }
     }
 
+    /// The tab shows both rates on the detail line; the compact card shows the download rate as
+    /// its value.
     private func networkCard(_ network: Throughput?, _ history: StatsHistory) -> some View {
         StatCard(
             title: "네트워크",
-            value: "",
+            value: compact ? network.map { "↓ \(StatFormat.rate($0.inbound))" } ?? Self.placeholder : "",
             lines: [Sparkline.Line(history.networkDown, color: Self.inColor), Sparkline.Line(history.networkUp, color: Self.outColor)],
-            ceiling: nil
+            ceiling: nil,
+            compact: compact
         ) {
             RatePair(inLabel: "다운", outLabel: "업", rates: network, inColor: Self.inColor, outColor: Self.outColor)
         }
@@ -137,7 +154,8 @@ struct SystemStatsView: View {
             title: "센서",
             value: sensors?.cpuTemperature.map { "CPU \(StatFormat.temperature($0))" } ?? Self.placeholder,
             lines: [Sparkline.Line(history.temperature, color: .red)],
-            ceiling: 110
+            ceiling: 110,
+            compact: compact
         ) {
             if let sensors {
                 Text("GPU \(sensors.gpuTemperature.map(StatFormat.temperature) ?? Self.placeholder) · 팬 \(sensors.fanText)")
@@ -147,7 +165,7 @@ struct SystemStatsView: View {
         }
     }
 
-    private static func pressureColor(_ pressure: MemoryPressure?) -> Color {
+    static func pressureColor(_ pressure: MemoryPressure?) -> Color {
         switch pressure {
         case .warning: .yellow
         case .critical: .red
@@ -156,36 +174,68 @@ struct SystemStatsView: View {
     }
 }
 
-/// A titled card: the main value, a sparkline that takes the spare height, and small detail text.
+/// The fixed widths of a stat card.
+private enum CardSize {
+    static let width: CGFloat = 188
+    static let padding: CGFloat = 6
+    /// The width inside a full card's padding.
+    static let detailWidth = width - 2 * padding
+    static let compactWidth: CGFloat = 84
+    static let compactPadding: CGFloat = 4
+}
+
+/// A titled card of a fixed width: the main value, a sparkline and one line of small detail text.
+/// A compact card stacks the title over the value and leaves the detail out.
 private struct StatCard<Detail: View>: View {
     let title: String
     let value: String
     let lines: [Sparkline.Line]
     /// Top of the chart scale; nil scales a rate chart to its largest value.
     let ceiling: Double?
+    let compact: Bool
     @ViewBuilder let detail: Detail
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(title)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                Text(value)
-                    .font(.system(size: 12, weight: .semibold))
-                    .monospacedDigit()
+        Group {
+            if compact {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text(value)
+                        .font(.system(size: 12, weight: .semibold))
+                        .monospacedDigit()
+                        .minimumScaleFactor(0.7)
+                    Sparkline(lines: lines, ceiling: ceiling)
+                        .frame(height: 14)
+                }
+                .padding(CardSize.compactPadding)
+                .frame(width: CardSize.compactWidth, alignment: .topLeading)
+            } else {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text(title)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                        Text(value)
+                            .font(.system(size: 12, weight: .semibold))
+                            .monospacedDigit()
+                    }
+                    Sparkline(lines: lines, ceiling: ceiling)
+                        .frame(height: 20)
+                    detail
+                        .font(.system(size: 10))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        // Core bars and text lines take the same height, so every card does too.
+                        .frame(height: 13, alignment: .leading)
+                }
+                .padding(CardSize.padding)
+                .frame(width: CardSize.width, alignment: .topLeading)
             }
-            Sparkline(lines: lines, ceiling: ceiling)
-                .frame(minHeight: 8, maxHeight: .infinity)
-            detail
-                .font(.system(size: 10))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
         }
         .lineLimit(1)
-        .padding(6)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
     }
 }
@@ -208,12 +258,15 @@ private struct RatePair: View {
     }
 }
 
-/// One small bar per core, filled to its usage.
+/// One small bar per core, filled to its usage, the bars sharing `width` between them.
 private struct CoreBars: View {
     let cores: [Double]
+    let width: CGFloat
+    private static let spacing: CGFloat = 2
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 2) {
+        let barWidth = cores.isEmpty ? 0 : max(1, (width - Self.spacing * CGFloat(cores.count - 1)) / CGFloat(cores.count))
+        HStack(alignment: .bottom, spacing: Self.spacing) {
             ForEach(Array(cores.enumerated()), id: \.offset) { _, usage in
                 ZStack(alignment: .bottom) {
                     RoundedRectangle(cornerRadius: 1).fill(.white.opacity(0.12))
@@ -221,15 +274,16 @@ private struct CoreBars: View {
                         .fill(Color.green)
                         .frame(height: max(1, 12 * min(max(usage, 0), 100) / 100))
                 }
-                .frame(maxWidth: .infinity)
+                .frame(width: barWidth)
             }
         }
         .frame(height: 12)
     }
 }
 
-/// Polylines over the card width, oldest point on the left.
-private struct Sparkline: View {
+/// Polylines over the width it is given, oldest point on the left. Give it a frame: a shape has no
+/// size of its own.
+struct Sparkline: View {
     struct Line {
         let values: [Double]
         let color: Color

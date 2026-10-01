@@ -1,3 +1,4 @@
+import os
 import Testing
 @testable import SystemStats
 
@@ -74,4 +75,72 @@ private final class FakeSMC: SMCReading {
     smc.add("F0Ac", value: 1_200)
     smc.add("F1Ac")
     #expect(SMCSensorSampler(smc: smc).sensors()?.fanText == "1200 rpm · —")
+}
+
+/// Scripted answers of a temperature key listing: each call takes the next answer, nil for a listing
+/// that failed. Counts the calls.
+private final class KeyListings: Sendable {
+    private let state: OSAllocatedUnfairLock<(answers: [[SMCKey]?], calls: Int)>
+
+    init(_ answers: [[SMCKey]?]) {
+        state = OSAllocatedUnfairLock(initialState: (answers, 0))
+    }
+
+    var calls: Int { state.withLock { $0.calls } }
+
+    func next() -> [SMCKey]? {
+        state.withLock { state in
+            state.calls += 1
+            return state.answers.isEmpty ? nil : state.answers.removeFirst()
+        }
+    }
+}
+
+private func floatKey(_ name: String) -> SMCKey {
+    SMCKey(code: SMCConnection.code(name), size: 4, type: SMCConnection.code("flt "))
+}
+
+/// The P11 finding: a failed temperature key listing (no connection, an unreadable `#KEY`) is not
+/// kept as "no sensors" for the process. It is tried again 30 s later until it succeeds; keys once
+/// found are kept for every later sampler, and a listing that found no key is an answer and final.
+@MainActor
+@Test func R16__a_failed_temperature_key_discovery_is_tried_again_later() {
+    var time = 100.0
+    let smc = FakeSMC()
+    smc.add("Tp01", value: 52)
+    smc.add("Tg05", value: 41)
+    let listings = KeyListings([nil, nil, [floatKey("Tp01"), floatKey("Tg05")]])
+    let discovery = TemperatureKeyDiscovery(start: { $0() }, listKeys: { listings.next() })
+    let sampler = SMCSensorSampler(smc: smc, discovery: discovery, now: { time })
+
+    #expect(sampler.sensors()?.cpuTemperature == nil)
+    #expect(listings.calls == 1)
+
+    // Not tried again before 30 s have passed.
+    time += 29
+    #expect(sampler.sensors()?.cpuTemperature == nil)
+    #expect(listings.calls == 1)
+
+    // Tried again, failing once more, then again 30 s later, finding the keys.
+    time += 1
+    #expect(sampler.sensors()?.cpuTemperature == nil)
+    #expect(listings.calls == 2)
+    time += 30
+    let reading = sampler.sensors()
+    #expect(reading?.cpuTemperature == 52 && reading?.gpuTemperature == 41)
+    #expect(listings.calls == 3)
+
+    // Found keys are kept, also for the sampler of a later activation.
+    time += 600
+    #expect(sampler.sensors()?.cpuTemperature == 52)
+    #expect(SMCSensorSampler(smc: smc, discovery: discovery, now: { time }).sensors()?.cpuTemperature == 52)
+    #expect(listings.calls == 3)
+
+    // An SMC that listed its keys and has no temperature key is not asked again.
+    let none = KeyListings([[]])
+    let noSensors = SMCSensorSampler(smc: smc, discovery: TemperatureKeyDiscovery(start: { $0() }, listKeys: { none.next() }), now: { time })
+    #expect(noSensors.sensors()?.cpuTemperature == nil)
+    time += 600
+    #expect(noSensors.sensors()?.cpuTemperature == nil)
+    #expect(none.calls == 1)
 }

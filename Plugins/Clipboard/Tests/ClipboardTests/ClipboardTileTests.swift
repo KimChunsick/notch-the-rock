@@ -1,0 +1,119 @@
+import AppKit
+import NotchKit
+import SwiftUI
+import Testing
+@testable import Clipboard
+
+@MainActor
+private final class SilentHost: NotchHost {
+    func post(_ activity: LiveActivity, from pluginID: String) {}
+    func clearActivity(id: String, from pluginID: String) {}
+    func showHUD(_ hud: HUD, duration: Duration, from pluginID: String) {}
+    func present(_ takeover: Takeover, from pluginID: String) {}
+    func requestAttention(_ request: AttentionRequest, from pluginID: String) async -> AttentionResponse { .dismissed }
+    func expand(toTabOf pluginID: String) {}
+    func collapse(from pluginID: String) {}
+    var isAccessibilityTrusted: Bool { false }
+    func requestAccessibility(from pluginID: String) {}
+    func log(_ level: LogLevel, _ message: String, from pluginID: String) {}
+}
+
+/// The plugin is never activated here, so it reads no pasteboard and no keychain item.
+@MainActor
+private func makePlugin() throws -> ClipboardPlugin {
+    let id = ClipboardPlugin.manifest.id
+    let storage = try PluginStorage(
+        directory: try makeDirectory(),
+        defaultsSuiteName: "clipboard-tile-tests.\(id)",
+        keychainService: "clipboard-tile-tests.\(id)"
+    )
+    return ClipboardPlugin(context: NotchContext(pluginID: id, bundleURL: URL(fileURLWithPath: "/nonexistent"), host: SilentHost(), storage: storage))
+}
+
+/// The app's tile frames (`HomeGrid` in the app: 40 pt units 10 pt apart) and the largest content of
+/// the expanded notch (`NotchSizing.maxContentSize`, the home grid's width).
+private let tileFrames: [TileSize: CGSize] = [
+    .small: CGSize(width: 90, height: 90),
+    .wide: CGSize(width: 190, height: 90),
+]
+private let largestTab = CGSize(width: 390, height: 400)
+
+private func expectDefinite(_ size: CGSize, within limit: CGSize, _ what: String) {
+    #expect(size.width > 0 && size.height > 0 && size.width.isFinite && size.height.isFinite, "\(what): \(size)")
+    #expect(size.width <= limit.width && size.height <= limit.height, "\(what): \(size) does not fit \(limit)")
+}
+
+/// The tile comes wide (the default) or small, and both sizes and the tab have a definite size that
+/// fits the app's frame for it, empty and with long entries of every kind.
+@MainActor
+@Test func R16__clipboard_tile_and_tab_fit_the_home_at_every_size() throws {
+    let plugin = try makePlugin()
+    let tile = try #require(plugin.tile)
+    #expect(tile.supportedSizes == [.wide, .small])
+    #expect(tile.defaultSize == .wide)
+    for size in tile.supportedSizes {
+        expectDefinite(NSHostingView(rootView: tile.content(size)).fittingSize, within: try #require(tileFrames[size]), "plugin \(size)")
+    }
+    expectDefinite(NSHostingView(rootView: try #require(plugin.expandedTab).content).fittingSize, within: largestTab, "plugin tab")
+
+    let history = makeHistory(directory: try makeDirectory(), key: makeKey())
+    history.record(try #require(ClipCapture(png: samplePNG())))
+    history.record(.link("https://example.com/" + String(repeating: "long-path/", count: 30)))
+    history.record(.text(String(repeating: "한 줄에 다 들어가지 않는 아주 긴 글이에요. ", count: 20)))
+    for item in history.items {
+        history.setPinned(true, for: item.id)
+    }
+    for size in tile.supportedSizes {
+        expectDefinite(NSHostingView(rootView: ClipboardTile(history: history, size: size)).fittingSize, within: try #require(tileFrames[size]), "\(size)")
+    }
+    expectDefinite(NSHostingView(rootView: ClipboardView(history: history)).fittingSize, within: largestTab, "tab")
+}
+
+/// The wide tile lists the three most recently copied entries, newest first and pinned ones
+/// included; copying an older entry again brings it to the top. The small tile shows the newest.
+@MainActor
+@Test func R16__wide_clipboard_tile_lists_the_most_recent_entries_in_order() throws {
+    let history = makeHistory(directory: try makeDirectory(), key: makeKey())
+    let start = Date(timeIntervalSinceReferenceDate: 800_000_000)
+    for (offset, text) in ["one", "two", "three", "four", "five"].enumerated() {
+        history.record(.text(text), at: start + Double(offset))
+    }
+    let two = try #require(history.items.first { $0.text == "two" })
+    history.setPinned(true, for: two.id)
+    history.record(.text("two"), at: start + 10)
+
+    let wide = ClipboardTile(history: history, size: .wide)
+    #expect(wide.entries.map(\.text) == ["two", "five", "four"])
+    #expect(wide.entries.map(\.isPinned) == [true, false, false])
+    #expect(ClipboardTile(history: history, size: .small).entries.map(\.text) == ["two"])
+}
+
+/// The tile follows the tab's notice rule: it marks a history kept in memory only when the stored
+/// history cannot be read, or once entries have stayed unsaved for the notice delay, and still
+/// draws the entries of the session.
+@MainActor
+@Test func R16__clipboard_tile_warns_when_the_history_is_kept_in_memory_only() throws {
+    let directory = try makeDirectory()
+    let saved = makeHistory(directory: directory, key: makeKey())
+    saved.record(.text("saved"))
+    saved.flush()
+    #expect(!ClipboardTile(history: saved, size: .wide).showsWarning(at: .now))
+
+    let unreadable = makeHistory(directory: directory, key: makeKey())
+    #expect(unreadable.isStoreUnreadable)
+    unreadable.record(.text("captured while unreadable"))
+    for size in [TileSize.wide, .small] {
+        let tile = ClipboardTile(history: unreadable, size: size)
+        #expect(tile.showsWarning(at: .now))
+        #expect(tile.entries.map(\.text) == ["captured while unreadable"])
+        expectDefinite(NSHostingView(rootView: tile).fittingSize, within: try #require(tileFrames[size]), "unreadable \(size)")
+    }
+
+    let clock = ManualClock()
+    let memoryOnly = ClipboardHistory(logError: { _ in }, now: { clock.now })
+    memoryOnly.open(nil)
+    memoryOnly.record(.text("not saved"))
+    let tile = ClipboardTile(history: memoryOnly, size: .wide)
+    #expect(!tile.showsWarning(at: clock.now + ClipboardHistory.unsavedNoticeDelay - 0.1))
+    #expect(tile.showsWarning(at: clock.now + ClipboardHistory.unsavedNoticeDelay))
+}

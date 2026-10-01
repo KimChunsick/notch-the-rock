@@ -1,6 +1,8 @@
+import AppKit
 import Foundation
 import NotchKit
 import os
+import SwiftUI
 import Testing
 @testable import SystemStats
 
@@ -204,4 +206,94 @@ private func makeContext() throws -> NotchContext {
     plugin.deactivate()
     try await Task.sleep(for: .milliseconds(200))
     #expect(cpu.starts.count == 4)
+}
+
+/// The app's tile frames (`HomeGrid` in the app: 40 pt units 10 pt apart) and the largest content of
+/// the expanded notch (`NotchSizing.maxContentSize`, the home grid's width).
+private let tileFrames: [TileSize: CGSize] = [
+    .small: CGSize(width: 90, height: 90),
+    .wide: CGSize(width: 190, height: 90),
+    .large: CGSize(width: 190, height: 190),
+]
+private let largestTab = CGSize(width: 390, height: 400)
+
+private func expectDefinite(_ size: CGSize, within limit: CGSize, _ what: String) {
+    #expect(size.width > 0 && size.height > 0 && size.width.isFinite && size.height.isFinite, "\(what): \(size)")
+    #expect(size.width <= limit.width && size.height <= limit.height, "\(what): \(size) does not fit \(limit)")
+}
+
+/// A snapshot with the longest texts the cards show: every core busy, critical memory pressure, two
+/// spinning fans and rates in GB/s.
+private let busySnapshot = SystemSnapshot(
+    cpu: CPUUsage(total: 100, cores: Array(repeating: 100, count: 12)),
+    gpu: 100,
+    memory: MemoryReading(used: 63 << 30, total: 64 << 30, pressure: .critical),
+    disk: DiskSpace(total: 8_000_000_000_000, free: 7_999_000_000_000),
+    diskIO: Throughput(inbound: 7.5e9, outbound: 6.5e9),
+    network: Throughput(inbound: 999e6, outbound: 999e6),
+    sensors: SensorReading(cpuTemperature: 105, gpuTemperature: 99, fans: .speeds([6_000, nil]))
+)
+
+/// The tile comes small, wide or large, and every size and the tab have a definite size that fits
+/// the app's frame for it, before the first reading and with the longest readings.
+@MainActor
+@Test func R16__stats_tile_and_tab_fit_the_home_at_every_size() throws {
+    let plugin = SystemStatsPlugin(context: try makeContext(), interval: .seconds(3600)) { FakeSystem().samplers }
+    let tile = try #require(plugin.tile)
+    #expect(tile.supportedSizes == [.small, .wide, .large])
+    #expect(tile.defaultSize == .small)
+
+    let empty = SystemStatsModel()
+    let busy = SystemStatsModel()
+    busy.record(busySnapshot)
+    busy.record(busySnapshot)
+    for (name, model) in [("empty", empty), ("busy", busy)] {
+        for size in tile.supportedSizes {
+            let fitting = NSHostingView(rootView: SystemStatsTile(model: model, size: size)).fittingSize
+            expectDefinite(fitting, within: try #require(tileFrames[size]), "\(name) \(size)")
+        }
+        expectDefinite(NSHostingView(rootView: SystemStatsView(model: model)).fittingSize, within: largestTab, "\(name) tab")
+    }
+}
+
+/// The tile shows what the model holds: CPU, memory and temperature of the latest snapshot, and
+/// "—" once the plugin is turned off and the model is reset.
+@MainActor
+@Test func R16__stats_tile_reads_the_model() throws {
+    let system = FakeSystem()
+    system.ticks = [
+        [CoreTicks(user: 0, system: 0, idle: 0, nice: 0)],
+        [CoreTicks(user: 25, system: 0, idle: 75, nice: 0)],
+    ]
+    let collector = StatsCollector(samplers: system.samplers)
+    let model = SystemStatsModel()
+    let tile = SystemStatsTile(model: model, size: .wide)
+    #expect(tile.rows.map(\.value) == ["—", "—", "—"])
+
+    model.record(collector.sample(at: 10))
+    model.record(collector.sample(at: 12))
+    #expect(tile.rows.map(\.title) == ["CPU", "메모리", "온도"])
+    #expect(tile.rows.map(\.value) == ["25%", StatFormat.memory(8), "48°C"])
+    #expect(tile.rows[0].line.values == model.history.cpu.values)
+
+    model.reset()
+    #expect(tile.rows.map(\.value) == ["—", "—", "—"])
+}
+
+/// Drawing the tile at every size, and the tab, reads nothing from the system: the refresh loop is
+/// the only reader.
+@MainActor
+@Test func R16__drawing_the_tile_adds_no_reading() throws {
+    let system = FakeSystem()
+    let plugin = SystemStatsPlugin(context: try makeContext(), interval: .seconds(3600)) { system.samplers }
+    plugin.activate()
+    defer { plugin.deactivate() }
+    #expect(system.cpuReads == 1)
+
+    let tile = try #require(plugin.tile)
+    for size in tile.supportedSizes {
+        _ = NSHostingView(rootView: tile.content(size)).fittingSize
+    }
+    _ = NSHostingView(rootView: try #require(plugin.expandedTab).content).fittingSize
+    #expect(system.cpuReads == 1)
 }
