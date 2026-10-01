@@ -171,7 +171,7 @@ func expectJSON(_ output: Data, _ expected: String, sourceLocation: SourceLocati
         #expect(live.host.requests.first?.buttons.isEmpty == true)
     }
 
-    @Test func R06__each_question_gets_its_own_typed_answer() async throws {
+    @Test func R06__a_typed_answer_replaces_the_option_carried_over_from_the_notch() async throws {
         let live = try LivePlugin()
         defer { live.stop() }
         live.host.responses = [Self.answer(ClaudeBridge.typeAnswersButtonID, choices: ["1": ["Appendix"]])]
@@ -185,7 +185,12 @@ func expectJSON(_ output: Data, _ expected: String, sourceLocation: SourceLocati
         #expect(questions.map(\.text) == ["How should I format the output?", "Which sections should I include?"])
         #expect(picked == [1: ["Appendix"]])
         #expect(live.host.expansions == 1)
-        live.plugin.bridge.screen.respond(to: item.id, with: .answers(picked: [:], typed: [0: "표로 정리해 주세요", 1: "부록은 빼 주세요"]))
+        // The screen's form, as it opens with the pick from the notch, filled in field by field.
+        var draft = AnswerDraft(questions, picked: picked)
+        draft.type("표로 정리해 주세요", at: 0)
+        draft.type("부록은 빼 주세요", at: 1)
+        #expect(!draft.isPicked("Appendix", at: 1))
+        live.plugin.bridge.screen.respond(to: item.id, with: draft.response)
 
         let answers = ((jsonObject(await output.value)?["hookSpecificOutput"] as? NSDictionary)?["updatedInput"] as? NSDictionary)?["answers"] as? NSDictionary
         #expect(answers == [
@@ -218,6 +223,79 @@ func expectJSON(_ output: Data, _ expected: String, sourceLocation: SourceLocati
         #expect(Question.answers(questions, picked: [1: ["y", "z"]], typed: [0: " 하나 "]) == ["A?": .string("하나"), "B?": .array([.string("y"), .string("z")])])
     }
 
+    @Test func R06__picking_an_option_clears_the_text_typed_for_that_question() {
+        let questions = [
+            Question(text: "A?", options: ["x"], multiple: false),
+            Question(text: "B?", options: ["y", "z"], multiple: true),
+        ]
+        var draft = AnswerDraft(questions, picked: [:])
+        draft.type("하나", at: 0)
+        draft.type("둘", at: 1)
+        draft.pick("x", at: 0)
+        #expect(draft.typed[0] == nil)
+        #expect(draft.typed[1] == "둘")
+        #expect(draft.answers == ["A?": .string("x"), "B?": .string("둘")])
+        draft.type("셋", at: 0)
+        #expect(!draft.isPicked("x", at: 0))
+        #expect(draft.answers == ["A?": .string("셋"), "B?": .string("둘")])
+    }
+
+    // MARK: The screen inside the expanded notch
+
+    /// What a host offers a plugin screen: the most (main's NotchSizing.maxContentSize) and less.
+    nonisolated static let offers = [CGSize(width: 390, height: 400), CGSize(width: 390, height: 210)]
+
+    @Test(arguments: offers)
+    func R06__the_screen_keeps_its_title_and_controls_inside_the_offered_size(_ offer: CGSize) async throws {
+        let live = try LivePlugin()
+        defer { live.stop() }
+        let content = (1...80).map { "line \($0): " + String(repeating: "내용", count: 20) }.joined(separator: "\n")
+        live.host.responses = [
+            Self.answer(ClaudeBridge.detailsButtonID),
+            Self.answer(ClaudeBridge.typeAnswersButtonID, choices: ["1": ["Appendix"]]),
+        ]
+        let screen = AgentsScreen(model: live.plugin.bridge.screen)
+        let size = "\(Int(offer.width))x\(Int(offer.height))"
+
+        let permission = Task { await live.hook(.permissionRequest, permissionInput(tool: "Write", ["file_path": "/Users/me/p/a.txt", "content": content])) }
+        let item = try await live.screenItem()
+        // Measured without a limit the screen asks for all of its content, so a host that sizes
+        // the notch to its content offers it the most it can.
+        #expect(NSHostingView(rootView: screen).fittingSize.height > offer.height)
+        let detail = layOut(screen, in: offer)
+        try capture(detail, named: "R06-render-detail-\(size)-T69")
+        expectInside(detail, screen, offer, fields: 1)
+        live.plugin.bridge.screen.respond(to: item.id, with: .released)
+        #expect(await permission.value.isEmpty)
+
+        let questions = Task { await live.hook(.preToolUse, questionInput) }
+        let form = try await live.screenItem()
+        let formView = layOut(screen, in: offer)
+        try capture(formView, named: "R06-render-questions-\(size)-T69")
+        expectInside(formView, screen, offer, fields: 0)
+        live.plugin.bridge.screen.respond(to: form.id, with: .released)
+        #expect(await questions.value.isEmpty)
+    }
+
+    /// `root` shows `screen` laid out in `offer`: `fields` text fields stay in view beside one
+    /// scrolling body, all inside the bounds, and the screen's whole stack (title, body, fields and
+    /// the buttons, which SwiftUI draws without an AppKit view to look for) fits the offer from the
+    /// top, so nothing of it falls outside.
+    func expectInside(_ root: NSView, _ screen: AgentsScreen, _ offer: CGSize, fields: Int, sourceLocation: SourceLocation = #_sourceLocation) {
+        let needed = NSHostingController(rootView: screen).sizeThatFits(in: offer)
+        #expect(needed.width <= offer.width && needed.height <= offer.height, "the screen needs \(needed) in \(offer)", sourceLocation: sourceLocation)
+        let (controls, scrollViews) = pinnedControls(in: root)
+        #expect(controls.filter { $0.control is NSTextField }.count == fields, sourceLocation: sourceLocation)
+        for (control, frame) in controls {
+            #expect(root.bounds.contains(frame), "\(type(of: control)) at \(frame) is outside \(root.bounds)", sourceLocation: sourceLocation)
+        }
+        #expect(scrollViews.count == 1, sourceLocation: sourceLocation)
+        for frame in scrollViews {
+            #expect(root.bounds.contains(frame), "body at \(frame) is outside \(root.bounds)", sourceLocation: sourceLocation)
+            #expect(frame.height >= AgentsScreen.minimumBodyHeight, sourceLocation: sourceLocation)
+        }
+    }
+
     // MARK: Operations the notch cannot show in full
 
     @Test func R06__a_long_command_is_allowed_only_from_the_full_detail() async throws {
@@ -240,7 +318,6 @@ func expectJSON(_ output: Data, _ expected: String, sourceLocation: SourceLocati
         }
         #expect(detail.sections.first == OperationDetail.Section(label: "명령", body: command))
         try capture(AttentionPreview(request: request), named: "R06-render-permission-long-T68")
-        try capture(AgentsScreen(model: live.plugin.bridge.screen).padding(20).background(.black), named: "R06-render-detail-T68")
 
         live.plugin.bridge.screen.respond(to: item.id, with: .allow)
         expectJSON(await output.value, allowOutput)

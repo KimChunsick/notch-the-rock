@@ -149,13 +149,52 @@ func jsonObject(_ data: Data) -> NSDictionary? {
 /// is drawn by an offscreen hosting view, so AppKit-backed controls (forms, buttons) appear too.
 @MainActor
 func capture(_ view: some View, named name: String) throws {
-    guard let directory = ProcessInfo.processInfo.environment["AGENTS_CAPTURE_DIR"] else { return }
     let hosting = NSHostingView(rootView: view.environment(\.colorScheme, .dark))
     hosting.appearance = NSAppearance(named: .darkAqua)
     hosting.frame = CGRect(origin: .zero, size: hosting.fittingSize)
     hosting.layoutSubtreeIfNeeded()
+    try capture(hosting, named: name)
+}
+
+/// Writes a render of a laid-out `hosting` view to `$AGENTS_CAPTURE_DIR/<name>.png` when that
+/// variable is set.
+@MainActor
+func capture(_ hosting: NSView, named name: String) throws {
+    guard let directory = ProcessInfo.processInfo.environment["AGENTS_CAPTURE_DIR"] else { return }
     let rep = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
     hosting.cacheDisplay(in: hosting.bounds, to: rep)
     let png = try #require(rep.representation(using: .png, properties: [:]))
     try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name).png"))
+}
+
+/// `view` on black in an offscreen hosting view of exactly `size`, laid out as a host that offers
+/// that size lays it out. Whatever falls outside the hosting view's bounds is not visible.
+@MainActor
+func layOut(_ view: some View, in size: CGSize) -> NSView {
+    let hosting = NSHostingView(rootView: view.frame(width: size.width, height: size.height).background(.black).environment(\.colorScheme, .dark))
+    hosting.appearance = NSAppearance(named: .darkAqua)
+    hosting.frame = CGRect(origin: .zero, size: size)
+    hosting.layoutSubtreeIfNeeded()
+    return hosting
+}
+
+/// The AppKit buttons and text fields in `root` outside any scroll view (they stay where they are
+/// while the body scrolls), and the scroll views, framed in `root`'s coordinates.
+@MainActor
+func pinnedControls(in root: NSView) -> (controls: [(control: NSControl, frame: CGRect)], scrollViews: [CGRect]) {
+    var controls: [(control: NSControl, frame: CGRect)] = []
+    var scrollViews: [CGRect] = []
+    func walk(_ view: NSView) {
+        if view is NSScrollView {
+            scrollViews.append(view.convert(view.bounds, to: root))
+            return
+        }
+        if let control = view as? NSControl, control is NSButton || control is NSTextField {
+            controls.append((control, control.convert(control.bounds, to: root)))
+            return
+        }
+        view.subviews.forEach(walk)
+    }
+    walk(root)
+    return (controls, scrollViews)
 }

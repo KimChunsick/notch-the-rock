@@ -296,4 +296,85 @@ import Testing
         #expect(try Data(contentsOf: settings) == ours)
         #expect(FileManager.default.fileExists(atPath: record.path))
     }
+
+    // MARK: Installs that fail or stop half way
+
+    /// An installer that stops after `step` the way a crash would: nothing after it runs.
+    func crashing(after step: HookInstaller.Step) -> HookInstaller {
+        var installer = installer()
+        installer.afterStep = { reached throws(InstallError) in
+            if reached == step { throw .unwritable("crash") }
+        }
+        return installer
+    }
+
+    @Test func R05__a_record_that_cannot_be_saved_leaves_the_settings_untouched() throws {
+        try write(Self.otherHooks)
+        let original = try Data(contentsOf: settings)
+        let storage = record.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: storage.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: storage.path) }
+
+        #expect(throws: InstallError.self) { try installer().install() }
+        #expect(try Data(contentsOf: settings) == original)
+        #expect(try backups().isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: record.path))
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: storage.path)
+        try installer().install()
+        #expect(try installer().uninstall() == .restored)
+        #expect(try Data(contentsOf: settings) == original)
+    }
+
+    @Test func R05__an_install_stopped_before_the_rename_is_undone_by_the_next_one() throws {
+        try write(Self.otherHooks)
+        let original = try Data(contentsOf: settings)
+        #expect(throws: InstallError.self) { try crashing(after: .prepared).install() }
+        #expect(try Data(contentsOf: settings) == original)
+        #expect(FileManager.default.fileExists(atPath: record.path))
+        #expect(installer().status() == .notInstalled)
+
+        // A later 연결 finds the file as it was before and drops the half-done install with its backup.
+        try installer().install()
+        #expect(try backups().count == 1)
+        #expect(try installer().uninstall() == .restored)
+        #expect(try Data(contentsOf: settings) == original)
+    }
+
+    @Test func R05__an_install_stopped_after_the_rename_still_restores_the_original() throws {
+        try write(Self.otherHooks)
+        let original = try Data(contentsOf: settings)
+        #expect(throws: InstallError.self) { try crashing(after: .replaced).install() }
+        #expect(try commands("Stop").count == 2)
+
+        let installer = installer()
+        #expect(installer.status() == .installed)
+        #expect(try installer.uninstall() == .restored)
+        #expect(try Data(contentsOf: settings) == original)
+    }
+
+    @Test func R05__a_file_created_by_an_install_stopped_after_the_rename_is_deleted_again() throws {
+        #expect(throws: InstallError.self) { try crashing(after: .replaced).install() }
+        #expect(FileManager.default.fileExists(atPath: settings.path))
+
+        #expect(try installer().uninstall() == .deleted)
+        #expect(!FileManager.default.fileExists(atPath: settings.path))
+    }
+
+    @Test @MainActor func R05__hooks_without_a_record_are_removed_and_the_page_says_so() throws {
+        try write(Self.otherHooks)
+        try installer().install()
+        try FileManager.default.removeItem(at: record)
+        let model = ClaudeHooksModel(installer: installer())
+
+        model.uninstall()
+        #expect(model.problem == nil)
+        #expect(model.notice == UninstallResult.removedEntriesWithoutOriginal.message)
+        #expect(model.notice?.contains("되돌리지는 못했어요") == true)
+        #expect(model.status == .notInstalled)
+        #expect(try commands("Stop") == ["afplay /System/Library/Sounds/Glass.aiff"])
+        #expect(try commands("PreToolUse") == ["/usr/local/bin/guard"])
+        #expect(try settingsObject()["model"] as? String == "opus")
+    }
 }

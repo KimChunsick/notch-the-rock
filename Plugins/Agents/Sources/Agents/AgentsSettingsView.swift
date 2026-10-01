@@ -8,6 +8,8 @@ final class ClaudeHooksModel {
     private(set) var status: InstallStatus
     /// Why the last 연결 or 해제 failed, until the next one succeeds.
     private(set) var problem: String?
+    /// What the last 해제 could not do, such as putting the file back byte for byte.
+    private(set) var notice: String?
     private let installer: HookInstaller
 
     init(installer: HookInstaller) {
@@ -20,18 +22,23 @@ final class ClaudeHooksModel {
     }
 
     func install() {
-        perform { () throws(InstallError) in try installer.install() }
+        perform { () throws(InstallError) -> String? in
+            try installer.install()
+            return nil
+        }
     }
 
     func uninstall() {
-        perform { () throws(InstallError) in try installer.uninstall() }
+        perform { () throws(InstallError) -> String? in try installer.uninstall().message }
     }
 
-    private func perform(_ change: () throws(InstallError) -> Void) {
+    /// Runs `change`, which returns what the user should know when it went through.
+    private func perform(_ change: () throws(InstallError) -> String?) {
         do {
-            try change()
+            notice = try change()
             problem = nil
         } catch {
+            notice = nil
             problem = error.message
         }
         refresh()
@@ -65,6 +72,10 @@ struct AgentsSettingsView: View {
             if let problem = model.problem {
                 Text(problem)
                     .foregroundStyle(.red)
+            }
+            if let notice = model.notice {
+                Text(notice)
+                    .foregroundStyle(.orange)
             }
             Text("연결하면 ~/.claude/settings.json을 같은 폴더에 백업한 뒤 NotchTheRock 훅을 더해요. 해제하면 더한 훅만 지우고, 그사이 파일이 바뀌지 않았다면 연결하기 전 파일로 그대로 되돌려요.")
                 .font(.callout)

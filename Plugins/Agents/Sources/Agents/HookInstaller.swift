@@ -52,7 +52,18 @@ enum UninstallResult: Equatable {
     case deleted
     /// The file changed since the plugin wrote it: only the plugin's entries were taken out.
     case removedEntries
+    /// The plugin's entries were taken out, but the file from before install is not known (no
+    /// record of it, or its backup is gone), so it could not be put back byte for byte.
+    case removedEntriesWithoutOriginal
     case nothingToRemove
+
+    /// Shown in the settings page after 해제, when there is something the user should know.
+    var message: String? {
+        switch self {
+        case .removedEntriesWithoutOriginal: "연결하기 전 파일을 찾지 못해서 그대로 되돌리지는 못했어요. NotchTheRock 훅만 지웠어요."
+        case .restored, .deleted, .removedEntries, .nothingToRemove: nil
+        }
+    }
 }
 
 enum InstallError: Error, Equatable {
@@ -96,6 +107,16 @@ struct HookInstaller {
     /// Runs after the settings file was read and just before it is replaced or deleted. Tests save
     /// the file here, as Claude Code or an editor might at that moment.
     var willReplace: () -> Void = {}
+    /// Runs after each step of install that leaves something on disk. Tests throw here to stop
+    /// install the way a crash would: nothing after the step runs, not even the clean-up.
+    var afterStep: (Step) throws(InstallError) -> Void = { _ in }
+
+    enum Step {
+        /// The backup and the pending record are on disk; the settings file is untouched.
+        case prepared
+        /// The settings file holds the merged hooks; the record still says pending.
+        case replaced
+    }
 
     /// The shell command for `event`: the helper's path in single quotes (it may contain spaces)
     /// and the event name.
@@ -144,37 +165,70 @@ struct HookInstaller {
         object["hooks"] = hooks
         let data = try serialize(object)
 
+        // A record left by an install that stopped half way is settled first, so its backup is gone
+        // before this one is named.
+        let previous = record(for: snapshot)
         // The backup holds the very bytes the merge started from.
         var backup: URL?
         if let current = snapshot.data {
             backup = try writeBackup(current)
         }
-        let previous = loadRecord()
-        let original: InstallRecord.Original?
+        var pending = InstallRecord(state: .pending, written: Self.digest(data), before: snapshot.data.map(Self.digest), backup: backup?.path)
         if let previous, let current = snapshot.data, previous.written == Self.digest(current) {
             // Only the plugin wrote to the file since the first install: that state still counts.
-            original = previous.original
+            pending.original = previous.original
+            pending.inherited = true
         } else if missing.count < entries.count {
             // The file already holds some of the plugin's entries; no earlier state is known.
-            original = nil
+            pending.original = nil
         } else {
-            original = backup.map { .backup(path: $0.path) } ?? .absent
+            pending.original = backup.map { .backup(path: $0.path) } ?? .absent
         }
-        guard try replace(snapshot, with: data) else {
+        // The way back is on disk before the file changes: a crash from here on leaves a record that
+        // the next 연결 or 해제 settles against the file.
+        do {
+            try saveRecord(pending)
+        } catch {
             if let backup { unlink(backup.path) }
+            throw error
+        }
+        try afterStep(.prepared)
+        let replaced: Bool
+        do {
+            replaced = try replace(snapshot, with: data)
+        } catch {
+            undo(pending, putting: previous)
+            throw error
+        }
+        guard replaced else {
+            undo(pending, putting: previous)
             return false
         }
-        try saveRecord(InstallRecord(written: Self.digest(data), original: original))
+        try afterStep(.replaced)
+        // Best effort: a record left pending is settled as done, since the file holds its bytes.
+        pending.state = .committed
+        try? saveRecord(pending)
         return true
+    }
+
+    /// Takes back an install whose file was not replaced: its backup goes and the record it
+    /// replaced comes back.
+    private func undo(_ pending: InstallRecord, putting previous: InstallRecord?) {
+        if let backup = pending.backup { unlink(backup) }
+        if let previous {
+            try? saveRecord(previous)
+        } else {
+            try? FileManager.default.removeItem(at: recordURL)
+        }
     }
 
     /// Puts the file back as it was, or takes the entries out. The record stays when the file kept
     /// changing, so a later 해제 can still restore it.
     @discardableResult
     func uninstall() throws(InstallError) -> UninstallResult {
-        let record = loadRecord()
         for _ in 0..<Self.attempts {
-            if let result = try uninstallOnce(record: record) {
+            let snapshot = try snapshot()
+            if let result = try uninstallOnce(snapshot, record: record(for: snapshot)) {
                 try? FileManager.default.removeItem(at: recordURL)
                 return result
             }
@@ -184,9 +238,9 @@ struct HookInstaller {
 
     /// Nil when the file changed before it could be restored, rewritten or deleted: then it was left
     /// as it is.
-    private func uninstallOnce(record: InstallRecord?) throws(InstallError) -> UninstallResult? {
-        let snapshot = try snapshot()
+    private func uninstallOnce(_ snapshot: Snapshot, record: InstallRecord?) throws(InstallError) -> UninstallResult? {
         guard let data = snapshot.data else { return .nothingToRemove }
+        var restorable = record?.original != nil
         if let record, let original = record.original, record.written == Self.digest(data) {
             switch original {
             case .absent:
@@ -196,6 +250,7 @@ struct HookInstaller {
                 if let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)) {
                     return try replace(snapshot, with: bytes) ? .restored : nil
                 }
+                restorable = false
             }
         }
         var object = try parse(data)
@@ -203,7 +258,8 @@ struct HookInstaller {
         if object.isEmpty, record?.original == .absent {
             return try delete(snapshot) ? .deleted : nil
         }
-        return try replace(snapshot, with: try serialize(object)) ? .removedEntries : nil
+        let result: UninstallResult = restorable ? .removedEntries : .removedEntriesWithoutOriginal
+        return try replace(snapshot, with: try serialize(object)) ? result : nil
     }
 
     // MARK: Settings file
@@ -403,17 +459,51 @@ struct HookInstaller {
     // MARK: Install record
 
     struct InstallRecord: Codable, Equatable {
-        /// SHA-256 of the bytes install last wrote.
+        enum State: String, Codable {
+            /// Saved before the settings file is replaced; the replacement may not have happened.
+            case pending
+            /// The settings file was replaced.
+            case committed
+        }
+
+        var state: State
+        /// SHA-256 of the bytes install wrote (or, while pending, is about to write).
         var written: String
+        /// SHA-256 of the bytes install started from; nil when there was no settings file.
+        var before: String?
         /// What uninstall puts back when the file still holds `written`; nil when only removing the
         /// entries is safe.
         var original: Original?
+        /// The backup this install made.
+        var backup: String?
+        /// `original` came from an earlier install whose bytes this one started from.
+        var inherited = false
 
         enum Original: Codable, Equatable {
             case backup(path: String)
             /// There was no settings file.
             case absent
         }
+    }
+
+    /// The install record, with an install that stopped half way settled against `snapshot`: when
+    /// the file holds what it was about to write, it happened; when the file still holds what it
+    /// started from, it did not, so its backup is removed and the record it replaced comes back.
+    /// When the file holds neither, it was saved since, and the record stays as it is (uninstall
+    /// then only takes the entries out).
+    private func record(for snapshot: Snapshot) -> InstallRecord? {
+        guard var record = loadRecord() else { return nil }
+        guard record.state == .pending else { return record }
+        let current = snapshot.data.map(Self.digest)
+        if current == record.written {
+            record.state = .committed
+            try? saveRecord(record)
+            return record
+        }
+        guard current == record.before else { return record }
+        let earlier = record.inherited ? record.before.map { InstallRecord(state: .committed, written: $0, original: record.original) } : nil
+        undo(record, putting: earlier)
+        return earlier
     }
 
     private func loadRecord() -> InstallRecord? {

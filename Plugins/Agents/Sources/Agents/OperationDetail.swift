@@ -124,3 +124,48 @@ struct Question: Equatable {
         return answers
     }
 }
+
+/// The answers being filled in on the Agents screen. A question is answered by its options or by
+/// typed text, never both: typing clears the question's picks and picking clears its text, so what
+/// the form shows is what is sent.
+struct AnswerDraft: Equatable {
+    let questions: [Question]
+    /// Picked options by question index.
+    private(set) var picked: [Int: [String]]
+    /// Typed answers by question index.
+    private(set) var typed: [Int: String] = [:]
+
+    init(_ questions: [Question], picked: [Int: [String]]) {
+        self.questions = questions
+        self.picked = picked
+    }
+
+    /// Picks `option` of the question at `index`, or unpicks it.
+    mutating func pick(_ option: String, at index: Int) {
+        let question = questions[index]
+        var chosen = picked[index] ?? []
+        if question.multiple {
+            if let found = chosen.firstIndex(of: option) { chosen.remove(at: found) } else { chosen.append(option) }
+            chosen.sort { (question.options.firstIndex(of: $0) ?? 0) < (question.options.firstIndex(of: $1) ?? 0) }
+        } else {
+            chosen = chosen == [option] ? [] : [option]
+        }
+        picked[index] = chosen.isEmpty ? nil : chosen
+        if !chosen.isEmpty { typed[index] = nil }
+    }
+
+    mutating func type(_ text: String, at index: Int) {
+        typed[index] = text
+        if !text.isEmpty { picked[index] = nil }
+    }
+
+    func isPicked(_ option: String, at index: Int) -> Bool {
+        picked[index]?.contains(option) == true
+    }
+
+    /// What 보내기 sends.
+    var response: ScreenResponse { .answers(picked: picked, typed: typed) }
+
+    /// Nil while some question has no answer yet.
+    var answers: [String: JSONValue]? { Question.answers(questions, picked: picked, typed: typed) }
+}

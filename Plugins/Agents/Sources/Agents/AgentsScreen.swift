@@ -74,9 +74,13 @@ final class AgentsScreenModel {
     }
 }
 
-/// The plugin's screen in the expanded notch: the oldest waiting request, in full.
+/// The plugin's screen in the expanded notch: the oldest waiting request, in full. The title and the
+/// controls always stay in view; the request itself scrolls in the height left between them, so the
+/// screen fits whatever size the host offers (on main up to 390 × 400 points, often less). Measured
+/// without a limit it asks for all of its content.
 struct AgentsScreen: View {
-    static let width: CGFloat = 520
+    /// The scrolling body never gets less than this, however little height the host offers.
+    static let minimumBodyHeight: CGFloat = 56
     let model: AgentsScreenModel
 
     var body: some View {
@@ -92,27 +96,25 @@ struct AgentsScreen: View {
                     .padding(.vertical, 24)
             }
         }
-        .frame(width: Self.width)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
 
 private struct ScreenItemView: View {
-    static let bodyHeight: CGFloat = 240
     let item: ScreenItem
     let others: Int
     let respond: (ScreenResponse) -> Void
     @State private var reason = ""
-    @State private var picked: [Int: [String]]
-    @State private var typed: [Int: String] = [:]
+    @State private var draft: AnswerDraft
 
     init(item: ScreenItem, others: Int, respond: @escaping (ScreenResponse) -> Void) {
         self.item = item
         self.others = others
         self.respond = respond
-        if case .questions(_, let picked) = item.content {
-            _picked = State(initialValue: picked)
+        if case .questions(let questions, let picked) = item.content {
+            _draft = State(initialValue: AnswerDraft(questions, picked: picked))
         } else {
-            _picked = State(initialValue: [:])
+            _draft = State(initialValue: AnswerDraft([], picked: [:]))
         }
     }
 
@@ -166,7 +168,7 @@ private struct ScreenItemView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(8)
             }
-            .frame(height: Self.bodyHeight)
+            .frame(minHeight: AgentsScreen.minimumBodyHeight, maxHeight: .infinity)
             .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.06)))
             TextField("거부하는 이유 (비워 두면 이유 없이 거부해요)", text: $reason)
                 .textFieldStyle(.roundedBorder)
@@ -194,7 +196,7 @@ private struct ScreenItemView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                             ForEach(question.options, id: \.self) { option in
                                 Button {
-                                    pick(option, of: question, at: index)
+                                    draft.pick(option, at: index)
                                 } label: {
                                     Label(option, systemImage: symbol(option, of: question, at: index))
                                         .font(.system(size: 12))
@@ -202,8 +204,8 @@ private struct ScreenItemView: View {
                                 .buttonStyle(.plain)
                             }
                             TextField("직접 입력", text: Binding(
-                                get: { typed[index] ?? "" },
-                                set: { typed[index] = $0 }
+                                get: { draft.typed[index] ?? "" },
+                                set: { draft.type($0, at: index) }
                             ))
                             .textFieldStyle(.roundedBorder)
                         }
@@ -212,32 +214,21 @@ private struct ScreenItemView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(8)
             }
-            .frame(height: Self.bodyHeight)
+            .frame(minHeight: AgentsScreen.minimumBodyHeight, maxHeight: .infinity)
             HStack(spacing: 8) {
                 Button(ClaudeBridge.releaseTitle) { respond(.released) }
                     .buttonStyle(.bordered)
                 Spacer(minLength: 0)
-                Button("보내기") { respond(.answers(picked: picked, typed: typed)) }
+                Button("보내기") { respond(draft.response) }
                     .tint(ClaudeBridge.accent)
-                    .disabled(Question.answers(questions, picked: picked, typed: typed) == nil)
+                    .disabled(draft.answers == nil)
             }
             .buttonStyle(.borderedProminent)
         }
     }
 
     private func symbol(_ option: String, of question: Question, at index: Int) -> String {
-        let chosen = picked[index]?.contains(option) == true
+        let chosen = draft.isPicked(option, at: index)
         return question.multiple ? (chosen ? "checkmark.square.fill" : "square") : (chosen ? "largecircle.fill.circle" : "circle")
-    }
-
-    private func pick(_ option: String, of question: Question, at index: Int) {
-        var chosen = picked[index] ?? []
-        if question.multiple {
-            if let found = chosen.firstIndex(of: option) { chosen.remove(at: found) } else { chosen.append(option) }
-            chosen.sort { (question.options.firstIndex(of: $0) ?? 0) < (question.options.firstIndex(of: $1) ?? 0) }
-        } else {
-            chosen = chosen == [option] ? [] : [option]
-        }
-        picked[index] = chosen.isEmpty ? nil : chosen
     }
 }
