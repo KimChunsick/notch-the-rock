@@ -55,13 +55,14 @@ import Testing
     }
 
     /// Draws the root view for `host` offscreen in a borderless window that is never shown, until the
-    /// shape has settled (at most 40 captures). Two identical captures alone do not show that: while
-    /// other suites hold the main actor no update may run between them, and both are the frame from
-    /// before the host measured what it shows. The shape has settled once its first target (wings and
-    /// content still unmeasured, at zero) has given way to a later one, the shape as drawn has reached
-    /// the newest target, and the capture then is the same as the one before. It sleeps between
-    /// captures instead of running the main run loop, so other suites' main-actor tests keep their
-    /// deadlines meanwhile.
+    /// shape has settled, and returns that capture. Two identical captures alone do not show that:
+    /// while other suites hold the main actor no update may run between them, and both are the frame
+    /// from before the host measured what it shows. The shape has settled once its first target (wings
+    /// and content still unmeasured, at zero) has given way to a later one, the shape as drawn has
+    /// reached the newest target, and the capture then is the same as the one before. When it has not
+    /// settled within 40 captures, the test fails with the last target and the drawn shape, and no
+    /// frame reaches the measurements. It sleeps between captures instead of running the main run
+    /// loop, so other suites' main-actor tests keep their deadlines meanwhile.
     func settledCapture(host: NotchHostModel, notchSize: CGSize) async throws -> CGImage {
         var targets: [NotchLayout.Metrics] = []
         var drawn: NotchLayout.Metrics?
@@ -74,18 +75,20 @@ import Testing
         window.contentView = hosting
         hosting.frame = NSRect(origin: .zero, size: size)
         var previous: Data?
-        var rep: NSBitmapImageRep?
+        var settled: CGImage?
         for _ in 0..<40 {
             hosting.layoutSubtreeIfNeeded()
             try await Task.sleep(for: .milliseconds(50))
             let capture = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
             hosting.cacheDisplay(in: hosting.bounds, to: capture)
             let data = capture.tiffRepresentation
-            rep = capture
-            if targets.count > 1 && drawn == targets.last && data != nil && data == previous { break }
+            if targets.count > 1 && drawn == targets.last && data != nil && data == previous {
+                settled = capture.cgImage
+                break
+            }
             previous = data
         }
-        return try #require(rep?.cgImage)
+        return try #require(settled, "the shape did not settle within 40 captures: \(targets.count) targets, last \(String(describing: targets.last)), drawn \(String(describing: drawn))")
     }
 
     /// The shape's side edges on its middle row (found from outside, past the backdrop), its bottom

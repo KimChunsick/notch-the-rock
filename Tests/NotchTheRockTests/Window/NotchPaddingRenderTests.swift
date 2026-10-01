@@ -197,6 +197,11 @@ import Testing
         expectScreenPadding(gaps, "battery")
     }
 
+    @Test func R15__the_battery_screen_keeps_the_same_padding_on_every_side_without_a_battery() async throws {
+        let gaps = try await measureScreen("battery-empty", "배터리", hasSettings: false, BatteryEmptyStandIn())
+        expectScreenPadding(gaps, "battery-empty")
+    }
+
     @Test func R15__the_volume_screen_keeps_the_same_padding_on_every_side() async throws {
         let gaps = try await measureScreen("volume", "볼륨", hasSettings: true, VolumeStandIn())
         expectScreenPadding(gaps, "volume")
@@ -297,6 +302,20 @@ struct BatteryStandIn: View {
                 Text("완전히 충전됨")
                     .font(.headline)
             }
+        }
+    }
+}
+
+/// `BatteryView` without a battery reading and with nothing in either list: a dimmed battery symbol
+/// and the message at either end of what it is offered.
+private struct BatteryEmptyStandIn: View {
+    var body: some View {
+        HStack(spacing: 0) {
+            Image(systemName: "battery.0percent")
+                .foregroundStyle(.tertiary)
+            Spacer(minLength: 10)
+            Text("이 Mac에서 배터리를 찾지 못했어요.")
+                .foregroundStyle(.secondary)
         }
     }
 }

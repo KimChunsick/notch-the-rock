@@ -57,8 +57,8 @@ final class BatteryModel {
 }
 
 /// The expanded tab at the size of what it draws; the host adds the margin around it. Offered more
-/// width (under a wider band), the symbol and the percentage go to either end and the rows run across
-/// it.
+/// width (under a wider band), the symbol and the percentage, or without a reading a small dimmed
+/// symbol and the message, go to either end and the rows run across it.
 struct BatteryView: View {
     let model: BatteryModel
 
@@ -85,8 +85,14 @@ struct BatteryView: View {
                     }
                 }
             } else {
-                Text("이 Mac에서 배터리를 찾지 못했어요.")
-                    .foregroundStyle(.secondary)
+                // A dimmed battery and the message at either end of what the screen is offered.
+                HStack(spacing: 0) {
+                    Image(systemName: "battery.0percent")
+                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 10)
+                    Text("이 Mac에서 배터리를 찾지 못했어요.")
+                        .foregroundStyle(.secondary)
+                }
             }
             let detail = model.detail
             if !detail.apps.isEmpty {

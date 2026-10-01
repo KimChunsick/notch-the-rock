@@ -23,8 +23,14 @@ struct BrightnessView: View {
                         .frame(width: 40, alignment: .trailing)
                 }
             } else {
-                Text("내장 화면의 밝기를 바꿀 수 없어요.")
-                    .foregroundStyle(.secondary)
+                // A dimmed sun and the message at either end of what the screen is offered.
+                HStack(spacing: 0) {
+                    Image(systemName: "sun.max.fill")
+                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 10)
+                    Text("내장 화면의 밝기를 바꿀 수 없어요.")
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .task { await model.keepRefreshed() }

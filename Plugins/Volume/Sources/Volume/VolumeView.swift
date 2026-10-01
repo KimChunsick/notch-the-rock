@@ -35,8 +35,14 @@ struct VolumeView: View {
                         .frame(width: 40, alignment: .trailing)
                 }
             } else {
-                Text("이 출력 기기는 볼륨을 바꿀 수 없어요.")
-                    .foregroundStyle(.secondary)
+                // A dimmed speaker and the message at either end of what the screen is offered.
+                HStack(spacing: 0) {
+                    Image(systemName: "speaker.slash.fill")
+                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 10)
+                    Text("이 출력 기기는 볼륨을 바꿀 수 없어요.")
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .task { await model.keepRefreshed() }

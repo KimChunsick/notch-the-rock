@@ -71,3 +71,20 @@ private func inkInsets(_ view: some View) throws -> (left: CGFloat, right: CGFlo
     model.cancelAll()
     _ = await waiting.value
 }
+
+/// With no request waiting, a dimmed terminal and the message sit at either end, so the screen
+/// reaches both edges of a wider offer.
+@MainActor
+@Test func R15__agents_screen_without_a_request_fills_a_wider_offer() throws {
+    let view = AgentsScreen(model: AgentsScreenModel())
+    let ideal = NSHostingView(rootView: view).fittingSize
+    print("R15 agents without a request ideal \(ideal)")
+    // Its own size: the message row is as tall as the message alone was.
+    #expect(abs(ideal.width - 153) <= 0.5 && abs(ideal.height - 16) <= 0.5, "the screen's own size changed: \(ideal)")
+    let offered = ideal.width + 80
+    let wide = NSHostingView(rootView: view.frame(width: offered)).fittingSize
+    #expect(abs(wide.height - ideal.height) <= 1, "wrapped or cut at \(offered) pt: \(wide) vs \(ideal)")
+    let insets = try inkInsets(view.frame(width: offered))
+    print("R15 agents without a request offered \(offered) pt: ink insets left \(insets.left) right \(insets.right)")
+    #expect(insets.left <= 2 && insets.right <= 2, "the screen does not reach both edges of a \(offered) pt offer: \(insets)")
+}
