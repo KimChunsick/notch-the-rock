@@ -15,7 +15,7 @@ struct HookEntry: Hashable, Sendable {
     /// The entries for Claude Code: `notch-hook <event>` for each event the plugin handles. Notices
     /// return at once; requests may wait for the notch, so their timeout outlasts any wait.
     static func claude(helper: URL) -> [HookEntry] {
-        let notices = [HookEvent.sessionStart, .stop, .notification].map {
+        let notices = [HookEvent.sessionStart, .userPromptSubmit, .stop, .notification, .sessionEnd, .postToolUse, .postToolUseFailure].map {
             HookEntry(event: $0.rawValue, matcher: nil, command: HookInstaller.command(helper: helper, event: $0), timeout: 10)
         }
         return notices + [

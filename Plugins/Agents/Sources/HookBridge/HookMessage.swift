@@ -4,11 +4,20 @@ import Foundation
 /// uses and the argument the installed command passes to `notch-hook`.
 public enum HookEvent: String, Codable, Sendable, CaseIterable {
     case sessionStart = "SessionStart"
+    /// The user sent a prompt: the session starts working.
+    case userPromptSubmit = "UserPromptSubmit"
     case stop = "Stop"
     case notification = "Notification"
     case permissionRequest = "PermissionRequest"
     /// Installed for `AskUserQuestion` only.
     case preToolUse = "PreToolUse"
+    /// A tool finished, for every tool. It ends the request about that tool call, also one answered
+    /// in the terminal.
+    case postToolUse = "PostToolUse"
+    /// A tool failed, for every tool; it ends that call's request like `postToolUse`.
+    case postToolUseFailure = "PostToolUseFailure"
+    /// The session ended: it leaves the Agents screen.
+    case sessionEnd = "SessionEnd"
 
     /// Whether the hook waits for the plugin's decision. The other events are notices: the hook
     /// returns as soon as it has sent them.
@@ -35,10 +44,14 @@ public struct HookContext: Codable, Hashable, Sendable {
     public var terminal: TerminalLocation?
     /// `CLAUDE_PROJECT_DIR` from the hook's environment: the folder the session started in.
     public var projectDir: String?
+    /// The Claude Code process the hook runs for, when the helper found it. The session is over
+    /// once this process is gone.
+    public var claudePID: pid_t?
 
-    public init(terminal: TerminalLocation?, projectDir: String?) {
+    public init(terminal: TerminalLocation?, projectDir: String?, claudePID: pid_t? = nil) {
         self.terminal = terminal
         self.projectDir = projectDir
+        self.claudePID = claudePID
     }
 }
 

@@ -8,8 +8,9 @@ import SwiftUI
 /// requests. Command and file-change approvals are answered `accept`, `acceptForSession` or
 /// `decline`; questions are answered by question id. A request answered elsewhere
 /// (`serverRequest/resolved`), one the user hands back to the terminal and one that times out leave
-/// the notch unanswered, so the `codex` TUI keeps its own prompt. A finished turn glows with the
-/// project name, and from there the user jumps to the TUI's terminal.
+/// the notch unanswered, so the `codex` TUI keeps its own prompt. A finished or failed turn and a
+/// closed thread glow with the Codex mark and the project name, and from there the user jumps to the
+/// TUI's terminal.
 @MainActor
 final class CodexBridge {
     nonisolated static let allowButtonID = "allow"
@@ -34,6 +35,8 @@ final class CodexBridge {
     let screen: AgentsScreenModel
     private let context: NotchContext
     private let activator: any TerminalActivating
+    /// The marks alerts show; nil shows the agent's symbol.
+    private let logos: (any AgentLogoProviding)?
     /// The terminal of the `codex` TUI working in a folder, looked up when it is needed.
     private let terminal: @MainActor (String?) -> TerminalLocation?
     private let wait: @MainActor () -> Duration
@@ -42,6 +45,13 @@ final class CodexBridge {
     private let retryDelay: @MainActor (Int) -> Duration
     /// Thread folders by thread id, kept across connections.
     private(set) var threads: [String: String] = [:]
+    /// The terminal found when each thread joined, kept across connections like `threads`. Its own
+    /// TUI's terminal: a lookup by folder later may find another TUI in the same folder.
+    private var terminals: [String: TerminalLocation] = [:]
+    /// The threads that joined on this connection (started, or listed and resumed) and have not
+    /// closed. The Agents screen's list may drop a silent thread's row; this does not, so the
+    /// thread's end still alerts, once.
+    private var joined: Set<String> = []
 
     // One connection's state; `close()` clears it.
     private var send: (@MainActor (JSONValue) -> Void)?
@@ -62,6 +72,9 @@ final class CodexBridge {
     /// Server requests waiting for the user, by request id.
     private var pending: [JSONValue: (number: Int, task: Task<Void, Never>)] = [:]
     private var pendingCount = 0
+    /// The requests each thread waits on, the notch's and the TUI's alike, oldest first. A thread
+    /// works again once none of its requests is left.
+    private var waits: [(request: JSONValue, thread: String, state: AgentSessionState)] = []
     private var notices: [String: (id: Int, task: Task<Void, Never>)] = [:]
     private var noticeCount = 0
 
@@ -77,6 +90,7 @@ final class CodexBridge {
         activator: any TerminalActivating,
         screen: AgentsScreenModel = AgentsScreenModel(),
         terminal: @escaping @MainActor (String?) -> TerminalLocation?,
+        logos: (any AgentLogoProviding)? = nil,
         initializeTimeout: Duration = .seconds(10),
         wait: @escaping @MainActor () -> Duration = { .seconds(ApprovalWait.defaultSeconds) },
         retryDelay: @escaping @MainActor (Int) -> Duration = CodexSupervisor.backoff(attempt:)
@@ -85,6 +99,7 @@ final class CodexBridge {
         self.activator = activator
         self.screen = screen
         self.terminal = terminal
+        self.logos = logos
         self.wait = wait
         self.initializeTimeout = initializeTimeout
         self.retryDelay = retryDelay
@@ -134,11 +149,15 @@ final class CodexBridge {
         calls.removeAll()
         callCount = 0
         resumed.removeAll()
+        joined.removeAll()
+        waits.removeAll()
         fileChanges.removeAll()
         for request in pending.values {
             request.task.cancel()
         }
         pending.removeAll()
+        // Without a connection nothing tells how the sessions go on; the next one lists them again.
+        screen.sessions.removeAll(.codex)
     }
 
     /// Closes the connection's state, then tells the link why it should drop the connection.
@@ -228,6 +247,8 @@ final class CodexBridge {
             if let cwd = result["thread"]?["cwd"]?.string ?? result["cwd"]?.string {
                 threads[thread] = cwd
             }
+            // A thread in the middle of a turn is working; any other loaded thread waits for the user.
+            join(thread, result["thread"]?["status"]?["type"]?.string == "active" ? .working : .idle)
         }
     }
 
@@ -271,6 +292,7 @@ final class CodexBridge {
         case "thread/started":
             guard let thread = params["thread"], let id = thread["id"]?.string else { return nil }
             if let cwd = thread["cwd"]?.string { threads[id] = cwd }
+            join(id, .idle)
             resume(id)
         case "item/started" where params["item"]?["type"]?.string == "fileChange":
             if let item = params["item"], let id = item["id"]?.string {
@@ -286,11 +308,27 @@ final class CodexBridge {
             if let id = params["requestId"] {
                 pending.removeValue(forKey: id)?.task.cancel()
             }
+            // Answered elsewhere, in the TUI for one.
+            if let thread = params["threadId"]?.string {
+                endWait(params["requestId"], of: thread)
+            }
+        case "turn/started":
+            if let thread = params["threadId"]?.string { track(thread, .working) }
+        case "thread/closed":
+            guard let thread = params["threadId"]?.string else { return nil }
+            waits.removeAll { $0.thread == thread }
+            screen.sessions.remove(AgentSession.Key(agent: .codex, id: thread))
+            // One alert per thread that joined, whether or not the list still shows it. The TUI may
+            // be gone already; the alert takes the user to the terminal the thread joined in.
+            guard joined.remove(thread) != nil else { return nil }
+            return notify(thread, message: "Codex 세션이 끝났어요.", saved: terminals.removeValue(forKey: thread))
         case "turn/completed":
             guard let thread = params["threadId"]?.string else { return nil }
+            waits.removeAll { $0.thread == thread }
+            track(thread, .idle)
             switch params["turn"]?["status"]?.string {
-            case "completed": return notify(thread, message: "Codex가 작업을 마쳤어요.")
-            case "failed": return notify(thread, message: "Codex 작업이 오류로 멈췄어요.")
+            case "completed": return notify(thread, message: "Codex가 작업을 마쳤어요.", saved: terminals[thread])
+            case "failed": return notify(thread, message: "Codex 작업이 오류로 멈췄어요.", saved: terminals[thread])
             default: return nil
             }
         default:
@@ -310,6 +348,15 @@ final class CodexBridge {
         if let older = pending.removeValue(forKey: id) {
             older.task.cancel()
             context.log.error("codex app-server reused the request id \(Self.encode(id)); the older request was withdrawn")
+        }
+        // The session waits for the user whether or not the notch takes the request.
+        let thread = params["threadId"]?.string
+        if let thread {
+            switch method {
+            case "item/commandExecution/requestApproval", "item/fileChange/requestApproval": wait(on: id, thread, .awaitingApproval)
+            case "item/tool/requestUserInput": wait(on: id, thread, .awaitingAnswer)
+            default: break
+            }
         }
         let ask: @MainActor () async -> JSONValue?
         switch method {
@@ -340,6 +387,7 @@ final class CodexBridge {
             let current = !Task.isCancelled && self.connection == connection && self.pending[id]?.number == number
             if current, let result {
                 self.send?(.object(["id": id, "result": result]))
+                if let thread { self.endWait(id, of: thread) }
             }
             if self.pending[id]?.number == number {
                 self.pending[id] = nil
@@ -347,6 +395,20 @@ final class CodexBridge {
         }
         pending[id] = (number, task)
         return task
+    }
+
+    /// The thread waits on `request` until it is answered, in the notch or elsewhere.
+    private func wait(on request: JSONValue, _ thread: String, _ state: AgentSessionState) {
+        waits.removeAll { $0.request == request }
+        waits.append((request, thread, state))
+        track(thread, state)
+    }
+
+    /// `request` of `thread` was answered: the thread works again once none of its requests waits,
+    /// and shows the one still open otherwise.
+    private func endWait(_ request: JSONValue?, of thread: String) {
+        waits.removeAll { $0.request == request }
+        screen.sessions.answered(AgentSession.Key(agent: .codex, id: thread), waiting: waits.last { $0.thread == thread }?.state)
     }
 
     private func decideCommand(_ params: JSONValue) async -> String? {
@@ -470,23 +532,42 @@ final class CodexBridge {
 
     // MARK: Notices and the terminal
 
-    private func notify(_ thread: String, message: String) -> Task<Void, Never> {
+    /// A thread started, or was listed and resumed: it joins. Its terminal is looked up only when
+    /// none was saved for it: a rejoin after a reconnect keeps the one it joined in, since another TUI
+    /// may work in the same folder by now. Only here: the lookup walks the running processes.
+    private func join(_ thread: String, _ state: AgentSessionState) {
+        joined.insert(thread)
+        if terminals[thread] == nil, let found = terminal(threads[thread]) {
+            terminals[thread] = found
+        }
+        track(thread, state)
+    }
+
+    /// Moves the thread's row on the Agents screen; a row that left the list comes back with the
+    /// terminal the thread joined in.
+    private func track(_ thread: String, _ state: AgentSessionState) {
+        let folder = threads[thread].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0).lastPathComponent } ?? "Codex"
+        screen.sessions.update(AgentSession.Key(agent: .codex, id: thread), folder: folder, state: state, terminal: terminals[thread])
+    }
+
+    /// `saved` is the terminal the thread joined in; the folder is looked up only without one.
+    private func notify(_ thread: String, message: String, saved: TerminalLocation?) -> Task<Void, Never> {
         notices[thread]?.task.cancel()
         noticeCount += 1
         let id = noticeCount
-        let found = terminal(threads[thread])
+        let found = saved ?? terminal(threads[thread])
         let request = AttentionRequest(
             title: projectName(.object(["threadId": .string(thread)])),
             message: message,
             accent: Self.accent,
-            sourceIcon: found.flatMap(ClaudeBridge.appIcon),
+            sourceIcon: AgentKind.codex.alertIcon(logos),
             buttons: [AttentionButton(id: Self.jumpButtonID, title: found == nil ? "노치 열기" : "터미널로 이동", role: .primary)],
             timeout: ClaudeBridge.noticeTimeout
         )
         let task = Task { [context] in
             let response = await context.requestAttention(request)
             if case .answered(let answer) = response, answer.buttonID == Self.jumpButtonID {
-                self.jump(to: thread)
+                self.jump(to: thread, saved: saved)
             }
             if self.notices[thread]?.id == id {
                 self.notices[thread] = nil
@@ -496,9 +577,10 @@ final class CodexBridge {
         return task
     }
 
-    /// Brings the thread's TUI terminal forward, or opens the notch when it is unknown or gone.
-    private func jump(to thread: String) {
-        if let found = terminal(threads[thread]), activator.activate(found) {
+    /// Brings the thread's TUI terminal forward, or opens the notch when it is unknown or gone. The
+    /// terminal it joined in comes first: another TUI may work in the same folder now.
+    private func jump(to thread: String, saved: TerminalLocation?) {
+        if let found = saved ?? terminal(threads[thread]), activator.activate(found) {
             return
         }
         context.expand()

@@ -11,17 +11,20 @@ public struct HookRunner: Sendable {
     public var environment: [String: String]
     public var readInput: @Sendable () -> Data
     public var findTerminal: @Sendable () -> TerminalLocation?
+    public var findClaudeProcess: @Sendable () -> pid_t?
 
     public init(
         socketPath: String,
         environment: [String: String],
         readInput: @escaping @Sendable () -> Data,
-        findTerminal: @escaping @Sendable () -> TerminalLocation?
+        findTerminal: @escaping @Sendable () -> TerminalLocation?,
+        findClaudeProcess: @escaping @Sendable () -> pid_t? = { nil }
     ) {
         self.socketPath = socketPath
         self.environment = environment
         self.readInput = readInput
         self.findTerminal = findTerminal
+        self.findClaudeProcess = findClaudeProcess
     }
 
     /// The bytes to print on stdout for `arguments` (`[<event>]`); always exit 0.
@@ -36,7 +39,11 @@ public struct HookRunner: Sendable {
         let message = HookMessage(
             event: event,
             payload: payload,
-            context: HookContext(terminal: findTerminal(), projectDir: environment["CLAUDE_PROJECT_DIR"])
+            context: HookContext(
+                terminal: findTerminal(),
+                projectDir: environment["CLAUDE_PROJECT_DIR"],
+                claudePID: findClaudeProcess()
+            )
         )
         guard let line = try? HookWire.line(message) else { return Data() }
         guard HookSocket.write(line, to: fd), event.awaitsDecision else { return Data() }

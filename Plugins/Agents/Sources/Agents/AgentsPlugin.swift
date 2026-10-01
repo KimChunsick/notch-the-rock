@@ -4,8 +4,8 @@ import SwiftUI
 
 /// Brings Claude Code to the notch. Claude Code's hooks run the bundled `notch-hook` helper, which
 /// forwards each hook to this plugin over a Unix socket in a folder only the user can enter. When a
-/// session finishes its turn or waits for input, the notch glows with the project name and the
-/// message, and from there the user jumps to the session's terminal. Permission requests are allowed
+/// session waits for input, finishes its turn or ends, the notch glows with the agent's mark, the
+/// project name and the message, and from there the user jumps to the session's terminal. Permission requests are allowed
 /// or denied, and AskUserQuestion answered, in the notch; "터미널에서 답하기" or the end of the wait
 /// hands them back to the terminal. An operation too long for the notch, and typed answers to several
 /// questions, are shown in full on the plugin's screen and answered there. The settings page
@@ -27,7 +27,11 @@ public final class AgentsPlugin: NotchPlugin {
     let codex: CodexModel
     private let context: NotchContext
     private let socketPath: String
+    private let activator: any TerminalActivating
+    private let logos: InstalledAppLogos
     private var server: HookServer?
+    /// Drops ended sessions from the list while the plugin is active.
+    private var pruning: Task<Void, Never>?
 
     public convenience init(context: NotchContext) {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -55,8 +59,11 @@ public final class AgentsPlugin: NotchPlugin {
     ) {
         self.context = context
         self.socketPath = socketPath
+        self.activator = activator
+        let logos = InstalledAppLogos()
+        self.logos = logos
         let defaults = context.storage.defaults
-        bridge = ClaudeBridge(context: context, activator: activator) {
+        bridge = ClaudeBridge(context: context, activator: activator, logos: logos) {
             .seconds(ApprovalWait.seconds(in: defaults))
         }
         hooks = ClaudeHooksModel(installer: HookInstaller(
@@ -64,7 +71,7 @@ public final class AgentsPlugin: NotchPlugin {
             recordURL: context.storage.directory.appendingPathComponent("claude-install.json"),
             entries: HookEntry.claude(helper: context.bundleURL.appendingPathComponent("Contents/Helpers/notch-hook"))
         ))
-        let codexBridge = CodexBridge(context: context, activator: activator, screen: bridge.screen, terminal: codexTerminal) {
+        let codexBridge = CodexBridge(context: context, activator: activator, screen: bridge.screen, terminal: codexTerminal, logos: logos) {
             .seconds(ApprovalWait.seconds(in: defaults))
         }
         let link = CodexLink(
@@ -82,6 +89,14 @@ public final class AgentsPlugin: NotchPlugin {
     }
 
     public func activate() {
+        if pruning == nil {
+            pruning = Task { [sessions = bridge.screen.sessions] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: AgentSessionList.pruneInterval)
+                    sessions.prune()
+                }
+            }
+        }
         guard server == nil else { return }
         let bridge = bridge
         let log = context.log
@@ -105,15 +120,26 @@ public final class AgentsPlugin: NotchPlugin {
     public func deactivate() {
         server?.stop()
         server = nil
+        pruning?.cancel()
+        pruning = nil
         bridge.cancelAll()
         codexLink.stop()
         codexBridge.cancelAll()
+        // Events stop while the plugin is off; each session returns with its next one.
+        bridge.screen.sessions.removeAll()
     }
 
-    /// Requests too long for the notch, shown in full where they are answered.
+    /// Brings the terminal of a session on the Agents screen forward; a session without a known
+    /// terminal stays where it is.
+    func open(_ session: AgentSession) {
+        guard let terminal = session.terminal, !activator.activate(terminal) else { return }
+        context.log.error("The terminal of \(session.agent.name) session \(session.folder) is not running.")
+    }
+
+    /// Requests too long for the notch, shown in full where they are answered, and the open sessions.
     public var expandedTab: PluginTab? {
-        PluginTab(title: Self.manifest.name, symbol: Self.manifest.symbol) { [screen = bridge.screen] in
-            AgentsScreen(model: screen)
+        PluginTab(title: Self.manifest.name, symbol: Self.manifest.symbol) { [screen = bridge.screen, logos] in
+            AgentsScreen(model: screen, logos: logos) { [weak self] in self?.open($0) }
         }
     }
 

@@ -7,11 +7,40 @@ import SwiftUI
 struct SessionRecord: Hashable {
     var terminal: TerminalLocation?
     var cwd: String?
+    /// The session finished its turn and said so; Claude Code's idle reminder (`idle_prompt`) in the
+    /// same pause adds no alert. A prompt, a request or a new session starts the next pause.
+    var alertedPause = false
+    /// The session's requests that wait for the user, oldest first.
+    var waits: [OpenWait] = []
+    /// Requests answered while the notch held them whose call is known only by tool name and input,
+    /// oldest first. Each stays until its call ends, so that end never ends an identical request
+    /// that still waits; the session's stop, next prompt or end clears what is left (a denied call
+    /// never ends).
+    var answered: [OpenWait] = []
+}
+
+/// A request of a Claude Code session that waits for the user: held in the notch, or handed to the
+/// terminal (released, or its wait ran out) and not answered there yet.
+struct OpenWait: Hashable {
+    let id: Int
+    let state: AgentSessionState
+    /// The tool call the request is about. PreToolUse names it by `tool_use_id`; PermissionRequest
+    /// carries no id, so its call is known by tool name and input.
+    let toolUseID: String?
+    let tool: String?
+    let input: JSONValue?
+    var released = false
+
+    /// Whether the call a PostToolUse or PostToolUseFailure `payload` ends is this request's.
+    func isCall(_ payload: JSONValue) -> Bool {
+        if let toolUseID, let ended = payload["tool_use_id"]?.string { return toolUseID == ended }
+        return tool == payload["tool_name"]?.string && input == payload["tool_input"]
+    }
 }
 
 /// Turns Claude Code hook messages into notch requests: records where each session runs, makes the
-/// notch glow when a session finishes its turn or waits for input, and takes the user to the
-/// session's terminal from there. Permission requests and AskUserQuestion are answered in the notch
+/// notch glow with the Claude mark when a session waits for input, finishes its turn or ends, and
+/// takes the user to the session's terminal from there. Permission requests and AskUserQuestion are answered in the notch
 /// within the configured wait, or handed back to the terminal.
 @MainActor
 final class ClaudeBridge {
@@ -41,6 +70,8 @@ final class ClaudeBridge {
     let screen = AgentsScreenModel()
     private let context: NotchContext
     private let activator: any TerminalActivating
+    /// The marks alerts show; nil shows the agent's symbol.
+    private let logos: (any AgentLogoProviding)?
     /// How long the notch waits for an answer before the request goes back to the terminal.
     private let wait: @MainActor () -> Duration
     private(set) var sessions: [String: SessionRecord] = [:]
@@ -50,10 +81,17 @@ final class ClaudeBridge {
     /// Requests whose hook waits for a decision, by number.
     private var decisions: [Int: Task<HookDecision?, Never>] = [:]
     private var decisionCount = 0
+    private var waitCount = 0
 
-    init(context: NotchContext, activator: any TerminalActivating, wait: @escaping @MainActor () -> Duration = { .seconds(ApprovalWait.defaultSeconds) }) {
+    init(
+        context: NotchContext,
+        activator: any TerminalActivating,
+        logos: (any AgentLogoProviding)? = nil,
+        wait: @escaping @MainActor () -> Duration = { .seconds(ApprovalWait.defaultSeconds) }
+    ) {
         self.context = context
         self.activator = activator
+        self.logos = logos
         self.wait = wait
     }
 
@@ -80,15 +118,32 @@ final class ClaudeBridge {
     func decide(_ message: HookMessage) async -> HookDecision? {
         let sessionID = message.payload["session_id"]?.string ?? ""
         record(sessionID, message)
+        let wait = track(sessionID, message)
         let title = projectName(sessionID, message)
+        let decision: HookDecision?
         switch message.event {
         case .permissionRequest:
-            return await decidePermission(message, title: title)
+            decision = await decidePermission(message, title: title)
         case .preToolUse:
-            return await answerQuestions(message, title: title)
-        case .sessionStart, .stop, .notification:
-            return nil
+            decision = await answerQuestions(message, title: title)
+        case .sessionStart, .userPromptSubmit, .stop, .notification, .sessionEnd, .postToolUse, .postToolUseFailure:
+            decision = nil
         }
+        guard let wait else { return decision }
+        if decision != nil || Task.isCancelled {
+            // Answered in the notch, or in the terminal while the notch held it (the hook went away
+            // and cancelled this task).
+            endWait(wait, of: sessionID)
+        } else if let index = sessions[sessionID]?.waits.firstIndex(where: { $0.id == wait }) {
+            // Released or timed out, the terminal asks now, so the session still waits. Claude Code
+            // fires no hook when the user answers there, so the time between that answer and the
+            // tool's end cannot be observed: the wait ends with the tool's own PostToolUse or
+            // PostToolUseFailure, or with the session's next request, prompt, start, stop or end, and
+            // until then the row keeps its waiting state. A Notification answers nothing, so it keeps
+            // the wait.
+            sessions[sessionID]?.waits[index].released = true
+        }
+        return decision
     }
 
     /// Handles one hook message. Returns the task that shows its notice, when it has one.
@@ -97,16 +152,26 @@ final class ClaudeBridge {
         let payload = message.payload
         let sessionID = payload["session_id"]?.string ?? ""
         record(sessionID, message)
+        track(sessionID, message)
         let title = projectName(sessionID, message)
         switch message.event {
-        case .sessionStart:
+        case .sessionStart, .userPromptSubmit, .postToolUse, .postToolUseFailure:
             return nil
+        case .sessionEnd:
+            // Every end alerts, /clear's too: it ends this conversation, and the next one in the same
+            // terminal is a new session.
+            return notify(sessionID, title: title, message: "Claude Code 세션이 끝났어요.")
         case .stop:
+            sessions[sessionID]?.alertedPause = true
             return notify(sessionID, title: title, message: "Claude Code가 작업을 마쳤어요.")
         case .notification:
-            if let type = payload["notification_type"]?.string, !Self.waitingNotificationTypes.contains(type) {
+            let type = payload["notification_type"]?.string
+            if let type, !Self.waitingNotificationTypes.contains(type) {
                 return nil
             }
+            // The finished turn's alert already told the user this session waits. The other waiting
+            // types come within a turn, so they always alert.
+            if type == "idle_prompt", sessions[sessionID]?.alertedPause == true { return nil }
             return notify(sessionID, title: title, message: payload["message"]?.string ?? "Claude Code가 입력을 기다려요.")
         case .permissionRequest, .preToolUse:
             return nil
@@ -243,7 +308,7 @@ final class ClaudeBridge {
             title: title,
             message: message,
             accent: Self.accent,
-            sourceIcon: terminal.flatMap(Self.appIcon),
+            sourceIcon: AgentKind.claude.alertIcon(logos),
             buttons: [AttentionButton(id: Self.jumpButtonID, title: terminal == nil ? "노치 열기" : "터미널로 이동", role: .primary)],
             timeout: Self.noticeTimeout
         )
@@ -260,7 +325,116 @@ final class ClaudeBridge {
         if let cwd = message.payload["cwd"]?.string {
             record.cwd = cwd
         }
+        switch message.event {
+        case .stop, .notification:
+            break
+        case .sessionStart, .userPromptSubmit, .permissionRequest, .preToolUse, .postToolUse, .postToolUseFailure, .sessionEnd:
+            record.alertedPause = false
+        }
         sessions[sessionID] = record
+    }
+
+    /// Moves the session's row on the Agents screen. Returns the wait a request opened.
+    @discardableResult
+    private func track(_ sessionID: String, _ message: HookMessage) -> Int? {
+        guard !sessionID.isEmpty else { return nil }
+        let key = Key(agent: .claude, id: sessionID)
+        let state: AgentSessionState?
+        var opened: Int?
+        switch message.event {
+        case .sessionEnd:
+            sessions[sessionID]?.waits.removeAll()
+            sessions[sessionID]?.answered.removeAll()
+            screen.sessions.remove(key)
+            return nil
+        case .sessionStart:
+            endReleasedWaits(of: sessionID)
+            state = .idle
+        case .stop:
+            endReleasedWaits(of: sessionID)
+            sessions[sessionID]?.answered.removeAll()
+            state = .idle
+        case .userPromptSubmit:
+            endReleasedWaits(of: sessionID)
+            sessions[sessionID]?.answered.removeAll()
+            state = .working
+        case .notification:
+            // A notice (a permission prompt, a question, the idle reminder) answers no request, so
+            // every wait stays.
+            state = Self.waitingState(payload: message.payload)
+        case .postToolUse, .postToolUseFailure:
+            state = toolEnded(sessionID, message.payload)
+        case .permissionRequest, .preToolUse:
+            endReleasedWaits(of: sessionID)
+            // AskUserQuestion waits through its PreToolUse hook.
+            if message.event == .preToolUse {
+                state = .awaitingAnswer
+            } else {
+                state = message.payload["tool_name"]?.string == "AskUserQuestion" ? nil : .awaitingApproval
+            }
+            opened = state.map { openWait(sessionID, $0, message.payload) }
+        }
+        screen.sessions.update(
+            key, folder: projectName(sessionID, message), state: state,
+            terminal: sessions[sessionID]?.terminal, pid: message.context.claudePID
+        )
+        return opened
+    }
+
+    private func openWait(_ sessionID: String, _ state: AgentSessionState, _ payload: JSONValue) -> Int {
+        waitCount += 1
+        sessions[sessionID]?.waits.append(OpenWait(
+            id: waitCount, state: state, toolUseID: payload["tool_use_id"]?.string,
+            tool: payload["tool_name"]?.string, input: payload["tool_input"]
+        ))
+        return waitCount
+    }
+
+    /// The request `id` of the session was answered. A call known only by tool name and input stays
+    /// answered until it ends. The session works again once no wait is left; otherwise it shows the
+    /// wait still open.
+    private func endWait(_ id: Int, of sessionID: String) {
+        guard let index = sessions[sessionID]?.waits.firstIndex(where: { $0.id == id }),
+              let wait = sessions[sessionID]?.waits.remove(at: index) else { return }
+        if wait.toolUseID == nil {
+            sessions[sessionID]?.answered.append(wait)
+        }
+        screen.sessions.answered(Key(agent: .claude, id: sessionID), waiting: sessions[sessionID]?.waits.last?.state)
+    }
+
+    /// The session's next request, prompt, start or stop means the terminal no longer asks what was
+    /// handed to it. Requests still held in the notch stay.
+    private func endReleasedWaits(of sessionID: String) {
+        sessions[sessionID]?.waits.removeAll(where: \.released)
+    }
+
+    /// A tool call of the session ended, done or failed: the request about that call ends. A call
+    /// already answered takes the end first, so an end that may belong to it or to an identical
+    /// request still waiting keeps the session waiting. The session works again once no wait is left;
+    /// another call's end leaves a waiting session as it is.
+    private func toolEnded(_ sessionID: String, _ payload: JSONValue) -> AgentSessionState? {
+        if let index = sessions[sessionID]?.answered.firstIndex(where: { $0.isCall(payload) }) {
+            sessions[sessionID]?.answered.remove(at: index)
+            return sessions[sessionID]?.waits.isEmpty == false ? nil : .working
+        }
+        guard var waits = sessions[sessionID]?.waits, !waits.isEmpty else { return .working }
+        guard let index = waits.firstIndex(where: { $0.isCall(payload) }) else { return nil }
+        waits.remove(at: index)
+        sessions[sessionID]?.waits = waits
+        return waits.last?.state ?? .working
+    }
+
+    private typealias Key = AgentSession.Key
+
+    /// The state a Notification puts the session in: a question it asks (an MCP server's form, a
+    /// subagent that needs input) or Claude Code's idle reminder. Any other notice, or one without a
+    /// type, keeps the state.
+    private static func waitingState(payload: JSONValue) -> AgentSessionState? {
+        switch payload["notification_type"]?.string {
+        case "elicitation_dialog", "agent_needs_input": .awaitingAnswer
+        case "idle_prompt": .idle
+        default: nil
+        }
     }
 
     /// The last folder name of the session's working folder, or of the project folder.
