@@ -337,8 +337,7 @@ private struct VolumeStandIn: View {
             Toggle(isOn: .constant(false)) { Image(systemName: "speaker.wave.1.fill") }
                 .toggleStyle(.button)
                 .frame(width: 28)
-            Slider(value: .constant(0.06), in: 0...1) { Text("볼륨") }
-                .labelsHidden()
+            SliderStandIn(value: 0.06)
                 .frame(minWidth: 200, idealWidth: 200, maxWidth: .infinity)
             Text("6%")
                 .monospacedDigit()
@@ -352,13 +351,30 @@ private struct BrightnessStandIn: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "sun.max.fill")
-            Slider(value: .constant(0.5), in: 0...1) { Text("밝기") }
-                .labelsHidden()
+            SliderStandIn(value: 0.5)
                 .frame(minWidth: 200, idealWidth: 200, maxWidth: .infinity)
             Text("50%")
                 .monospacedDigit()
                 .frame(width: 40, alignment: .trailing)
         }
+    }
+}
+
+/// The volume and brightness screens' slider: a 6 pt track filled up to a 14 pt knob, 16 pt high.
+private struct SliderStandIn: View {
+    let value: Double
+
+    var body: some View {
+        GeometryReader { proxy in
+            let length = max(proxy.size.width - 14, 0)
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.18)).frame(width: length, height: 6).offset(x: 7)
+                Capsule().fill(.white).frame(width: length * value, height: 6).offset(x: 7)
+                Circle().fill(.white).frame(width: 14, height: 14).offset(x: length * value)
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .leading)
+        }
+        .frame(height: 16)
     }
 }
 

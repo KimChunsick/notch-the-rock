@@ -84,19 +84,45 @@ struct HelloGreetingFrame: View {
     }
 }
 
-/// The handwritten word in one frame: the written part of the stroke in a soft gradient, a blurred
-/// glow beneath it and a bright pen tip while writing. It is the artwork's own size and shrinks to
-/// fit when offered less.
-struct HelloLetteringView: View {
-    let artwork: HelloArtwork
-    let frame: HelloTimeline.Frame
+/// The greeting's ink, the same for both hands: `path` stroked `width` wide in a soft gradient from
+/// sky blue through lavender and pink to peach, leading to trailing across the whole frame it is
+/// given, with a bright core and a blurred glow beneath it as strong as `glow`.
+struct GreetingInk: View {
+    let path: Path
+    let width: CGFloat
+    let glow: Double
 
-    private static let ink = Gradient(colors: [
+    private static let gradient = Gradient(colors: [
         Color(red: 0.47, green: 0.82, blue: 1.00),
         Color(red: 0.64, green: 0.62, blue: 1.00),
         Color(red: 0.98, green: 0.56, blue: 0.82),
         Color(red: 1.00, green: 0.77, blue: 0.52),
     ])
+
+    var body: some View {
+        let ink = LinearGradient(gradient: Self.gradient, startPoint: .leading, endPoint: .trailing)
+        ZStack {
+            path.stroke(ink, style: Self.pen(width * 3.2))
+                .blur(radius: width * 2.4)
+                .opacity(0.55 * glow)
+            path.stroke(ink, style: Self.pen(width * 1.7))
+                .blur(radius: width * 0.7)
+                .opacity(0.85 * glow)
+            path.stroke(ink, style: Self.pen(width))
+            path.stroke(Color.white.opacity(0.45), style: Self.pen(width * 0.3))
+        }
+    }
+
+    private static func pen(_ width: CGFloat) -> StrokeStyle {
+        StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round)
+    }
+}
+
+/// The handwritten word in one frame: the written part of the stroke in the greeting's ink and a
+/// bright pen tip while writing. It is the artwork's own size and shrinks to fit when offered less.
+struct HelloLetteringView: View {
+    let artwork: HelloArtwork
+    let frame: HelloTimeline.Frame
 
     /// Fraction of the stroke written once `writing` of the writing time has gone: half linear, half
     /// smoothstep, so the pen starts and lands gently without rushing the middle.
@@ -109,17 +135,8 @@ struct HelloLetteringView: View {
             let bounds = CGRect(origin: .zero, size: proxy.size)
             let width = artwork.penWidth * artwork.scale(toFit: bounds)
             let drawn = Self.drawn(at: frame.writing)
-            let written = artwork.trim(from: 0, to: drawn)
-            let gradient = LinearGradient(gradient: Self.ink, startPoint: .leading, endPoint: .trailing)
             ZStack {
-                written.stroke(gradient, style: Self.pen(width * 3.2))
-                    .blur(radius: width * 2.4)
-                    .opacity(0.55 * frame.glow)
-                written.stroke(gradient, style: Self.pen(width * 1.7))
-                    .blur(radius: width * 0.7)
-                    .opacity(0.85 * frame.glow)
-                written.stroke(gradient, style: Self.pen(width))
-                written.stroke(Color.white.opacity(0.45), style: Self.pen(width * 0.3))
+                GreetingInk(path: artwork.trim(from: 0, to: drawn).path(in: bounds), width: width, glow: frame.glow)
                 if drawn > 0, drawn < 1,
                    let tip = artwork.path(in: bounds).trimmedPath(from: 0, to: drawn).currentPoint {
                     Circle()
@@ -136,14 +153,11 @@ struct HelloLetteringView: View {
             idealHeight: artwork.size.height, maxHeight: artwork.size.height
         )
     }
-
-    private static func pen(_ width: CGFloat) -> StrokeStyle {
-        StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round)
-    }
 }
 
-/// A Korean phrase in one frame: the strokes written so far in thin white ink with round ends, a
-/// faint white glow under them so they read on black, and a soft pen tip while the pen is down.
+/// A Korean phrase in one frame: the strokes written so far in the greeting's ink with round ends,
+/// its gradient running across the whole phrase (both lines when it wraps), and a soft pen tip
+/// while the pen is down.
 struct HangulHandwritingView: View {
     let handwriting: HangulHandwriting
     let frame: HelloTimeline.Frame
@@ -153,10 +167,7 @@ struct HangulHandwritingView: View {
         let ink = handwriting.ink(for: pen)
         let width = HangulHandwriting.penWidth
         ZStack {
-            ink.stroke(Color.white, style: Self.style(width * 1.8))
-                .blur(radius: width * 0.9)
-                .opacity(0.16 * frame.glow)
-            ink.stroke(Color.white, style: Self.style(width))
+            GreetingInk(path: ink, width: width, glow: frame.glow)
             if frame.writing > 0, frame.writing < 1, let tip = handwriting.tip(for: pen) {
                 Circle()
                     .fill(Color.white)
@@ -166,9 +177,5 @@ struct HangulHandwritingView: View {
             }
         }
         .frame(width: handwriting.size.width, height: handwriting.size.height)
-    }
-
-    private static func style(_ width: CGFloat) -> StrokeStyle {
-        StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round)
     }
 }

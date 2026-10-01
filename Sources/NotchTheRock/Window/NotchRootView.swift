@@ -403,7 +403,7 @@ private struct HUDContent: View {
         ActivityWings(notch: notch, ink: ink, maxWing: NotchLayout.maxHUDWing) {
             HUDSymbol(name: hud.symbol)
             if let value = hud.value {
-                HUDBar(value: value, colors: hud.symbol.hasPrefix("sun.") ? HUDBar.warm : HUDBar.cool)
+                HUDBar(value: value, colors: HUDBar.colors(for: hud.symbol))
             }
         }
         .accessibilityElement(children: .ignore)
@@ -429,10 +429,22 @@ private struct HUDSymbol: View {
 private struct HUDBar: View {
     static let length: CGFloat = 80
     static let thickness: CGFloat = 6
-    /// Brightness: warm beige to gold.
+    /// Brightness: warm beige to gold. The brightness screen's slider fills with the same gradient
+    /// (`BrightnessSlider.colors` in Plugins/Brightness/Sources/Brightness/BrightnessView.swift).
     static let warm = [Color(red: 0.95, green: 0.87, blue: 0.72), Color(red: 0.97, green: 0.73, blue: 0.28)]
-    /// Everything else (volume): cool white to light grey.
-    static let cool = [Color(red: 0.98, green: 0.99, blue: 1), Color(red: 0.8, green: 0.82, blue: 0.86)]
+    /// Volume: pale ice blue to a calm blue. The volume screen's slider fills with the same gradient
+    /// (`VolumeSlider.colors` in Plugins/Volume/Sources/Volume/VolumeView.swift).
+    static let volume = [Color(red: 0.74, green: 0.87, blue: 1), Color(red: 0.36, green: 0.64, blue: 1)]
+    /// Any other plugin's HUD: cool white to light grey.
+    static let neutral = [Color(red: 0.98, green: 0.99, blue: 1), Color(red: 0.8, green: 0.82, blue: 0.86)]
+
+    /// The fill of a HUD by its symbol's family, so a refused change's badged sun or speaker keeps
+    /// the colour of its plugin.
+    static func colors(for symbol: String) -> [Color] {
+        if symbol.hasPrefix("sun.") { return warm }
+        if symbol.hasPrefix("speaker.") { return volume }
+        return neutral
+    }
 
     let value: Double
     let colors: [Color]
