@@ -8,8 +8,9 @@ import Testing
 @testable import Clipboard
 
 /// A keychain in memory that records, for every call, whether it ran on the main thread. Accounts in
-/// `needsAccess` fail like an item macOS would ask the user about. While `isHeld` is on, every call
-/// waits, like a keychain call waiting on the security daemon.
+/// `needsAccess` fail like an item macOS would ask the user about, and saves under the accounts in
+/// `failingSets` fail as given there. While `isHeld` is on, every call waits, like a keychain call
+/// waiting on the security daemon.
 ///
 /// `NotchKit` keeps its temporary-keychain switch internal, so this package cannot point a
 /// `PluginStorage` at a throwaway keychain file; the SDK tests cover `PluginStorage` against one.
@@ -19,9 +20,18 @@ final class FakeKeychain: HistoryKeychain {
         var access: KeychainAccess?
     }
 
+    /// How a save under an account in `failingSets` fails.
+    enum SetFailure {
+        /// It throws and stores nothing, like a locked keychain.
+        case refused
+        /// It stores the item and then throws, like a process that exits right after the save.
+        case afterStoring
+    }
+
     private struct State {
         var items: [String: Item] = [:]
         var needsAccess: Set<String> = []
+        var failingSets: [String: SetFailure] = [:]
         var calls: [(name: String, onMain: Bool)] = []
         var isHeld = false
     }
@@ -38,6 +48,11 @@ final class FakeKeychain: HistoryKeychain {
         set { state.withLock { $0.needsAccess = newValue } }
     }
 
+    var failingSets: [String: SetFailure] {
+        get { state.withLock { $0.failingSets } }
+        set { state.withLock { $0.failingSets = newValue } }
+    }
+
     var isHeld: Bool {
         get { state.withLock { $0.isHeld } }
         set { state.withLock { $0.isHeld = newValue } }
@@ -50,7 +65,11 @@ final class FakeKeychain: HistoryKeychain {
     }
 
     func setKeychainData(_ data: Data, for account: String, access: KeychainAccess) throws(KeychainError) {
-        try call("set \(account)", account) { $0.items[account] = Item(data: data, access: access) }
+        let failure = failingSets[account]
+        try call("set \(account)", account) { state in
+            if failure != .refused { state.items[account] = Item(data: data, access: access) }
+        }
+        if failure != nil { throw KeychainError(status: errSecInteractionNotAllowed) }
     }
 
     func deleteKeychainData(for account: String) throws(KeychainError) {
@@ -163,6 +182,90 @@ private func writeHistory(in directory: URL, key: SymmetricKey, text: String) {
     #expect(keychain.items[HistoryKey.account]?.data == Data([1, 2, 3]))
 }
 
+/// The keychain of a history sealed with an old key that cannot be read without asking.
+@MainActor
+private func keychainWithOldKeyThatNeedsAccess(over directory: URL) -> FakeKeychain {
+    writeHistory(in: directory, key: makeKey(), text: "sealed with the old key")
+    let keychain = FakeKeychain()
+    keychain.items[HistoryKey.legacyAccount] = FakeKeychain.Item(data: bytes(of: makeKey()), access: nil)
+    keychain.needsAccess = [HistoryKey.legacyAccount]
+    return keychain
+}
+
+/// After an interrupted move to a new key: the next open deletes the old history and returns a
+/// store that keeps new copies, and nothing it leaves behind deletes them on a later open.
+@MainActor
+private func expectOpenFinishesTheNewHistory(in directory: URL, keychain: FakeKeychain) throws {
+    let opened = try ClipboardStore.open(in: directory, keychain: keychain)
+    #expect(opened.origin == .stored)
+    #expect(try files(in: directory).isEmpty)
+
+    let history = ClipboardHistory(logError: { _ in })
+    history.open(opened.store)
+    #expect(!history.isStoreUnreadable)
+    history.record(.text("copied after the new key"))
+    history.flush()
+
+    let reopened = try ClipboardStore.open(in: directory, keychain: keychain)
+    #expect(makeHistory(directory: directory, key: reopened.key).items.map(\.content) == [.text("copied after the new key")])
+}
+
+/// The process stops right after the new key is saved, before the old history is deleted: the
+/// next open deletes it and new copies are saved again.
+@MainActor
+@Test func R09__a_new_key_saved_before_an_interruption_finishes_the_new_history_next_time() throws {
+    let directory = try makeDirectory()
+    let keychain = keychainWithOldKeyThatNeedsAccess(over: directory)
+    keychain.failingSets = [HistoryKey.account: .afterStoring]
+
+    #expect(throws: KeychainError.self) { try ClipboardStore.open(in: directory, keychain: keychain) }
+    #expect(keychain.items[HistoryKey.account] != nil)
+    keychain.failingSets = [:]
+
+    try expectOpenFinishesTheNewHistory(in: directory, keychain: keychain)
+}
+
+/// Deleting the old history fails after the new key is saved: the next open deletes it once the
+/// disk allows it, and new copies are saved again.
+@MainActor
+@Test func R09__an_old_history_that_could_not_be_deleted_is_deleted_next_time() throws {
+    let directory = try makeDirectory()
+    let keychain = keychainWithOldKeyThatNeedsAccess(over: directory)
+    let list = directory.appendingPathComponent(ClipboardStore.listFileName).path
+    try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: list)
+    defer { try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: list) }
+
+    #expect(throws: (any Error).self) { try ClipboardStore.open(in: directory, keychain: keychain) }
+    #expect(keychain.items[HistoryKey.account] != nil)
+    try FileManager.default.setAttributes([.immutable: false], ofItemAtPath: list)
+
+    try expectOpenFinishesTheNewHistory(in: directory, keychain: keychain)
+}
+
+/// A new key that could not be saved leaves the history in place when the old key can be read
+/// next time: that key moves and its history stays, now and on later opens.
+@MainActor
+@Test func R09__a_history_whose_old_key_becomes_readable_is_kept() throws {
+    let directory = try makeDirectory()
+    let key = makeKey()
+    writeHistory(in: directory, key: key, text: "kept")
+    let keychain = FakeKeychain()
+    keychain.items[HistoryKey.legacyAccount] = FakeKeychain.Item(data: bytes(of: key), access: nil)
+    keychain.needsAccess = [HistoryKey.legacyAccount]
+    keychain.failingSets = [HistoryKey.account: .refused]
+
+    #expect(throws: KeychainError.self) { try ClipboardStore.open(in: directory, keychain: keychain) }
+    #expect(keychain.items[HistoryKey.account] == nil)
+    keychain.needsAccess = []
+    keychain.failingSets = [:]
+
+    let moved = try ClipboardStore.open(in: directory, keychain: keychain)
+    #expect(moved.origin == .movedFromOldAccount)
+    #expect(makeHistory(directory: directory, key: moved.key).items.map(\.content) == [.text("kept")])
+    let again = try ClipboardStore.open(in: directory, keychain: keychain)
+    #expect(makeHistory(directory: directory, key: again.key).items.map(\.content) == [.text("kept")])
+}
+
 @MainActor
 private final class LogHost: NotchHost {
     var logs: [(LogLevel, String)] = []
@@ -178,6 +281,18 @@ private final class LogHost: NotchHost {
     func log(_ level: LogLevel, _ message: String, from pluginID: String) { logs.append((level, message)) }
 }
 
+/// The plugin with its files in `directory`, a fake keychain and a private pasteboard.
+@MainActor
+private func makePlugin(directory: URL, keychain: FakeKeychain, pasteboard: NSPasteboard, host: LogHost = LogHost()) throws -> ClipboardPlugin {
+    let id = ClipboardPlugin.manifest.id
+    let storage = try PluginStorage(directory: directory, defaultsSuiteName: "clipboard-tests.\(id)", keychainService: "clipboard-tests.\(id)")
+    return ClipboardPlugin(
+        context: NotchContext(pluginID: id, bundleURL: URL(fileURLWithPath: "/nonexistent"), host: host, storage: storage),
+        keychain: keychain,
+        pasteboard: pasteboard
+    )
+}
+
 /// `activate()` returns at once and the history stays empty while the keychain call waits; every
 /// keychain call runs off the main thread. A new history that replaces an unreadable one is logged
 /// at info level, and copies are recorded once the history is open.
@@ -190,15 +305,9 @@ private final class LogHost: NotchHost {
     keychain.needsAccess = [HistoryKey.legacyAccount]
     keychain.isHeld = true
     let host = LogHost()
-    let id = ClipboardPlugin.manifest.id
-    let storage = try PluginStorage(directory: directory, defaultsSuiteName: "clipboard-tests.\(id)", keychainService: "clipboard-tests.\(id)")
     let pasteboard = makePasteboard()
     defer { pasteboard.releaseGlobally() }
-    let plugin = ClipboardPlugin(
-        context: NotchContext(pluginID: id, bundleURL: URL(fileURLWithPath: "/nonexistent"), host: host, storage: storage),
-        keychain: keychain,
-        pasteboard: pasteboard
-    )
+    let plugin = try makePlugin(directory: directory, keychain: keychain, pasteboard: pasteboard, host: host)
 
     plugin.activate()
     #expect(plugin.history.items.isEmpty)
@@ -217,4 +326,56 @@ private final class LogHost: NotchHost {
     #expect(plugin.history.items.map(\.content) == [.text("copied after opening")])
     let key = SymmetricKey(data: try #require(keychain.items[HistoryKey.account]).data)
     #expect(makeHistory(directory: directory, key: key).items.map(\.content) == [.text("copied after opening")])
+}
+
+/// Copies made while the key loads are kept and recorded once the history opens, oldest first, by
+/// the same rules as any copy: a repeat moves the stored entry to the top. Then they are saved.
+@MainActor
+@Test func R09__copies_made_while_the_key_loads_are_recorded_once_the_history_opens() async throws {
+    let directory = try makeDirectory()
+    let key = makeKey()
+    let stored = makeHistory(directory: directory, key: key)
+    stored.record(.text("from the last session"))
+    stored.record(.text("copied again"))
+    stored.flush()
+    let keychain = FakeKeychain()
+    keychain.items[HistoryKey.account] = FakeKeychain.Item(data: bytes(of: key), access: .anyApplication)
+    keychain.isHeld = true
+    let pasteboard = makePasteboard()
+    defer { pasteboard.releaseGlobally() }
+    let plugin = try makePlugin(directory: directory, keychain: keychain, pasteboard: pasteboard)
+
+    plugin.activate()
+    for text in ["copied again", "copied while the key loads"] {
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        try await Task.sleep(for: PasteboardMonitor.interval * 3)
+    }
+    keychain.isHeld = false
+    await plugin.opening?.value
+    plugin.deactivate()
+
+    let expected: [ClipItem.Content] = [.text("copied while the key loads"), .text("copied again"), .text("from the last session")]
+    #expect(plugin.history.items.map(\.content) == expected)
+    #expect(makeHistory(directory: directory, key: key).items.map(\.content) == expected)
+}
+
+/// What the pasteboard holds when the plugin starts is recorded like a new copy.
+@MainActor
+@Test func R09__the_item_on_the_pasteboard_at_activation_is_recorded() async throws {
+    let directory = try makeDirectory()
+    let keychain = FakeKeychain()
+    let pasteboard = makePasteboard()
+    defer { pasteboard.releaseGlobally() }
+    pasteboard.clearContents()
+    pasteboard.setString("copied before the plugin started", forType: .string)
+    let plugin = try makePlugin(directory: directory, keychain: keychain, pasteboard: pasteboard)
+
+    plugin.activate()
+    await plugin.opening?.value
+    plugin.deactivate()
+
+    #expect(plugin.history.items.map(\.content) == [.text("copied before the plugin started")])
+    let key = SymmetricKey(data: try #require(keychain.items[HistoryKey.account]).data)
+    #expect(makeHistory(directory: directory, key: key).items.map(\.content) == [.text("copied before the plugin started")])
 }

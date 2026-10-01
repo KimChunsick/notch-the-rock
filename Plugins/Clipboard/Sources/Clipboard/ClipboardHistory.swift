@@ -40,6 +40,9 @@ final class ClipboardHistory {
     @ObservationIgnored private let logError: @MainActor (String) -> Void
     @ObservationIgnored private let now: @MainActor () -> Date
     @ObservationIgnored private let sources: SourceAppLookup
+    /// Copies seen while the plugin opens the history, oldest first, each with when and where it
+    /// was copied; the next `open(_:)` records them. Nil while copies are recorded as they come.
+    @ObservationIgnored private var heldCopies: [(capture: ClipCapture, date: Date, source: SourceApp?)]?
 
     /// `now` gives the time `unsavedSince` records; tests pass a clock they move themselves.
     /// `sources` finds the app a pasteboard change came from.
@@ -67,8 +70,25 @@ final class ClipboardHistory {
     /// that were not saved are dropped. Image files the stored list does not name were never saved,
     /// or belong to removed entries, and are deleted. A list that cannot be read, or a directory
     /// that cannot be listed, leaves the history empty and in memory, and the store untouched. With
-    /// nil the history starts empty and keeps its entries in memory only.
+    /// nil the history starts empty and keeps its entries in memory only. Then the copies held since
+    /// `holdCopiesUntilOpen()` are recorded, oldest first, by the same rules as any copy.
     func open(_ store: ClipboardStore?) {
+        let held = heldCopies ?? []
+        heldCopies = nil
+        replaceContents(with: store)
+        for copy in held {
+            record(copy.capture, at: copy.date, source: copy.source)
+        }
+    }
+
+    /// Makes every later `record(from:)` keep the copy aside until the next `open(_:)`, so copies
+    /// made while the store is being opened are not lost. Copies held for an earlier opening that
+    /// never finished are dropped, as `open(_:)` drops entries that were not saved.
+    func holdCopiesUntilOpen() {
+        heldCopies = []
+    }
+
+    private func replaceContents(with store: ClipboardStore?) {
         flush()
         self.store = nil
         writer = nil
@@ -120,10 +140,14 @@ final class ClipboardHistory {
     }
 
     /// Records the pasteboard's current content, with the app it came from, unless it is excluded
-    /// or empty.
+    /// or empty. While copies are held, it is kept for the next `open(_:)` instead.
     func record(from pasteboard: NSPasteboard) {
-        if let capture = ClipCapture.read(from: pasteboard) {
-            record(capture, source: sources.source(of: pasteboard))
+        guard let capture = ClipCapture.read(from: pasteboard) else { return }
+        let source = sources.source(of: pasteboard)
+        if heldCopies != nil {
+            heldCopies?.append((capture, .now, source))
+        } else {
+            record(capture, source: source)
         }
     }
 

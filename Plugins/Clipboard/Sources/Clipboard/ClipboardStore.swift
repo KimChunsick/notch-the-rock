@@ -3,7 +3,8 @@ import Foundation
 import NotchKit
 
 /// The history on disk: the list in one file and every image in a file of its own, each sealed
-/// with AES-GCM under the history key. Every file is mode 0600 and holds ciphertext only.
+/// with AES-GCM under the history key. Every file is mode 0600 and holds ciphertext only; the one
+/// exception is the empty `oldHistoryMarkerName` file a key replacement keeps while it runs.
 ///
 /// Images are kept apart so that recording a text does not rewrite every image, and an image is
 /// written once when it is first copied. An image file is always written before any list names
@@ -105,17 +106,43 @@ struct ClipboardStore: Sendable {
 }
 
 extension ClipboardStore {
+    /// An empty file in the directory while the history there is sealed with an old key being
+    /// replaced: written before the new key is stored, removed once that history is deleted.
+    static let oldHistoryMarkerName = "old-history-to-delete"
+
     /// Loads the history key and returns the store in `directory` with it. A keychain call can wait
     /// on the system, so run this off the main thread. When the key replaces an old one that cannot
-    /// be read without asking, the old history's files are deleted first, so the new history starts
-    /// empty instead of unreadable.
+    /// be read without asking, the old history's files are deleted, so the new history starts empty
+    /// instead of unreadable.
+    ///
+    /// The marker makes that deletion survive an interruption: any later call that finds it deletes
+    /// the old files, and until the marker is gone this throws, so no list is written under the new
+    /// key beside them. A marker left by a new key that could not be stored is dropped without
+    /// deleting anything when the old key turns out to be readable: its history is readable too.
     static func open(in directory: URL, keychain: some HistoryKeychain) throws -> (store: ClipboardStore, key: SymmetricKey, origin: HistoryKey.Origin) {
-        let (key, origin) = try HistoryKey.load(from: keychain)
+        let marker = directory.appendingPathComponent(oldHistoryMarkerName)
+        let (key, origin) = try HistoryKey.load(from: keychain) {
+            try Data().write(to: marker)
+        }
         let store = ClipboardStore(directory: directory, key: key)
-        if origin == .replacedOldKeyThatNeedsAccess {
+        if origin == .movedFromOldAccount {
+            try store.removeIfPresent(marker)
+        } else if try isPresent(marker) {
             try store.deleteAll()
+            try store.removeIfPresent(marker)
         }
         return (store, key, origin)
+    }
+
+    /// Whether there is a file at `url`. Only a read that finds no such file says no, as in
+    /// `loadList()`: a marker that cannot be reached is not taken for gone.
+    private static func isPresent(_ url: URL) throws -> Bool {
+        do {
+            _ = try Data(contentsOf: url)
+            return true
+        } catch CocoaError.fileReadNoSuchFile {
+            return false
+        }
     }
 }
 
@@ -160,8 +187,9 @@ enum HistoryKey {
     /// The key under `account`; else the key under `legacyAccount` moved there; else a new one. A
     /// keychain failure on `account`, including one that needs access, is thrown instead of creating
     /// a key, so a temporarily unreadable key is never replaced. Only an old key that needs access is
-    /// replaced, after the new one is stored; the old item is then deleted when that needs no dialog.
-    static func load(from keychain: some HistoryKeychain) throws -> (key: SymmetricKey, origin: Origin) {
+    /// replaced: `willReplaceOldKey` runs, then the new key is stored, and the old item is then
+    /// deleted when that needs no dialog. A throw from `willReplaceOldKey` stores nothing.
+    static func load(from keychain: some HistoryKeychain, willReplaceOldKey: () throws -> Void) throws -> (key: SymmetricKey, origin: Origin) {
         if let data = try keychain.keychainData(for: account) {
             return (try key(from: data), .stored)
         }
@@ -169,6 +197,7 @@ enum HistoryKey {
         do {
             legacy = try keychain.keychainData(for: legacyAccount)
         } catch where error.needsAccess {
+            try willReplaceOldKey()
             let key = try create(in: keychain)
             try? keychain.deleteKeychainData(for: legacyAccount)
             return (key, .replacedOldKeyThatNeedsAccess)

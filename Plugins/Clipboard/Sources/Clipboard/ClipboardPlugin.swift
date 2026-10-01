@@ -25,7 +25,7 @@ public final class ClipboardPlugin: NotchPlugin {
     private let keychain: any HistoryKeychain
     private let pasteboard: NSPasteboard
     let history: ClipboardHistory
-    /// Opens the history and then starts watching; set while the plugin is active.
+    /// Opens the history; set while the plugin is active.
     private(set) var opening: Task<Void, Never>?
     private var monitor: PasteboardMonitor?
 
@@ -42,10 +42,21 @@ public final class ClipboardPlugin: NotchPlugin {
         history = ClipboardHistory { log.error($0) }
     }
 
-    /// Loads the key in the background, then reloads the history from disk and starts watching the
-    /// pasteboard. Until then the history keeps what it showed before, empty at launch.
+    /// Starts watching the pasteboard and records what it holds now, like a new copy. Loads the key
+    /// in the background, then reloads the history from disk. Copies seen until then are held and
+    /// recorded into the history once it opens; until then it shows what it showed before, nothing
+    /// at launch.
     public func activate() {
         guard opening == nil else { return }
+        history.holdCopiesUntilOpen()
+        let monitor = PasteboardMonitor(pasteboard: pasteboard) { [history] pasteboard in
+            history.record(from: pasteboard)
+        }
+        self.monitor = monitor
+        // The monitor takes the change count before the content is read, so a copy made in between
+        // is reported again instead of missed; a repeat only moves its entry to the top.
+        monitor.start()
+        history.record(from: pasteboard)
         let keychain = keychain
         let directory = context.storage.directory
         opening = Task { [weak self] in
@@ -86,8 +97,8 @@ public final class ClipboardPlugin: NotchPlugin {
     }
 
     /// Opens the history with the encrypted store, or without one when the Keychain cannot give a
-    /// key: then the history, image originals included, stays in memory for this session and nothing
-    /// is written to disk. Then starts watching the pasteboard.
+    /// key or an old history cannot be deleted yet: then the history, image originals included,
+    /// stays in memory for this session and nothing is written to disk.
     private func finishOpening(_ opened: Result<(store: ClipboardStore, key: SymmetricKey, origin: HistoryKey.Origin), any Error>) {
         switch opened {
         case .success(let opened):
@@ -96,14 +107,9 @@ public final class ClipboardPlugin: NotchPlugin {
             }
             history.open(opened.store)
         case .failure(let error):
-            context.log.error("no clipboard history key, keeping the history in memory only: \(error)")
+            context.log.error("could not open the clipboard history store, keeping the history in memory only: \(error)")
             history.open(nil)
         }
-        let monitor = PasteboardMonitor(pasteboard: pasteboard) { [history] pasteboard in
-            history.record(from: pasteboard)
-        }
-        self.monitor = monitor
-        monitor.start()
     }
 }
 
