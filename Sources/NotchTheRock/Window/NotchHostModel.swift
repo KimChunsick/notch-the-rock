@@ -29,6 +29,11 @@ enum NotchState: Equatable {
 /// The expanded notch shows the home (`screen`): plugin tiles and a list, see `HomeModel`. API for
 /// the keyboard and URL plans (P17, P18): `showHome()`, `open(pluginID:)`, `back()`, `escape()` and
 /// the read-only `homeEntries`.
+///
+/// A notch opened by `showHome()` or `open(pluginID:)` while the pointer is elsewhere (the hotkey, a
+/// link, a plugin) is held open: the pointer moving elsewhere does not close it, only Esc, a click
+/// outside, or the pointer entering and then leaving it. Keyboard state (focus ring, quick search)
+/// is in `keyboard`, see `handleKey(_:)`.
 @MainActor
 @Observable
 final class NotchHostModel: NotchHost {
@@ -76,6 +81,11 @@ final class NotchHostModel: NotchHost {
     /// The screen of the expanded notch. Collapsing returns it to the home.
     private(set) var screen: HomeScreen = .home
     let home: HomeModel
+    let keyboard = HomeKeyboard()
+    /// Opened by `showHome()` or `open(pluginID:)` while the pointer was not on the notch, and the
+    /// pointer has not entered it since.
+    private(set) var isHeldOpen = false
+    @ObservationIgnored private var isHovering = false
 
     /// The running plugins in load order, as the home shows them. Set by whoever loads the plugins.
     var plugins: [HomePlugin] {
@@ -142,8 +152,39 @@ final class NotchHostModel: NotchHost {
 
     // MARK: Pointer and window
 
+    /// Hovering starts or ends. Ending collapses the notch however it was opened; the window reports
+    /// a pointer leaving through `pointerLeft()`, which keeps a held notch open.
     func setHovering(_ hovering: Bool) {
+        isHovering = hovering
+        if hovering { isHeldOpen = false }
         setExpanded(hovering)
+    }
+
+    /// The pointer left the notch after hovering it. A held notch stays open: the pointer has not
+    /// been in it since it opened, so this leave is left over from before.
+    func pointerLeft() {
+        guard !isHeldOpen else { return }
+        setHovering(false)
+    }
+
+    /// A click outside the notch ends a held notch. A hovered one is left to the pointer leaving.
+    func clickedOutside() {
+        guard isHeldOpen else { return }
+        setExpanded(false)
+    }
+
+    /// The global hotkey: collapses the expanded notch, or opens the home with the focus ring on its
+    /// first entry. While a takeover or an attention request shows, it does nothing.
+    func toggleFromKeyboard() {
+        switch state {
+        case .expanded:
+            setExpanded(false)
+        case .collapsed, .hud:
+            showHome()
+            keyboard.focus = homeEntries.first?.pluginID
+        case .attention, .takeover:
+            break
+        }
     }
 
     // MARK: Home navigation
@@ -151,14 +192,22 @@ final class NotchHostModel: NotchHost {
     /// Expands the notch on the home.
     func showHome() {
         screen = .home
+        keyboard.query = nil
         setExpanded(true)
+        holdUnlessHovered()
     }
 
     /// Expands the notch on the plugin's screen. A plugin that is not running or has no screen
     /// (unknown id, display-only tile) opens the home instead.
     func open(pluginID: String) {
         screen = home.plugin(pluginID)?.tab == nil ? .home : .detail(pluginID: pluginID)
+        keyboard.query = nil
         setExpanded(true)
+        holdUnlessHovered()
+    }
+
+    private func holdUnlessHovered() {
+        if isExpanded && !isHovering { isHeldOpen = true }
     }
 
     /// From a plugin's screen back to the home.
@@ -207,6 +256,8 @@ final class NotchHostModel: NotchHost {
         if !expanded {
             screen = .home
             home.finishEditing()
+            keyboard.reset()
+            isHeldOpen = false
         }
     }
 

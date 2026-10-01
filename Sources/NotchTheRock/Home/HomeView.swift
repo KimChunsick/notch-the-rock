@@ -1,16 +1,26 @@
 import NotchKit
 import SwiftUI
 
-/// The home: the plugin tile grid and, below it, one row per plugin without a grid place. Always
-/// as wide as the grid; as tall as the rows in use and the list.
+/// The home: the plugin tile grid and, below it, one row per plugin without a grid place, or the
+/// quick search while it is open. Always as wide as the grid; as tall as the rows in use and the
+/// list. The keyboard's focus ring (`HomeKeyboard.focus`) is drawn around its tile or row.
 struct HomeView: View {
     let host: NotchHostModel
 
     var body: some View {
+        if host.keyboard.query != nil {
+            QuickSearchView(host: host)
+                .frame(width: HomeGrid.size.width, alignment: .topLeading)
+        } else {
+            plugins
+        }
+    }
+
+    private var plugins: some View {
         let home = host.home
         let tiles = home.tiles
         let list = home.list
-        VStack(alignment: .leading, spacing: HomeGrid.gap) {
+        return VStack(alignment: .leading, spacing: HomeGrid.gap) {
             if !tiles.isEmpty || home.isEditing {
                 HomeGridView(host: host, tiles: tiles)
             }
@@ -89,6 +99,7 @@ private struct TileView: View {
         }
         .frame(width: frame.width, height: frame.height)
         .contentShape(shape)
+        .homeFocusRing(!editing && host.keyboard.focus == placement.pluginID, cornerRadius: HomeGrid.cornerRadius)
         .overlay(alignment: .topLeading) {
             if editing {
                 Button {
@@ -175,7 +186,8 @@ private struct TileView: View {
     }
 }
 
-/// One row per plugin without a grid place. Long lists scroll after six rows.
+/// One row per plugin without a grid place. Long lists scroll after six rows, and to the row with
+/// the keyboard's focus ring (`NotchHostModel.listScrollTarget`).
 private struct HomeList: View {
     let host: NotchHostModel
     let plugins: [HomePlugin]
@@ -186,9 +198,16 @@ private struct HomeList: View {
 
     var body: some View {
         if plugins.count > Self.visibleRows {
-            ScrollView { rows }
-                .scrollIndicators(.never)
-                .frame(height: CGFloat(Self.visibleRows) * Self.rowHeight + CGFloat(Self.visibleRows - 1) * Self.spacing)
+            ScrollViewReader { proxy in
+                ScrollView { rows }
+                    .scrollIndicators(.never)
+                    .frame(height: CGFloat(Self.visibleRows) * Self.rowHeight + CGFloat(Self.visibleRows - 1) * Self.spacing)
+                    // The focus also outlives a visit to a plugin's screen, where the list is gone.
+                    .onAppear { if let target = host.listScrollTarget { proxy.scrollTo(target) } }
+                    .onChange(of: host.listScrollTarget) { _, target in
+                        if let target { proxy.scrollTo(target) }
+                    }
+            }
         } else {
             rows
         }
@@ -198,6 +217,7 @@ private struct HomeList: View {
         VStack(spacing: Self.spacing) {
             ForEach(plugins, id: \.pluginID) { plugin in
                 HomeRow(host: host, plugin: plugin)
+                    .id(plugin.pluginID)
             }
         }
     }
@@ -242,6 +262,7 @@ private struct HomeRow: View {
         .padding(.horizontal, 10)
         .frame(maxWidth: .infinity, minHeight: HomeList.rowHeight, maxHeight: HomeList.rowHeight)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.white.opacity(0.08)))
+        .homeFocusRing(!editing && host.keyboard.focus == plugin.pluginID, cornerRadius: 8)
         .contentShape(Rectangle())
         .onTapGesture {
             if !editing, plugin.tab != nil { host.open(pluginID: plugin.pluginID) }

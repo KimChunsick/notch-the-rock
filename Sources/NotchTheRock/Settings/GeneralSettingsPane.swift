@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// 일반: launch at login, showing the status the system reports.
+/// 일반: launch at login, showing the status the system reports, and the global hotkey.
 struct GeneralSettingsPane: View {
+    var hotkey: GlobalHotkey = .app
     @State private var status = SystemPermissions.loginItemStatus
     @State private var failure: String?
 
@@ -21,6 +22,9 @@ struct GeneralSettingsPane: View {
                         .foregroundStyle(.red)
                         .textSelection(.enabled)
                 }
+            }
+            Section {
+                HotkeySettingsRow(hotkey: hotkey)
             }
         }
         .formStyle(.grouped)
