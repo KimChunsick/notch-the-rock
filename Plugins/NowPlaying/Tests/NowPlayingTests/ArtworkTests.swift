@@ -80,8 +80,13 @@ private final class FakeProcesses {
     private(set) var started: [FakeStream] = []
     /// The exit status of each command helper.
     var sendStatus: Int32 = 0
+    /// Further stream helpers cannot start.
+    var refusesStart = false
 
-    func start(onLine: @escaping @MainActor (String) -> Void, onExit: @escaping @MainActor (Int32) -> Void) -> any StreamHandle {
+    struct Refused: Error {}
+
+    func start(onLine: @escaping @MainActor (String) -> Void, onExit: @escaping @MainActor (Int32) -> Void) throws -> any StreamHandle {
+        if refusesStart { throw Refused() }
         let stream = FakeStream(onLine: onLine, onExit: onExit)
         started.append(stream)
         return stream
@@ -95,7 +100,7 @@ private final class FakeProcesses {
 @MainActor
 private func makeLauncher(_ processes: FakeProcesses, clock: ManualClock) -> PerlHelperLauncher {
     PerlHelperLauncher(
-        startProcess: { processes.start(onLine: $0, onExit: $1) },
+        startProcess: { try processes.start(onLine: $0, onExit: $1) },
         runCommand: { _, completion in completion(.success(processes.sendStatus)) },
         clock: clock
     )
@@ -338,18 +343,141 @@ private let cover = samplePNG(hue: 0.6)
     second.stop()
 }
 
+/// A fresh helper that differs only in whether the item plays as the model shows it (the playing flag
+/// with the rate) or only in the album corrects the long-lived helper: playing at rate 0 against
+/// playing at rate 1, the reverse, and another album with the same title and artist. Its line reaches
+/// the plugin, the long-lived helper is replaced once without an exit, and the model ends with what
+/// the fresh helper says.
+@MainActor
+@Test(arguments: [
+    (staleRate: 0.0, freshRate: 1.0, freshAlbum: "Kind of Blue"),
+    (staleRate: 1.0, freshRate: 0.0, freshAlbum: "Kind of Blue"),
+    (staleRate: 1.0, freshRate: 1.0, freshAlbum: "Another Album"),
+])
+func R08__a_fresh_helper_that_shows_another_playing_state_or_album_corrects_the_stale_one(
+    _ change: (staleRate: Double, freshRate: Double, freshAlbum: String)
+) async throws {
+    let clock = ManualClock()
+    let processes = FakeProcesses()
+    let launcher = makeLauncher(processes, clock: clock)
+    var lines: [String] = []
+    var exits: [Int32] = []
+    let handle = try launcher.startStream(onLine: { lines.append($0) }, onExit: { exits.append($0) })
+    let stale = try processes.process(0)
+    let staleLine = infoLine(rate: change.staleRate, playing: true, artwork: artworkObject(cover))
+    stale.emit(staleLine)
+    // A rate-0 line asks a fresh helper at once; otherwise the command asks a second later.
+    launcher.send(.pause) { _ in }
+    await advance(clock, by: .seconds(1))
+    await waitUntil { processes.started.count == 2 }
+    let fresh = try processes.process(1)
+
+    let freshLine = infoLine(
+        album: change.freshAlbum, elapsed: 13, timestamp: 1_790_000_001, rate: change.freshRate, playing: true,
+        artwork: artworkObject(cover)
+    )
+    fresh.emit(freshLine)
+    #expect(lines == [staleLine, freshLine])
+    #expect(fresh.isStopped)
+    #expect(stale.isStopped)
+    #expect(processes.started.count == 3)
+    #expect(try !processes.process(2).isStopped)
+    #expect(exits.isEmpty)
+
+    let model = NowPlayingModel()
+    for line in lines {
+        model.apply(try #require(HelperLine(line)))
+    }
+    #expect(model.track?.isPlaying == (change.freshRate != 0))
+    #expect(model.track?.album == change.freshAlbum)
+    handle.stop()
+    #expect(processes.started.allSatisfy { $0.isStopped })
+}
+
+/// A fresh helper that shows the same as the long-lived one changes nothing: another elapsed time,
+/// sample time, length or speed is progress read at another moment, not a stale client, and playing at
+/// rate 0 is the same pause as a paused flag.
+@MainActor
+@Test func R08__a_fresh_helper_that_differs_only_in_progress_or_the_raw_flag_changes_nothing() async throws {
+    let clock = ManualClock()
+    let processes = FakeProcesses()
+    let launcher = makeLauncher(processes, clock: clock)
+    var lines: [String] = []
+    let handle = try launcher.startStream(onLine: { lines.append($0) }, onExit: { _ in })
+    let helper = try processes.process(0)
+    helper.emit(infoLine(elapsed: 12, artwork: artworkObject(cover)))
+    launcher.send(.pause) { _ in }
+    await advance(clock, by: .seconds(1))
+    await waitUntil { processes.started.count == 2 }
+
+    try processes.process(1).emit(infoLine(
+        duration: 340, elapsed: 75, timestamp: 1_790_000_063, rate: 2, artwork: artworkObject(cover)
+    ))
+    #expect(lines.count == 1)
+    #expect(!helper.isStopped)
+    #expect(processes.started.count == 2)
+
+    helper.emit(infoLine(rate: 0, playing: true))
+    await waitUntil { processes.started.count == 3 }
+    try processes.process(2).emit(infoLine(rate: 0, playing: false, artwork: artworkObject(cover)))
+    #expect(lines.count == 2)
+    #expect(!helper.isStopped)
+    #expect(processes.started.count == 3)
+    handle.stop()
+}
+
+/// When no new long-lived helper can start after a correction, the fresh line still reaches the plugin
+/// and the stream ends with exit -1, reported once; nothing starts or reaches the plugin afterwards.
+@MainActor
+@Test func R08__a_replacement_that_cannot_start_ends_the_stream_once() async throws {
+    let clock = ManualClock()
+    let processes = FakeProcesses()
+    let launcher = makeLauncher(processes, clock: clock)
+    var lines: [String] = []
+    var exits: [Int32] = []
+    let handle = try launcher.startStream(onLine: { lines.append($0) }, onExit: { exits.append($0) })
+    let stale = try processes.process(0)
+    let staleLine = infoLine(rate: 0, playing: true)
+    stale.emit(staleLine)
+    let fresh = try processes.process(1)
+
+    processes.refusesStart = true
+    let freshLine = infoLine(rate: 1, playing: true)
+    fresh.emit(freshLine)
+    #expect(lines == [staleLine, freshLine])
+    #expect(exits == [-1])
+    #expect(VerifiedStream.restartFailedStatus == -1)
+    #expect(stale.isStopped)
+    #expect(fresh.isStopped)
+
+    processes.refusesStart = false
+    stale.emit(staleLine)
+    stale.exit(0)
+    fresh.exit(0)
+    launcher.send(.pause) { _ in }
+    await advance(clock, by: .seconds(30))
+    #expect(lines.count == 2)
+    #expect(exits == [-1])
+    #expect(processes.started.count == 2)
+    handle.stop()
+}
+
 /// The reader hands each line over as soon as the helper writes it, not once 64 KiB have gathered or
 /// the helper has ended: a fresh helper's first line, or a long-lived helper's short pause line, would
-/// otherwise wait in the pipe.
+/// otherwise wait in the pipe. The shell `exec`s its sleep, so stopping it leaves no child behind; the
+/// exit arrives only once nothing holds the output open.
 @MainActor
 @Test func R08__the_reader_delivers_each_line_while_the_helper_runs() async throws {
     var lines: [String] = []
+    var exited = false
     let process = try LineProcess.start(
-        HelperCommand(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "echo first; sleep 30"]),
+        HelperCommand(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "echo first; exec sleep 30"]),
         onLine: { lines.append($0) },
-        onExit: { _ in }
+        onExit: { _ in exited = true }
     )
     await waitUntil { !lines.isEmpty }
     #expect(lines == ["first"])
     process.stop()
+    await waitUntil { exited }
+    #expect(exited)
 }

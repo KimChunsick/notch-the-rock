@@ -171,3 +171,13 @@ private func trackOf(_ line: HelperLine?) -> TrackInfo? {
     #expect(URL(fileURLWithPath: "/b/NowPlaying.notchplugin").appendingPathComponent(HelperCommand.libraryPath).path
         == "/b/NowPlaying.notchplugin/Contents/Helpers/libNowPlayingBridge.dylib")
 }
+
+/// The item plays as the notch shows it when the app says playing and the rate does not say it stands
+/// still; without a rate the playing flag stands. The model and the stream's check both read this.
+@Test func R08__playing_at_rate_zero_is_not_effectively_playing() {
+    let sampled = Date(timeIntervalSince1970: 0)
+    #expect(TrackInfo(title: "t", sampledAt: sampled, rate: 1, isPlaying: true).isEffectivelyPlaying)
+    #expect(TrackInfo(title: "t", sampledAt: sampled, rate: nil, isPlaying: true).isEffectivelyPlaying)
+    #expect(!TrackInfo(title: "t", sampledAt: sampled, rate: 0, isPlaying: true).isEffectivelyPlaying)
+    #expect(!TrackInfo(title: "t", sampledAt: sampled, rate: 1, isPlaying: false).isEffectivelyPlaying)
+}

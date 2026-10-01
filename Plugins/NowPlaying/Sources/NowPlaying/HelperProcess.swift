@@ -107,9 +107,10 @@ final class PerlHelperLauncher: HelperLauncher {
 /// playing, with the browser's icon as the image, while the system had paused with the real cover.
 /// So the long-lived helper is checked against a fresh one (a new process is a new MediaRemote
 /// client), whose first line is the state now: at once when a line says playing at rate 0, a second
-/// after a command went through, and every `checkInterval` while the long-lived helper says playing.
-/// When the two differ in the playing flag, the item, the source app or the image, the fresh line
-/// goes to the plugin and the long-lived helper is replaced; the replacement is not an exit.
+/// after a command went through, and every `checkInterval` while the long-lived helper says the item
+/// plays. When the two differ in whether the item plays as the model shows it (`isEffectivelyPlaying`),
+/// the item (title, artist, album), the source app or the image, the fresh line goes to the plugin and
+/// the long-lived helper is replaced; the replacement is not an exit.
 ///
 /// A `none` line waits `nothingHold` and is dropped when another line comes first, so a track change
 /// that reports nothing for a moment does not take the item away.
@@ -127,10 +128,12 @@ final class VerifiedStream: StreamHandle {
     /// task is cancelled: the time counts from when the timer is set, not from when its task runs.
     typealias Timer = @Sendable (_ delay: Duration) -> @Sendable () async throws -> Void
 
-    /// What a helper says, as far as a check compares it.
+    /// What a helper says, as far as a check compares it: what the notch shows of it, except progress.
+    /// The elapsed time, its sample time, the length and the speed are left out: two reads at different
+    /// moments differ in them without either being stale, and the progress bar is all they move.
     private enum Reported: Equatable {
         case nothing
-        case item(title: String, artist: String?, bundleID: String?, isPlaying: Bool, artwork: Data?)
+        case item(title: String, artist: String?, album: String?, bundleID: String?, isPlaying: Bool, artwork: Data?)
     }
 
     /// A fresh helper asked for the state now.
@@ -248,9 +251,10 @@ final class VerifiedStream: StreamHandle {
         }
     }
 
-    /// While the long-lived helper says playing, a check every `checkInterval`.
+    /// While the long-lived helper says the item plays (as the model shows it), a check every
+    /// `checkInterval`. Playing at rate 0 counts as paused here too; its line asks once, at once.
     private func scheduleNextCheck() {
-        guard case .item(_, _, _, true, _)? = reported else {
+        guard case .item(_, _, _, _, true, _)? = reported else {
             nextCheck?.cancel()
             nextCheck = nil
             return
@@ -338,9 +342,12 @@ final class VerifiedStream: StreamHandle {
         case .removed:
             image = nil
         case .unchanged:
-            if case .item(_, _, _, _, let held)? = previous { image = held } else { image = nil }
+            if case .item(_, _, _, _, _, let held)? = previous { image = held } else { image = nil }
         }
-        return .item(title: info.title, artist: info.artist, bundleID: info.bundleID, isPlaying: info.isPlaying, artwork: image)
+        return .item(
+            title: info.title, artist: info.artist, album: info.album, bundleID: info.bundleID,
+            isPlaying: info.isEffectivelyPlaying, artwork: image
+        )
     }
 }
 

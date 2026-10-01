@@ -34,11 +34,9 @@ final class NowPlayingModel {
             state = .nothing
             artwork = nil
         case .info(var info, let update):
-            // Playing but not moving (a stale client, or a moment of buffering) counts as paused. The
-            // plugin's pause grace keeps the wings while it lasts no longer than that.
-            if info.rate == 0 {
-                info.isPlaying = false
-            }
+            // Playing at rate 0 counts as paused; the plugin's pause grace keeps the wings while that lasts
+            // no longer than the grace.
+            info.isPlaying = info.isEffectivelyPlaying
             state = .track(info)
             switch update {
             case .unchanged:
