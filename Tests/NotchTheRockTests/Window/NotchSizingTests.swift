@@ -54,18 +54,16 @@ struct NotchSizingTests {
         #expect(abs(wide.content.midX - 150) <= 0.5)
     }
 
-    /// A HUD stays in the notch band beside the camera; its outer edges keep the same padding.
-    @Test func R15__hud_wings_size_to_their_content_with_the_same_padding() {
-        let small = NotchSizing.bandFrame(content: CGSize(width: notch.width + 2 * 70, height: 16), notch: notch)
-        let large = NotchSizing.bandFrame(content: CGSize(width: notch.width + 2 * 100, height: 16), notch: notch)
-        #expect(small.size.width < large.size.width)
-        for frame in [small, large] {
-            #expect(frame.size.height == notch.height)
-            #expect(abs(frame.content.minX - NotchLayout.collapsedShoulder - padding) <= 0.5)
-            #expect(abs(frame.size.width - NotchLayout.collapsedShoulder - frame.content.maxX - padding) <= 0.5)
-            #expect(abs(frame.content.midY - notch.height / 2) <= 0.5)
-        }
-        #expect(NotchSizing.bandFrame(content: CGSize(width: 2000, height: 16), notch: notch).size.width == NotchSizing.maxWidth)
+    /// A HUD keeps the collapsed notch's height and corners and widens it sideways by its wings,
+    /// up to the HUD's widest wing.
+    @Test func R25__hud_widens_the_collapsed_notch_sideways_only() {
+        let collapsed = NotchLayout.metrics(for: .collapsed, notch: notch)
+        let hud = NotchLayout.metrics(for: .hud, notch: notch, activityWing: 100, content: CGSize(width: 300, height: 200))
+        #expect(hud.size == CGSize(width: collapsed.size.width + 200, height: notch.height))
+        #expect(hud.content == CGRect(origin: .zero, size: hud.size))
+        #expect(hud.shoulderRadius == collapsed.shoulderRadius && hud.bottomRadius == collapsed.bottomRadius)
+        let widest = NotchLayout.metrics(for: .hud, notch: notch, activityWing: 1000)
+        #expect(widest.size.width == collapsed.size.width + 2 * NotchLayout.maxHUDWing)
     }
 
     /// R02 geometry holds for every content size: the top edge is the screen top at the notch and

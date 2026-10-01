@@ -230,6 +230,11 @@ public final class ClockPlugin: NotchPlugin {
 | 권한 | `permissions.isAccessibilityTrusted`, `permissions.requestAccessibility()` |
 | 기록 | `log.debug(_:)`, `log.info(_:)`, `log.error(_:)` |
 
+HUD는 접힌 노치를 아래로 늘이지 않고 양옆으로만 넓혀서 보여 줘요. 왼쪽 날개에 `symbol`을 그리고,
+`value`가 있으면 오른쪽 날개에 그 값만큼 채운 얇은 막대를 그려요. `title`과 `detail`은 화면에 그리지
+않고 VoiceOver가 읽어 줘요. HUD가 떠 있는 동안 새 HUD를 보내면 막대가 앞의 값에서 새 값으로 부드럽게
+움직여요.
+
 같은 `id`로 `post`하면 이전 표시를 바꿔요. `expiresAfter`를 주면 그 시간이 지나 저절로 사라지고, 주지
 않으면 `clear(activityID:)`를 부를 때까지 남아요. `storage`의 폴더, 기본값 저장소, 키체인 항목은
 플러그인마다 따로 있어서 다른 플러그인과 섞이지 않아요.
@@ -311,7 +316,7 @@ public var tile: PluginTile? {
 
 ### 화면 크기
 
-펼친 노치에는 정해진 크기가 없어요. 앱은 지금 보여 주는 화면(홈, 플러그인 화면, 알림, HUD, 인사)의 크기를
+펼친 노치에는 정해진 크기가 없어요. 앱은 지금 보여 주는 화면(홈, 플러그인 화면, 알림, 인사)의 크기를
 재고, 그 크기에 맞춰 노치를 키워요. 가장자리 여백은 어느 화면에서나 같아요. 그래서 `expandedTab`과
 `tile`의 뷰는 내용으로 정해지는 크기를 스스로 가져야 해요.
 

@@ -78,7 +78,8 @@ import Testing
 
     /// As the end-to-end capture measures: the shape's side walls on a row just under the notch
     /// band, its bottom on the centre column, and the outermost content ink (any channel at least
-    /// 14) inside it, leaving out the rounded bottom corners.
+    /// 14) inside it. Along the rounded bottom corners only what lies inside the shape on that row
+    /// counts, so a short screen's last row is measured too.
     nonisolated static func inkGaps(_ image: CGImage, scale: CGFloat) -> Gaps? {
         let width = image.width, height = image.height
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
@@ -103,8 +104,19 @@ import Testing
 
         let corner = px(NotchLayout.openBottom)
         var minX = width, maxX = 0, maxY = 0
-        for y in 0..<(bottom - corner) {
-            for x in (left + 2)...(right - 2) where brightness(x, y) >= 14 {
+        // The backdrop is blue with no red; the shape and its antialiased edge are not.
+        func isBackdrop(_ x: Int, _ y: Int) -> Bool {
+            let i = (y * width + x) * 4
+            return Int(pixels[i + 2]) - Int(pixels[i]) > 100
+        }
+        for y in 0..<bottom {
+            var rowLeft = left, rowRight = right
+            if y >= bottom - corner {
+                while rowLeft < center && isBackdrop(rowLeft, y) { rowLeft += 1 }
+                while rowRight > center && isBackdrop(rowRight, y) { rowRight -= 1 }
+            }
+            guard rowLeft + 2 <= rowRight - 2 else { continue }
+            for x in (rowLeft + 2)...(rowRight - 2) where brightness(x, y) >= 14 {
                 minX = min(minX, x)
                 maxX = max(maxX, x)
             }
@@ -147,9 +159,10 @@ import Testing
         try fixture.makeShaped("Agents", .init(name: "코딩 에이전트", symbol: "apple.terminal", tab: true))
         try fixture.makeShaped("Battery", .init(name: "배터리", symbol: "battery.100percent", tab: true, sizes: [.small, .wide]))
         try fixture.makeShaped("Clipboard", .init(name: "클립보드", symbol: "doc.on.clipboard", tab: true, sizes: [.wide, .small]))
-        try fixture.makeShaped("MediaKeys", .init(name: "볼륨과 밝기", symbol: "speaker.wave.2.fill", tab: true, sizes: [.small, .wide]))
+        try fixture.makeShaped("Brightness", .init(name: "밝기", symbol: "sun.max.fill", tab: true, sizes: [.small, .wide]))
         try fixture.makeShaped("NowPlaying", .init(name: "지금 재생 중", symbol: "music.note", tab: true, sizes: [.wide, .small]))
         try fixture.makeShaped("SystemStats", .init(name: "시스템 상태", symbol: "cpu", tab: true, sizes: [.small, .wide, .large]))
+        try fixture.makeShaped("Volume", .init(name: "볼륨", symbol: "speaker.wave.2.fill", tab: true, sizes: [.small, .wide]))
         let (catalog, host) = fixture.shapedCatalog()
         catalog.loadAll()
         let minWidth = BandLayout.minimumWidth(notch: Self.notch, leading: HomeChrome.editWidth, trailing: HomeChrome.gearWidth)
@@ -164,9 +177,14 @@ import Testing
         expectEqualPadding(gaps, "battery")
     }
 
-    @Test func R15__the_volume_and_brightness_screen_keeps_the_same_padding_on_every_side() async throws {
-        let gaps = try await measure("mediakeys", pluginScreen("볼륨과 밝기", MediaKeysStandIn()))
-        expectEqualPadding(gaps, "mediakeys")
+    @Test func R15__the_volume_screen_keeps_the_same_padding_on_every_side() async throws {
+        let gaps = try await measure("volume", pluginScreen("볼륨", VolumeStandIn()))
+        expectEqualPadding(gaps, "volume")
+    }
+
+    @Test func R15__the_brightness_screen_keeps_the_same_padding_on_every_side() async throws {
+        let gaps = try await measure("brightness", pluginScreen("밝기", BrightnessStandIn()))
+        expectEqualPadding(gaps, "brightness")
     }
 
     @Test func R15__the_now_playing_screen_keeps_the_same_padding_on_every_side() async throws {
@@ -216,44 +234,34 @@ private struct BatteryStandIn: View {
     }
 }
 
-/// `MediaKeysView` with a volume and a brightness.
-private struct MediaKeysStandIn: View {
+/// `VolumeView` with a volume.
+private struct VolumeStandIn: View {
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            group("볼륨") {
-                HStack(spacing: 10) {
-                    Toggle(isOn: .constant(false)) { Image(systemName: "speaker.wave.1.fill") }
-                        .toggleStyle(.button)
-                        .frame(width: 28)
-                    Slider(value: .constant(0.06), in: 0...1) { Text("볼륨") }
-                        .labelsHidden()
-                        .frame(width: 200)
-                    Text("6%")
-                        .monospacedDigit()
-                        .frame(width: 40, alignment: .trailing)
-                }
-            }
-            group("밝기") {
-                HStack(spacing: 10) {
-                    Image(systemName: "sun.max.fill")
-                        .frame(width: 28)
-                    Slider(value: .constant(0.5), in: 0...1) { Text("밝기") }
-                        .labelsHidden()
-                        .frame(width: 200)
-                    Text("50%")
-                        .monospacedDigit()
-                        .frame(width: 40, alignment: .trailing)
-                }
-            }
+        HStack(spacing: 10) {
+            Toggle(isOn: .constant(false)) { Image(systemName: "speaker.wave.1.fill") }
+                .toggleStyle(.button)
+                .frame(width: 28)
+            Slider(value: .constant(0.06), in: 0...1) { Text("볼륨") }
+                .labelsHidden()
+                .frame(width: 200)
+            Text("6%")
+                .monospacedDigit()
+                .frame(width: 40, alignment: .trailing)
         }
     }
+}
 
-    private func group(_ title: String, @ViewBuilder _ content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            content()
+/// `BrightnessView` with a brightness.
+private struct BrightnessStandIn: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sun.max.fill")
+            Slider(value: .constant(0.5), in: 0...1) { Text("밝기") }
+                .labelsHidden()
+                .frame(width: 200)
+            Text("50%")
+                .monospacedDigit()
+                .frame(width: 40, alignment: .trailing)
         }
     }
 }

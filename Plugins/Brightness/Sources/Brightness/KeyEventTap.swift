@@ -18,7 +18,7 @@ protocol KeyEventTap: AnyObject {
 }
 
 /// A `CGEvent` tap at the HID level, placed first, that may drop events: an event the handler
-/// consumes never reaches the system, so the system's own volume and brightness display stays
+/// consumes never reaches the system, so the system's own brightness display stays
 /// hidden. Runs on the main run loop.
 final class SystemDefinedEventTap: KeyEventTap {
     private var port: CFMachPort?

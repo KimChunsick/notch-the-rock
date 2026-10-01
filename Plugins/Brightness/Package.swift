@@ -10,19 +10,19 @@ import PackageDescription
 //     -Xlinker -rpath -Xlinker $CLT/Frameworks -Xlinker -rpath -Xlinker $CLT/usr/lib
 
 let package = Package(
-    name: "MediaKeys",
+    name: "Brightness",
     platforms: [.macOS(.v14)],
     products: [
-        // scripts/build-plugin.sh wraps this dylib as MediaKeys.notchplugin. Keep the product name
+        // scripts/build-plugin.sh wraps this dylib as Brightness.notchplugin. Keep the product name
         // equal to the package folder name.
-        .library(name: "MediaKeys", type: .dynamic, targets: ["MediaKeys"]),
+        .library(name: "Brightness", type: .dynamic, targets: ["Brightness"]),
     ],
     dependencies: [
         // The shared SDK. Depend on NotchKit only: the app provides it at run time.
         .package(path: "../../SDK/NotchKit"),
     ],
     targets: [
-        .target(name: "MediaKeys", dependencies: [.product(name: "NotchKit", package: "NotchKit")]),
-        .testTarget(name: "MediaKeysTests", dependencies: ["MediaKeys"]),
+        .target(name: "Brightness", dependencies: [.product(name: "NotchKit", package: "NotchKit")]),
+        .testTarget(name: "BrightnessTests", dependencies: ["Brightness"]),
     ]
 )
