@@ -1,0 +1,88 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "notchtherock",
+  "title": "NotchTheRock",
+  "description": "NotchTheRock 노치를 열거나 플러그인 화면을 바로 열어요.",
+  "icon": "icon.png",
+  "author": "notchtherock",
+  "categories": [
+    "Productivity",
+    "System"
+  ],
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "open-notch",
+      "title": "노치 열기",
+      "description": "노치를 펼쳐 홈을 보여 줘요.",
+      "mode": "no-view"
+    },
+    {
+      "name": "open-clipboard",
+      "title": "복사 기록 열기",
+      "description": "노치를 펼쳐 복사 기록 화면을 열어요.",
+      "mode": "no-view"
+    },
+    {
+      "name": "open-system-stats",
+      "title": "시스템 상태 열기",
+      "description": "노치를 펼쳐 시스템 상태 화면을 열어요.",
+      "mode": "no-view"
+    },
+    {
+      "name": "open-battery",
+      "title": "배터리 열기",
+      "description": "노치를 펼쳐 배터리 화면을 열어요.",
+      "mode": "no-view"
+    },
+    {
+      "name": "open-now-playing",
+      "title": "음악 열기",
+      "description": "노치를 펼쳐 지금 재생 중인 음악 화면을 열어요.",
+      "mode": "no-view"
+    },
+    {
+      "name": "open-agents",
+      "title": "에이전트 열기",
+      "description": "노치를 펼쳐 에이전트 화면을 열어요.",
+      "mode": "no-view"
+    },
+    {
+      "name": "open-media-keys",
+      "title": "미디어 키 열기",
+      "description": "노치를 펼쳐 미디어 키 화면을 열어요.",
+      "mode": "no-view"
+    },
+    {
+      "name": "open-plugin",
+      "title": "플러그인 열기",
+      "description": "식별자로 고른 플러그인 화면을 노치에서 열어요.",
+      "mode": "no-view",
+      "arguments": [
+        {
+          "name": "pluginID",
+          "placeholder": "com.example.clock",
+          "type": "text",
+          "required": true
+        }
+      ]
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^2.6.0"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^2.2.0",
+    "@types/node": "22.19.17",
+    "@types/react": "19.0.10",
+    "eslint": "^10.11.0",
+    "prettier": "^3.9.9",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "build": "ray build -e dist -o dist",
+    "dev": "ray develop",
+    "fix-lint": "ray lint --fix",
+    "lint": "ray lint"
+  }
+}

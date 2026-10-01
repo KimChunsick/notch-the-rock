@@ -31,6 +31,11 @@ import OSLog
 // Opening the app again while it runs (Finder, Spotlight, `open -a NotchTheRock`) brings Settings to
 // the front, and this launch's onboarding too while its window is open and unfinished: an accessory
 // app has no Dock or menu bar icon to click instead.
+//
+// Links (Links/): `notchtherock://open` opens the home, `notchtherock://open/<plugin-id>` a plugin's
+// screen; the Raycast extension in Integrations/Raycast opens them. A link never opens Settings. One
+// that launches the app waits until the plugins are loaded; the greeting still plays first and the
+// linked screen shows when it ends, and onboarding follows its own rule above.
 
 /// The app's own lines in the unified log, where NSLog text is private:
 /// `log show --predicate 'subsystem == "com.notchtherock.NotchTheRock"'`. Declared before the code
@@ -58,7 +63,8 @@ MainActor.assumeIsolated {
     let catalog = PluginCatalog(host: host, locations: .standard)
     let settings = SettingsWindowController(catalog: catalog)
     let window = NotchWindowController(host: host, openSettings: { settings.show() })
-    let delegate = AppDelegate(settings: settings)
+    let links = LinkRouter(target: host)
+    let delegate = AppDelegate(showSettings: { settings.show() }, links: links)
     let application = NSApplication.shared
     application.delegate = delegate
     application.setActivationPolicy(.accessory)
@@ -75,6 +81,7 @@ MainActor.assumeIsolated {
         catalog.reload()
     }
     #endif
+    links.pluginsDidLoad()
     for record in catalog.records {
         NSLog("NotchTheRock: plugin %@ (%@): %@", record.identifier ?? record.name, record.source.label, record.stateText)
     }
@@ -100,12 +107,22 @@ MainActor.assumeIsolated {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let settings: SettingsWindowController
+    private let showSettings: () -> Void
+    private let links: LinkRouter
     /// This launch's onboarding, when it shows one.
     var onboarding: OnboardingWindowController?
 
-    init(settings: SettingsWindowController) {
-        self.settings = settings
+    init(showSettings: @escaping () -> Void, links: LinkRouter) {
+        self.showSettings = showSettings
+        self.links = links
+    }
+
+    /// AppKit hands every `notchtherock://` URL here, the one that launches the app included. That
+    /// event is dispatched only once `run()` has started, after the delegate is set, so it is not
+    /// lost; the router holds it until the plugins are loaded. Links go to the notch only, never to
+    /// Settings.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        urls.forEach(links.receive)
     }
 
     /// Opening the running app again sends a reopen event, also to an accessory app. It is the way
@@ -114,7 +131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The onboarding window's delegate is its controller from the moment it opens until it closes.
         let onboardingWindowIsOpen = onboarding.map { controller in NSApp.windows.contains { $0.delegate === controller } } ?? false
         let windows = ReopenWindows.of(onboarding: onboarding?.model, onboardingWindowIsOpen: onboardingWindowIsOpen)
-        settings.show()
+        showSettings()
         if windows.contains(.onboarding) {
             // After Settings, so the floating onboarding ends up on top.
             onboarding?.bringForward()
