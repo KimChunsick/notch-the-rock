@@ -386,21 +386,20 @@ private func put(_ text: String, on pasteboard: NSPasteboard) {
     pasteboard.setString(text, forType: .string)
 }
 
-/// Whether `history` lists `content` within a second, the time R09 gives a copy to show. Tests run
-/// in parallel and some hold the main actor for seconds (offscreen windows); the monitor polls on
-/// the main actor as well, so a wait step that took longer than five steps counts as five: only the
-/// time the main actor was free for the monitor counts against the copy.
+/// Whether `history` lists `content` within a second of this call, the time R09 gives a copy to
+/// show, on the monotonic clock with nothing discounted: an entry seen only after the deadline does
+/// not count. Call it right after the copy, in `MainActorTimingTests` after
+/// `waitForAQuietMainActor()`, so other tests holding the main actor do not run meanwhile.
 @MainActor
 private func showsWithinASecond(_ content: ClipItem.Content, in history: ClipboardHistory) async -> Bool {
-    let step = Duration.milliseconds(20)
-    var waited = Duration.zero
-    while waited < .seconds(1) {
-        if history.items.contains(where: { $0.content == content }) { return true }
-        let start = ContinuousClock.now
-        try? await Task.sleep(for: step)
-        waited += min(ContinuousClock.now - start, step * 5)
+    let deadline = ContinuousClock.now + .seconds(1)
+    while true {
+        let shows = history.items.contains { $0.content == content }
+        // The clock is read after looking, so a hit counts only if it was there by the deadline.
+        guard ContinuousClock.now <= deadline else { return false }
+        if shows { return true }
+        try? await Task.sleep(for: .milliseconds(10))
     }
-    return history.items.contains { $0.content == content }
 }
 
 /// The list on disk, opened with the key now under the key's account.
@@ -409,56 +408,62 @@ private func storedContents(in directory: URL, keychain: FakeKeychain) throws ->
     return try ClipboardStore(directory: directory, key: key).loadList().map(\.content)
 }
 
-/// However long the key takes to load, a copy shows in the list within a second, and it is saved
-/// once the history opens.
-@MainActor
-@Test func R09__a_copy_shows_within_a_second_while_the_key_loads() async throws {
-    let directory = try makeDirectory()
-    let keychain = FakeKeychain()
-    keychain.isHeld = true
-    defer { keychain.isHeld = false }
-    let pasteboard = makePasteboard()
-    defer { pasteboard.releaseGlobally() }
-    let plugin = try makePlugin(directory: directory, keychain: keychain, pasteboard: pasteboard)
+extension MainActorTimingTests {
+    /// However long the key takes to load, a copy shows in the list within a second, and it is saved
+    /// once the history opens.
+    @MainActor
+    @Test func R09__a_copy_shows_within_a_second_while_the_key_loads() async throws {
+        let directory = try makeDirectory()
+        let keychain = FakeKeychain()
+        keychain.isHeld = true
+        defer { keychain.isHeld = false }
+        let pasteboard = makePasteboard()
+        defer { pasteboard.releaseGlobally() }
+        let plugin = try makePlugin(directory: directory, keychain: keychain, pasteboard: pasteboard)
 
-    plugin.activate()
-    put("copied while the key loads", on: pasteboard)
-    #expect(await showsWithinASecond(.text("copied while the key loads"), in: plugin.history))
-    #expect(keychain.calls.isEmpty, "the key is still loading")
+        await waitForAQuietMainActor()
+        plugin.activate()
+        put("copied while the key loads", on: pasteboard)
+        #expect(await showsWithinASecond(.text("copied while the key loads"), in: plugin.history))
+        #expect(keychain.calls.isEmpty, "the key is still loading")
 
-    keychain.isHeld = false
-    await plugin.opening?.value
-    plugin.deactivate()
-    #expect(plugin.history.items.map(\.content) == [.text("copied while the key loads")])
-    #expect(try storedContents(in: directory, keychain: keychain) == [.text("copied while the key loads")])
+        keychain.isHeld = false
+        await plugin.opening?.value
+        plugin.deactivate()
+        #expect(plugin.history.items.map(\.content) == [.text("copied while the key loads")])
+        #expect(try storedContents(in: directory, keychain: keychain) == [.text("copied while the key loads")])
+    }
 }
 
-/// Turning the feature off while the key loads loses no copy made meanwhile: turned on again, the
-/// history opens with every one of them, newest first, and saves them.
-@MainActor
-@Test func R09__copies_survive_turning_off_while_the_key_loads() async throws {
-    let directory = try makeDirectory()
-    let keychain = FakeKeychain()
-    keychain.isHeld = true
-    defer { keychain.isHeld = false }
-    let pasteboard = makePasteboard()
-    defer { pasteboard.releaseGlobally() }
-    let plugin = try makePlugin(directory: directory, keychain: keychain, pasteboard: pasteboard)
+extension MainActorTimingTests {
+    /// Turning the feature off while the key loads loses no copy made meanwhile: turned on again, the
+    /// history opens with every one of them, newest first, and saves them.
+    @MainActor
+    @Test func R09__copies_survive_turning_off_while_the_key_loads() async throws {
+        let directory = try makeDirectory()
+        let keychain = FakeKeychain()
+        keychain.isHeld = true
+        defer { keychain.isHeld = false }
+        let pasteboard = makePasteboard()
+        defer { pasteboard.releaseGlobally() }
+        let plugin = try makePlugin(directory: directory, keychain: keychain, pasteboard: pasteboard)
 
-    plugin.activate()
-    for text in ["copy A", "copy B"] {
-        put(text, on: pasteboard)
-        #expect(await showsWithinASecond(.text(text), in: plugin.history))
+        await waitForAQuietMainActor()
+        plugin.activate()
+        for text in ["copy A", "copy B"] {
+            put(text, on: pasteboard)
+            #expect(await showsWithinASecond(.text(text), in: plugin.history))
+        }
+        plugin.deactivate()
+        keychain.isHeld = false
+        plugin.activate()
+        await plugin.opening?.value
+        plugin.deactivate()
+
+        let expected: [ClipItem.Content] = [.text("copy B"), .text("copy A")]
+        #expect(plugin.history.items.map(\.content) == expected)
+        #expect(try storedContents(in: directory, keychain: keychain) == expected)
     }
-    plugin.deactivate()
-    keychain.isHeld = false
-    plugin.activate()
-    await plugin.opening?.value
-    plugin.deactivate()
-
-    let expected: [ClipItem.Content] = [.text("copy B"), .text("copy A")]
-    #expect(plugin.history.items.map(\.content) == expected)
-    #expect(try storedContents(in: directory, keychain: keychain) == expected)
 }
 
 /// A new key that could not be stored leaves the marker; later the old key can be read and is
@@ -524,15 +529,17 @@ private func apply(_ state: KeyState, to keychain: FakeKeychain, needingAccess b
     keychain.isHeld = state == .held
 }
 
-/// Random sessions from fixed seeds: copies, turning the feature off and on, and a key that waits,
-/// fails or is saved right before an interruption. After each copy it must show within a second;
-/// once the keychain answers again and the history opens: every copy is listed and saved, newest
-/// first; a history that the final key opens was never deleted; no marker is left; and no keychain
-/// call ran on the main thread.
-@MainActor
-@Test func R09__random_sessions_keep_every_copy_and_every_readable_history() async throws {
-    for seed in UInt64(1)...12 {
-        try await runRandomSession(seed: seed)
+extension MainActorTimingTests {
+    /// Random sessions from fixed seeds: copies, turning the feature off and on, and a key that waits,
+    /// fails or is saved right before an interruption. After each copy it must show within a second;
+    /// once the keychain answers again and the history opens: every copy is listed and saved, newest
+    /// first; a history that the final key opens was never deleted; no marker is left; and no keychain
+    /// call ran on the main thread.
+    @MainActor
+    @Test func R09__random_sessions_keep_every_copy_and_every_readable_history() async throws {
+        for seed in UInt64(1)...12 {
+            try await runRandomSession(seed: seed)
+        }
     }
 }
 
@@ -571,6 +578,7 @@ private func runRandomSession(seed: UInt64) async throws {
     defer { pasteboard.releaseGlobally() }
     let plugin = try makePlugin(directory: directory, keychain: keychain, pasteboard: pasteboard)
 
+    await waitForAQuietMainActor()
     var log = ["seed \(seed)", "\(start)", "\(keyState)"]
     var copies: [String] = []
     var isActive = false
@@ -630,4 +638,127 @@ private func runRandomSession(seed: UInt64) async throws {
         }
     }
     #expect(keychain.calls.allSatisfy { !$0.onMain }, comment)
+}
+
+/// The plugin over a stored history of `stored`, newest first, with `pinned` among them pinned,
+/// activated while its key loads: copies show, but the stored history is not read yet.
+@MainActor
+private func activateWhileTheKeyLoads(over stored: [String], pinned: Set<String> = [], pasteboard: NSPasteboard) throws -> (plugin: ClipboardPlugin, keychain: FakeKeychain, directory: URL) {
+    let directory = try makeDirectory()
+    let key = makeKey()
+    let history = makeHistory(directory: directory, key: key)
+    for text in stored.reversed() {
+        history.record(.text(text))
+    }
+    for item in history.items where pinned.contains(item.text ?? "") {
+        history.setPinned(true, for: item.id)
+    }
+    history.flush()
+    let keychain = FakeKeychain()
+    keychain.items[HistoryKey.account] = FakeKeychain.Item(data: bytes(of: key), access: .anyApplication)
+    keychain.isHeld = true
+    let plugin = try makePlugin(directory: directory, keychain: keychain, pasteboard: pasteboard)
+    plugin.activate()
+    return (plugin, keychain, directory)
+}
+
+/// Copies `text` and waits until the plugin lists it; how long that takes is the timing tests' job.
+@MainActor
+private func copy(_ text: String, on pasteboard: NSPasteboard, into plugin: ClipboardPlugin) async throws {
+    put(text, on: pasteboard)
+    let giveUp = ContinuousClock.now + .seconds(30)
+    while !plugin.history.items.contains(where: { $0.content == .text(text) }) {
+        try #require(ContinuousClock.now < giveUp, "\(text) never showed")
+        try await Task.sleep(for: .milliseconds(20))
+    }
+}
+
+/// Lets the key load, waits until the history opens and turns the feature off.
+@MainActor
+private func finishOpening(_ plugin: ClipboardPlugin, keychain: FakeKeychain) async {
+    keychain.isHeld = false
+    await plugin.opening?.value
+    plugin.deactivate()
+}
+
+/// The entry holding `text`, in the list in memory.
+@MainActor
+private func entry(_ text: String, in plugin: ClipboardPlugin) throws -> ClipItem {
+    try #require(plugin.history.items.first { $0.content == .text(text) })
+}
+
+/// A copy deleted while the key loads stays deleted once the stored history, which holds the same
+/// text, opens.
+@MainActor
+@Test func R09__a_copy_deleted_while_the_history_opens_stays_deleted() async throws {
+    let pasteboard = makePasteboard()
+    defer { pasteboard.releaseGlobally() }
+    let (plugin, keychain, directory) = try activateWhileTheKeyLoads(over: ["deleted", "kept"], pasteboard: pasteboard)
+    defer { keychain.isHeld = false }
+
+    try await copy("deleted", on: pasteboard, into: plugin)
+    plugin.history.delete(try entry("deleted", in: plugin).id)
+    await finishOpening(plugin, keychain: keychain)
+
+    #expect(plugin.history.items.map(\.content) == [.text("kept")])
+    #expect(try storedContents(in: directory, keychain: keychain) == [.text("kept")])
+}
+
+/// Clearing while the key loads clears the unpinned entries of the stored history too; a pinned
+/// one stays, and so does a copy made after the clearing.
+@MainActor
+@Test func R09__clearing_while_the_history_opens_clears_the_stored_entries_too() async throws {
+    let pasteboard = makePasteboard()
+    defer { pasteboard.releaseGlobally() }
+    let (plugin, keychain, directory) = try activateWhileTheKeyLoads(over: ["stored 1", "pinned", "stored 2"], pinned: ["pinned"], pasteboard: pasteboard)
+    defer { keychain.isHeld = false }
+
+    try await copy("copied before clearing", on: pasteboard, into: plugin)
+    plugin.history.clearUnpinned()
+    try await copy("copied after clearing", on: pasteboard, into: plugin)
+    await finishOpening(plugin, keychain: keychain)
+
+    let expected: [ClipItem.Content] = [.text("copied after clearing"), .text("pinned")]
+    #expect(plugin.history.items.map(\.content) == expected)
+    #expect(try storedContents(in: directory, keychain: keychain) == expected)
+}
+
+/// A pin set or cleared on a copy while the key loads holds once the stored history opens, whatever
+/// the stored entry with the same text had; a copy left alone keeps the stored pin.
+@MainActor
+@Test func R09__pins_set_or_cleared_while_the_history_opens_hold() async throws {
+    let pasteboard = makePasteboard()
+    defer { pasteboard.releaseGlobally() }
+    let texts = ["pinned now", "unpinned now", "left alone"]
+    let (plugin, keychain, directory) = try activateWhileTheKeyLoads(over: texts, pinned: ["unpinned now", "left alone"], pasteboard: pasteboard)
+    defer { keychain.isHeld = false }
+
+    for text in texts.reversed() {
+        try await copy(text, on: pasteboard, into: plugin)
+    }
+    plugin.history.setPinned(true, for: try entry("pinned now", in: plugin).id)
+    plugin.history.setPinned(true, for: try entry("unpinned now", in: plugin).id)
+    plugin.history.setPinned(false, for: try entry("unpinned now", in: plugin).id)
+    await finishOpening(plugin, keychain: keychain)
+
+    let expected = ["pinned now": true, "unpinned now": false, "left alone": true]
+    let pins = Dictionary(uniqueKeysWithValues: plugin.history.items.map { ($0.text ?? "", $0.isPinned) })
+    #expect(pins == expected)
+    let key = SymmetricKey(data: try #require(keychain.items[HistoryKey.account]).data)
+    let stored = try ClipboardStore(directory: directory, key: key).loadList()
+    #expect(Dictionary(uniqueKeysWithValues: stored.map { ($0.text ?? "", $0.isPinned) }) == expected)
+}
+
+extension MainActorTimingTests {
+    /// The one-second check measures real time: a copy that shows only after the main actor was
+    /// held for one and a half seconds fails it.
+    @MainActor
+    @Test func R09__the_one_second_check_fails_a_copy_that_shows_after_one_and_a_half_seconds() async {
+        let history = ClipboardHistory(logError: { _ in })
+        Task { @MainActor in
+            usleep(1_500_000)
+            history.record(.text("late"))
+        }
+        #expect(await !showsWithinASecond(.text("late"), in: history))
+    }
 }

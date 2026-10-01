@@ -508,3 +508,47 @@ import Testing
     let restored = try #require(reloaded.items.first { $0.id == image.id })
     #expect(reloaded.imageData(for: restored) == png)
 }
+
+/// An image copied again while the key loads merges into the stored entry with that image. When
+/// the stored file is missing or damaged, the copy's PNG is written in its place, so the entry
+/// copies again; when that write fails too, the PNG stays in memory and the failure is logged.
+@MainActor
+@Test func R09__an_image_copied_again_repairs_a_missing_or_damaged_stored_file() throws {
+    let png = samplePNG(seed: 4)
+    for damage in ["missing", "damaged", "missing on a full disk"] {
+        let comment = Comment(rawValue: damage)
+        let directory = try makeDirectory()
+        let key = makeKey()
+        let stored = makeHistory(directory: directory, key: key)
+        let id = stored.record(.image(png: png, thumbnail: png))
+        stored.flush()
+        let file = imageFile(for: id, in: directory)
+        if damage == "damaged" {
+            try Data("damaged".utf8).write(to: file)
+        } else {
+            try FileManager.default.removeItem(at: file)
+        }
+        let fault = WriteFault()
+        fault.failsImages = damage.hasSuffix("full disk")
+        let errors = ErrorLog()
+        let history = ClipboardHistory(logError: errors.append)
+        history.record(.image(png: png, thumbnail: png))
+
+        history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
+        history.flush()
+
+        #expect(history.items.map(\.id) == [id], comment)
+        let entry = try #require(history.items.first, comment)
+        let pasteboard = makePasteboard()
+        #expect(history.copy(entry, to: pasteboard), comment)
+        #expect(pasteboard.data(forType: .png) == png, comment)
+        pasteboard.releaseGlobally()
+        if fault.failsImages {
+            #expect(errors.messages.contains { $0.contains("keeping it in memory") }, comment)
+            #expect(history.unsavedCount == 1, comment)
+        } else {
+            #expect(try ClipboardStore(directory: directory, key: key).imageData(for: id) == png, comment)
+            #expect(history.unsavedCount == 0, comment)
+        }
+    }
+}

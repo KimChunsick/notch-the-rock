@@ -44,34 +44,36 @@ private func bluePixelCount(_ image: CGImage) throws -> Int {
     return count
 }
 
-/// The screen shows a text, an image and a link as three cards in one row, newest first, each with
-/// "<app or kind> · <time ago>" under it; the link is drawn in blue. Renders R27-render-cards.png and,
-/// with more entries than fit and pinned ones first, R27-render-many.png.
-@MainActor
-@Test func R27__cards_show_text_image_and_link_with_captions() throws {
-    let history = try makeReferenceHistory()
-    let cards = ClipboardView.cards(history.matching(""))
-    #expect(cards.map(\.kind) == [.text, .image, .link])
-    #expect(cards.map { $0.caption(at: Date()) } == ["Terminal · 지금", "이미지 · 2분", "링크 · 5분"])
+extension MainActorTimingTests {
+    /// The screen shows a text, an image and a link as three cards in one row, newest first, each with
+    /// "<app or kind> · <time ago>" under it; the link is drawn in blue. Renders R27-render-cards.png and,
+    /// with more entries than fit and pinned ones first, R27-render-many.png.
+    @MainActor
+    @Test func R27__cards_show_text_image_and_link_with_captions() throws {
+        let history = try makeReferenceHistory()
+        let cards = ClipboardView.cards(history.matching(""))
+        #expect(cards.map(\.kind) == [.text, .image, .link])
+        #expect(cards.map { $0.caption(at: Date()) } == ["Terminal · 지금", "이미지 · 2분", "링크 · 5분"])
 
-    let size = NSHostingView(rootView: ClipboardView(history: history)).fittingSize
-    #expect(size.width <= 390 && size.height <= 400, "\(size)")
-    let (image, scale) = try renderOffscreen(ClipboardView(history: history).background(.black))
-    try save(image, as: "cards")
-    #expect(CGFloat(image.width) / scale == ClipboardView.width)
-    #expect(try bluePixelCount(image) > 20, "the link card has no blue text")
+        let size = NSHostingView(rootView: ClipboardView(history: history)).fittingSize
+        #expect(size.width <= 390 && size.height <= 400, "\(size)")
+        let (image, scale) = try renderOffscreen(ClipboardView(history: history).background(.black))
+        try save(image, as: "cards")
+        #expect(CGFloat(image.width) / scale == ClipboardView.width)
+        #expect(try bluePixelCount(image) > 20, "the link card has no blue text")
 
-    let many = makeHistory(directory: try makeDirectory(), key: makeKey())
-    let start = Date() - 4 * 86_400
-    for index in 1...7 {
-        many.record(.text("메모 \(index)\nlet answer = \(index * 6)"), at: start + Double(index) * 3_000, source: terminal)
+        let many = makeHistory(directory: try makeDirectory(), key: makeKey())
+        let start = Date() - 4 * 86_400
+        for index in 1...7 {
+            many.record(.text("메모 \(index)\nlet answer = \(index * 6)"), at: start + Double(index) * 3_000, source: terminal)
+        }
+        let oldest = try #require(many.items.last)
+        many.setPinned(true, for: oldest.id)
+        many.flush()
+        #expect(ClipboardView.cards(many.matching("")).first?.id == oldest.id)
+        #expect(ClipboardView.cards(many.matching("메모 3")).map(\.text) == ["메모 3\nlet answer = 18"])
+        try save(try renderOffscreen(ClipboardView(history: many).background(.black)).image, as: "many")
     }
-    let oldest = try #require(many.items.last)
-    many.setPinned(true, for: oldest.id)
-    many.flush()
-    #expect(ClipboardView.cards(many.matching("")).first?.id == oldest.id)
-    #expect(ClipboardView.cards(many.matching("메모 3")).map(\.text) == ["메모 3\nlet answer = 18"])
-    try save(try renderOffscreen(ClipboardView(history: many).background(.black)).image, as: "many")
 }
 
 /// Captions count whole minutes, hours and days, and name the kind when the app is not known.
@@ -167,24 +169,26 @@ private final class HostedScreen {
     }
 }
 
-/// Clicking a card in the window puts that card's entry back on the screen's pasteboard, here a
-/// private one, as its original type; clicking another card puts that one there instead.
-@MainActor
-@Test func R27__clicking_a_card_copies_it_again() throws {
-    let pasteboard = makePasteboard()
-    defer { pasteboard.releaseGlobally() }
-    let history = try makeReferenceHistory()
-    let screen = HostedScreen(ClipboardView(history: history, pasteboard: pasteboard))
-    defer { screen.close() }
+extension MainActorTimingTests {
+    /// Clicking a card in the window puts that card's entry back on the screen's pasteboard, here a
+    /// private one, as its original type; clicking another card puts that one there instead.
+    @MainActor
+    @Test func R27__clicking_a_card_copies_it_again() throws {
+        let pasteboard = makePasteboard()
+        defer { pasteboard.releaseGlobally() }
+        let history = try makeReferenceHistory()
+        let screen = HostedScreen(ClipboardView(history: history, pasteboard: pasteboard))
+        defer { screen.close() }
 
-    screen.clickCard(2)
-    #expect(pasteboard.string(forType: .URL) == "https://developer.apple.com/design")
-    #expect(pasteboard.string(forType: .string) == "https://developer.apple.com/design")
-    screen.clickCard(0)
-    #expect(pasteboard.string(forType: .string) == "git push\norigin main")
-    #expect(pasteboard.string(forType: .URL) == nil)
-    screen.clickCard(1)
-    #expect(pasteboard.data(forType: .png) == samplePNG(width: 300, height: 180, seed: 90))
+        screen.clickCard(2)
+        #expect(pasteboard.string(forType: .URL) == "https://developer.apple.com/design")
+        #expect(pasteboard.string(forType: .string) == "https://developer.apple.com/design")
+        screen.clickCard(0)
+        #expect(pasteboard.string(forType: .string) == "git push\norigin main")
+        #expect(pasteboard.string(forType: .URL) == nil)
+        screen.clickCard(1)
+        #expect(pasteboard.data(forType: .png) == samplePNG(width: 300, height: 180, seed: 90))
+    }
 }
 
 /// The keys the screen takes: ← and → move between the cards only when the search field is empty
@@ -232,53 +236,55 @@ private final class HostedScreen {
     #expect(action(.down, count: 0) == .passThrough)
 }
 
-/// The same keys sent to the screen in a window: with text in the field ← moves the caret and leaves
-/// the selection; an empty field's → selects; ↓ takes the focus out of the field into the row and
-/// ↑ brings it back, as Tab and Shift-Tab do; Return copies the selected card.
-@MainActor
-@Test func R27__keys_in_a_window_reach_the_caret_or_the_cards() throws {
-    let pasteboard = makePasteboard()
-    defer { pasteboard.releaseGlobally() }
-    let history = makeHistory(directory: try makeDirectory(), key: makeKey())
-    let now = Date()
-    for (offset, text) in ["alpha one", "alpha two", "alpha three"].enumerated() {
-        history.record(.text(text), at: now + Double(offset))
+extension MainActorTimingTests {
+    /// The same keys sent to the screen in a window: with text in the field ← moves the caret and leaves
+    /// the selection; an empty field's → selects; ↓ takes the focus out of the field into the row and
+    /// ↑ brings it back, as Tab and Shift-Tab do; Return copies the selected card.
+    @MainActor
+    @Test func R27__keys_in_a_window_reach_the_caret_or_the_cards() throws {
+        let pasteboard = makePasteboard()
+        defer { pasteboard.releaseGlobally() }
+        let history = makeHistory(directory: try makeDirectory(), key: makeKey())
+        let now = Date()
+        for (offset, text) in ["alpha one", "alpha two", "alpha three"].enumerated() {
+            history.record(.text(text), at: now + Double(offset))
+        }
+        let screen = HostedScreen(ClipboardView(history: history, pasteboard: pasteboard))
+        defer { screen.close() }
+        #expect(screen.fieldEditor != nil, "the search field has the focus")
+
+        // An empty field: → → selects the second card.
+        screen.press(.right)
+        screen.press(.right)
+        screen.press(.enter)
+        #expect(pasteboard.string(forType: .string) == "alpha two")
+
+        // Text in the field: ← moves the caret and the selection stays.
+        screen.type("a", keyCode: 0)
+        screen.type("l", keyCode: 37)
+        #expect(screen.fieldEditor?.string == "al")
+        #expect(screen.fieldEditor?.selectedRange().location == 2)
+        screen.press(.left)
+        #expect(screen.fieldEditor?.selectedRange().location == 1)
+        pasteboard.clearContents()
+        screen.press(.enter)
+        #expect(pasteboard.string(forType: .string) == "alpha two")
+
+        // ↓ moves into the row, where → selects the next card; ↑ goes back to the field.
+        screen.press(.down)
+        #expect(screen.fieldEditor == nil, "the focus left the field")
+        screen.press(.right)
+        screen.press(.enter)
+        #expect(pasteboard.string(forType: .string) == "alpha one")
+        screen.press(.up)
+        #expect(screen.fieldEditor?.string == "al")
+
+        // Tab and Shift-Tab do the same.
+        screen.press(.tab)
+        #expect(screen.fieldEditor == nil, "the focus left the field")
+        screen.press(.backTab)
+        #expect(screen.fieldEditor?.string == "al")
     }
-    let screen = HostedScreen(ClipboardView(history: history, pasteboard: pasteboard))
-    defer { screen.close() }
-    #expect(screen.fieldEditor != nil, "the search field has the focus")
-
-    // An empty field: → → selects the second card.
-    screen.press(.right)
-    screen.press(.right)
-    screen.press(.enter)
-    #expect(pasteboard.string(forType: .string) == "alpha two")
-
-    // Text in the field: ← moves the caret and the selection stays.
-    screen.type("a", keyCode: 0)
-    screen.type("l", keyCode: 37)
-    #expect(screen.fieldEditor?.string == "al")
-    #expect(screen.fieldEditor?.selectedRange().location == 2)
-    screen.press(.left)
-    #expect(screen.fieldEditor?.selectedRange().location == 1)
-    pasteboard.clearContents()
-    screen.press(.enter)
-    #expect(pasteboard.string(forType: .string) == "alpha two")
-
-    // ↓ moves into the row, where → selects the next card; ↑ goes back to the field.
-    screen.press(.down)
-    #expect(screen.fieldEditor == nil, "the focus left the field")
-    screen.press(.right)
-    screen.press(.enter)
-    #expect(pasteboard.string(forType: .string) == "alpha one")
-    screen.press(.up)
-    #expect(screen.fieldEditor?.string == "al")
-
-    // Tab and Shift-Tab do the same.
-    screen.press(.tab)
-    #expect(screen.fieldEditor == nil, "the focus left the field")
-    screen.press(.backTab)
-    #expect(screen.fieldEditor?.string == "al")
 }
 
 /// The app a test puts in front.
