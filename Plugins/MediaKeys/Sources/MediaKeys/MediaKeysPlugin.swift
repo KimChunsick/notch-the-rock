@@ -5,6 +5,11 @@ import SwiftUI
 /// directly and slides a bar out of the notch instead of the system's own display. The expanded tab
 /// and the home tile adjust the same values.
 ///
+/// A key press is decided once, at its key-down: when the plugin handles it, its auto-repeats and
+/// its release are the plugin's as well; when the key-down goes to the system, the rest of that
+/// press goes there untouched, so the system never sees a release without its press or the other
+/// way round.
+///
 /// The key tap needs the Accessibility permission. Without it the keys stay with the system, the
 /// notch shows the guidance once per activation, and the plugin checks every
 /// `permissionPollInterval` until the permission is on, then installs the tap.
@@ -31,8 +36,9 @@ public final class MediaKeysPlugin: NotchPlugin {
     private var isActive = false
     private var guidanceTask: Task<Void, Never>?
     private var permissionTask: Task<Void, Never>?
-    /// Keys whose last press the plugin handled: their release is dropped too. A release whose press
-    /// went to the system goes to the system as well.
+    /// Keys held down in a press whose key-down the plugin handled: their repeats and release are
+    /// consumed too. A repeat or release of any other press (its key-down went to the system, or came
+    /// before the tap) goes to the system untouched.
     private var handledKeys: Set<MediaKey> = []
 
     public convenience init(context: NotchContext) {
@@ -100,12 +106,19 @@ public final class MediaKeysPlugin: NotchPlugin {
         case .up:
             return handledKeys.remove(press.key) != nil
         case .down:
-            if press.isRepeat, press.key == .mute {
-                // Holding the mute key does not flip it back and forth, as with the system.
-                return handledKeys.contains(.mute)
-            }
             let fine = event.flags.contains(.maskAlternate) && event.flags.contains(.maskShift)
-            let handled = perform(press.key, steps: fine ? Self.fineSteps : Self.steps)
+            let steps = fine ? Self.fineSteps : Self.steps
+            if press.isRepeat {
+                guard handledKeys.contains(press.key) else { return false }
+                // Holding the mute key does not flip it back and forth, as with the system. A repeat
+                // the device refuses stays consumed: the system must not see a repeat without its press.
+                if press.key != .mute {
+                    _ = perform(press.key, steps: steps, consumed: true)
+                }
+                return true
+            }
+            // A key-down whose release never came starts a new press all the same.
+            let handled = perform(press.key, steps: steps, consumed: false)
             if handled {
                 handledKeys.insert(press.key)
             } else {
@@ -115,10 +128,12 @@ public final class MediaKeysPlugin: NotchPlugin {
         }
     }
 
-    /// Applies a key press (or its auto-repeat) and shows the HUD. False leaves the key to the
-    /// system: a volume or mute change the device cannot make or refuses gets a HUD saying so with
-    /// what the device holds, a brightness change the display cannot make or refuses gets nothing.
-    private func perform(_ key: MediaKey, steps: Int) -> Bool {
+    /// Applies a key-down or an auto-repeat and shows the HUD: true when the device took the change.
+    /// A volume or mute change the device cannot make or refuses gets a HUD saying so with what the
+    /// device holds. A brightness change the display cannot make or refuses gets one only when the
+    /// event is `consumed` whatever the outcome (a repeat of a handled press); otherwise the key goes
+    /// to the system, which shows its own.
+    private func perform(_ key: MediaKey, steps: Int, consumed: Bool) -> Bool {
         switch key {
         case .soundUp, .soundDown:
             return show(model.stepVolume(by: key == .soundUp ? 1 : -1, steps: steps), title: "볼륨")
@@ -126,6 +141,9 @@ public final class MediaKeysPlugin: NotchPlugin {
             return show(model.toggleMute(), title: "음소거")
         case .brightnessUp, .brightnessDown:
             guard let value = model.stepBrightness(by: key == .brightnessUp ? 1 : -1, steps: steps) else {
+                if consumed {
+                    showHUD(.unchangeableBrightness(model.brightness))
+                }
                 return false
             }
             showHUD(.brightness(value))
@@ -217,6 +235,11 @@ extension HUD {
             return HUD(symbol: "speaker.slash.fill", title: title, detail: "바꿀 수 없어요")
         }
         return HUD(symbol: state.symbol, title: title, value: state.isMuted ? 0 : state.level, detail: "바꿀 수 없어요")
+    }
+
+    /// A brightness key the display did not take, with the brightness it holds when known.
+    static func unchangeableBrightness(_ value: Double?) -> HUD {
+        HUD(symbol: "sun.max.fill", title: "밝기", value: value, detail: "바꿀 수 없어요")
     }
 }
 

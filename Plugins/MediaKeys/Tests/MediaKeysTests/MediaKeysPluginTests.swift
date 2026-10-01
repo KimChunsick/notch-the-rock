@@ -44,6 +44,8 @@ private final class FakeVolume: VolumeControl {
     var afterRead: (@MainActor () -> Void)?
     /// The device of every read and write, in order.
     var touched: [AudioObjectID] = []
+    /// Every write asked of a device, the refused ones included.
+    var writes: [String] = []
 
     init(_ state: VolumeState?) { self.state = state }
 
@@ -66,6 +68,7 @@ private final class FakeVolume: VolumeControl {
 
     func setLevel(_ level: Double, on device: AudioObjectID) -> Bool {
         touched.append(device)
+        writes.append("level \(level)")
         guard !refusesLevel, devices[device] != nil else { return false }
         devices[device]?.level = level
         return true
@@ -73,6 +76,7 @@ private final class FakeVolume: VolumeControl {
 
     func setMuted(_ muted: Bool, on device: AudioObjectID) -> Bool {
         touched.append(device)
+        writes.append("mute \(muted)")
         guard !refusesMute, devices[device] != nil else { return false }
         devices[device]?.isMuted = muted
         return true
@@ -83,9 +87,12 @@ private final class FakeVolume: VolumeControl {
 private final class FakeBrightness: BrightnessControl {
     var value: Double?
     var refuses = false
+    /// Every write asked of the display, the refused ones included.
+    var writes: [String] = []
     init(_ value: Double?) { self.value = value }
     func read() -> Double? { value }
     func set(_ value: Double) -> Bool {
+        writes.append("brightness \(value)")
         guard !refuses, self.value != nil else { return false }
         self.value = value
         return true
@@ -398,6 +405,131 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
         "speaker.wave.1.fill 볼륨 0.125 13%",
         "speaker.slash.fill 볼륨 - 바꿀 수 없어요",
     ])
+}
+
+@MainActor
+@Test func R12__a_handled_press_keeps_its_repeats_and_release_even_when_a_repeat_is_refused() throws {
+    let h = try Harness()
+    h.plugin.activate()
+
+    // Volume up: the device refuses the first repeat and takes the next one.
+    var consumed = [h.send(0, down)]
+    h.volume.refusesLevel = true
+    consumed.append(h.send(0, down, repeat: true))
+    h.volume.refusesLevel = false
+    consumed += [h.send(0, down, repeat: true), h.send(0, up)]
+    // Mute: holding it changes nothing more.
+    consumed += [h.send(7, down), h.send(7, down, repeat: true), h.send(7, down, repeat: true), h.send(7, up)]
+    // Brightness up, refused and taken the same way.
+    consumed.append(h.send(2, down))
+    h.brightness.refuses = true
+    consumed.append(h.send(2, down, repeat: true))
+    h.brightness.refuses = false
+    consumed += [h.send(2, down, repeat: true), h.send(2, up)]
+
+    #expect(consumed == Array(repeating: true, count: 12))
+    #expect(h.volume.writes == ["level 0.5625", "level 0.625", "level 0.625", "mute true"])
+    #expect(h.brightness.writes == ["brightness 0.5625", "brightness 0.625", "brightness 0.625"])
+    #expect(h.host.huds == [
+        "speaker.wave.2.fill 볼륨 0.5625 56%",
+        "speaker.wave.2.fill 볼륨 0.5625 바꿀 수 없어요",
+        "speaker.wave.2.fill 볼륨 0.625 63%",
+        "speaker.slash.fill 음소거 0.0 -",
+        "sun.max.fill 밝기 0.5625 56%",
+        "sun.max.fill 밝기 0.5625 바꿀 수 없어요",
+        "sun.max.fill 밝기 0.625 63%",
+    ])
+}
+
+@MainActor
+@Test func R12__a_press_the_system_got_keeps_its_repeats_and_release_without_writes() throws {
+    let h = try Harness()
+    h.plugin.activate()
+
+    // Volume up: the device refuses the key-down and recovers before the first repeat.
+    h.volume.refusesLevel = true
+    var consumed = [h.send(0, down)]
+    h.volume.refusesLevel = false
+    consumed += [h.send(0, down, repeat: true), h.send(0, down, repeat: true), h.send(0, up)]
+    // Volume down while no output device can be set, which comes back meanwhile.
+    h.volume.state = nil
+    consumed.append(h.send(1, down))
+    h.volume.state = VolumeState(level: 0.5, isMuted: false, canMute: true)
+    consumed += [h.send(1, down, repeat: true), h.send(1, up)]
+    // Mute.
+    h.volume.refusesMute = true
+    consumed.append(h.send(7, down))
+    h.volume.refusesMute = false
+    consumed += [h.send(7, down, repeat: true), h.send(7, up)]
+    // Brightness refused, then unavailable.
+    h.brightness.refuses = true
+    consumed.append(h.send(2, down))
+    h.brightness.refuses = false
+    consumed += [h.send(2, down, repeat: true), h.send(2, up)]
+    h.brightness.value = nil
+    consumed.append(h.send(3, down))
+    h.brightness.value = 0.5
+    consumed += [h.send(3, down, repeat: true), h.send(3, up)]
+
+    #expect(consumed == Array(repeating: false, count: 16))
+    #expect(h.volume.writes == ["level 0.5625", "mute true"])
+    #expect(h.brightness.writes == ["brightness 0.5625"])
+    #expect(h.volume.state == VolumeState(level: 0.5, isMuted: false, canMute: true))
+    #expect(h.brightness.value == 0.5)
+    #expect(h.host.huds == [
+        "speaker.wave.2.fill 볼륨 0.5 바꿀 수 없어요",
+        "speaker.slash.fill 볼륨 - 바꿀 수 없어요",
+        "speaker.wave.2.fill 음소거 0.5 바꿀 수 없어요",
+    ])
+}
+
+@MainActor
+@Test func R12__a_press_held_while_the_permission_arrives_stays_with_the_system() async throws {
+    let h = try Harness(trusted: false)
+    h.plugin.activate()
+
+    // No tap yet: every key-down goes to the system.
+    #expect([h.send(0, down), h.send(7, down), h.send(2, down)] == [nil, nil, nil])
+    h.host.isAccessibilityTrusted = true
+    #expect(await waitUntil { h.tap.isInstalled })
+    let rest = [
+        h.send(0, down, repeat: true), h.send(0, up),
+        h.send(7, down, repeat: true), h.send(7, up),
+        h.send(2, down, repeat: true), h.send(2, up),
+    ]
+    #expect(rest == Array(repeating: false, count: 6))
+    #expect(h.volume.writes.isEmpty && h.brightness.writes.isEmpty)
+
+    // The next press is the plugin's.
+    #expect([h.send(0, down), h.send(0, down, repeat: true), h.send(0, up)] == [true, true, true])
+    h.plugin.deactivate()
+}
+
+@MainActor
+@Test func R12__a_key_down_after_a_missed_release_starts_a_new_press() throws {
+    let h = try Harness()
+    h.plugin.activate()
+
+    // A handled press whose release never came, then a press the device refuses.
+    var consumed = [h.send(0, down)]
+    h.volume.refusesLevel = true
+    consumed.append(h.send(0, down))
+    h.volume.refusesLevel = false
+    consumed += [h.send(0, down, repeat: true), h.send(0, up)]
+    consumed.append(h.send(7, down))
+    h.volume.refusesMute = true
+    consumed.append(h.send(7, down))
+    h.volume.refusesMute = false
+    consumed += [h.send(7, down, repeat: true), h.send(7, up)]
+    // A refused press whose release never came, then a handled one.
+    h.brightness.refuses = true
+    consumed.append(h.send(2, down))
+    h.brightness.refuses = false
+    consumed += [h.send(2, down), h.send(2, down, repeat: true), h.send(2, up)]
+
+    #expect(consumed == [true, false, false, false, true, false, false, false, false, true, true, true])
+    #expect(h.volume.writes == ["level 0.5625", "level 0.625", "mute true", "mute false"])
+    #expect(h.brightness.writes == ["brightness 0.5625", "brightness 0.5625", "brightness 0.625"])
 }
 
 /// The labels of every slider under `element`, in order.
