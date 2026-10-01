@@ -257,9 +257,9 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     #expect(h.send(0, down) == true)
 
     #expect(h.host.huds == [
-        "speaker.slash.fill 볼륨 - 바꿀 수 없어요",
-        "speaker.slash.fill 음소거 - 바꿀 수 없어요",
-        "speaker.slash.fill 음소거 - 바꿀 수 없어요",
+        "speaker.badge.exclamationmark.fill 볼륨 - 바꿀 수 없어요",
+        "speaker.badge.exclamationmark.fill 음소거 - 바꿀 수 없어요",
+        "speaker.badge.exclamationmark.fill 음소거 - 바꿀 수 없어요",
         "speaker.wave.2.fill 볼륨 0.5625 56%",
     ])
 }
@@ -281,8 +281,8 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     #expect(h.volume.state?.isMuted == false)
 
     #expect(h.host.huds == [
-        "speaker.wave.2.fill 볼륨 0.5 바꿀 수 없어요",
-        "speaker.wave.2.fill 음소거 0.5 바꿀 수 없어요",
+        "speaker.badge.exclamationmark.fill 볼륨 0.5 바꿀 수 없어요",
+        "speaker.badge.exclamationmark.fill 음소거 0.5 바꿀 수 없어요",
     ])
 }
 @MainActor
@@ -346,7 +346,7 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     #expect(h.host.huds == [
         "speaker.wave.2.fill 볼륨 0.5625 56%",
         "speaker.wave.1.fill 볼륨 0.125 13%",
-        "speaker.slash.fill 볼륨 - 바꿀 수 없어요",
+        "speaker.badge.exclamationmark.fill 볼륨 - 바꿀 수 없어요",
     ])
 }
 @MainActor
@@ -367,7 +367,7 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     #expect(h.volume.writes == ["level 0.5625", "level 0.625", "level 0.625", "mute true"])
     #expect(h.host.huds == [
         "speaker.wave.2.fill 볼륨 0.5625 56%",
-        "speaker.wave.2.fill 볼륨 0.5625 바꿀 수 없어요",
+        "speaker.badge.exclamationmark.fill 볼륨 0.5625 바꿀 수 없어요",
         "speaker.wave.2.fill 볼륨 0.625 63%",
         "speaker.slash.fill 음소거 0.0 -",
     ])
@@ -397,9 +397,9 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     #expect(h.volume.writes == ["level 0.5625", "mute true"])
     #expect(h.volume.state == VolumeState(level: 0.5, isMuted: false, canMute: true))
     #expect(h.host.huds == [
-        "speaker.wave.2.fill 볼륨 0.5 바꿀 수 없어요",
-        "speaker.slash.fill 볼륨 - 바꿀 수 없어요",
-        "speaker.wave.2.fill 음소거 0.5 바꿀 수 없어요",
+        "speaker.badge.exclamationmark.fill 볼륨 0.5 바꿀 수 없어요",
+        "speaker.badge.exclamationmark.fill 볼륨 - 바꿀 수 없어요",
+        "speaker.badge.exclamationmark.fill 음소거 0.5 바꿀 수 없어요",
     ])
 }
 @MainActor
@@ -705,4 +705,39 @@ private func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom
     }
     #expect(h.volume.writes.isEmpty)
     #expect(h.host.huds.isEmpty)
+}
+
+/// The notch draws only the symbol and the bar, so a change the device does not take shows a
+/// speaker with an exclamation badge, never one of the speakers a change that went through shows.
+/// The value stays: the bar shows what the device holds.
+@MainActor
+@Test func R25__a_refused_change_shows_the_exclamation_speaker() throws {
+    let refused = "speaker.badge.exclamationmark.fill"
+    #expect(NSImage(systemSymbolName: refused, accessibilityDescription: nil) != nil)
+    let succeeded = ["speaker.slash.fill", "speaker.wave.1.fill", "speaker.wave.2.fill", "speaker.wave.3.fill"]
+    #expect(!succeeded.contains(refused))
+
+    let h = try Harness(volume: VolumeState(level: 0.5, isMuted: true, canMute: true))
+    h.plugin.activate()
+    _ = h.send(1, down)                                          // taken
+    h.volume.refusesLevel = true
+    _ = h.send(0, down)                                          // unmuted, level refused
+    h.volume.refusesMute = true
+    _ = h.send(7, down)                                          // mute refused
+    h.volume.state = VolumeState(level: 0.5, isMuted: false, canMute: false)
+    _ = h.send(7, down)                                          // no mute switch
+    h.volume.state = nil
+    _ = h.send(0, down)                                          // no settable output
+    h.volume.state = VolumeState(level: 0.25, isMuted: false, canMute: true)
+    h.volume.refusesLevel = false
+    _ = h.send(0, down)                                          // taken
+
+    #expect(h.host.huds == [
+        "speaker.slash.fill 음소거 0.0 -",
+        "\(refused) 볼륨 0.4375 바꿀 수 없어요",
+        "\(refused) 음소거 0.4375 바꿀 수 없어요",
+        "\(refused) 음소거 - 바꿀 수 없어요",
+        "\(refused) 볼륨 - 바꿀 수 없어요",
+        "speaker.wave.1.fill 볼륨 0.3125 31%",
+    ])
 }

@@ -215,9 +215,11 @@ extension HUD {
         HUD(symbol: "sun.max.fill", title: "밝기", value: value, detail: percentText(value))
     }
 
-    /// A brightness key the display did not take, with the brightness it holds when known.
+    /// A brightness key the display did not take, with the brightness it holds when known. The notch
+    /// draws no text, so a sun with an exclamation badge (macOS 13+) tells it apart from a change
+    /// that went through; it keeps the `sun.` prefix, by which the notch fills the bar warm.
     static func unchangeableBrightness(_ value: Double?) -> HUD {
-        HUD(symbol: "sun.max.fill", title: "밝기", value: value, detail: "바꿀 수 없어요")
+        HUD(symbol: "sun.max.trianglebadge.exclamationmark.fill", title: "밝기", value: value, detail: "바꿀 수 없어요")
     }
 }
 

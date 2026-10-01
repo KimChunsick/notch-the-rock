@@ -234,7 +234,7 @@ private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool)
     #expect(h.brightness.writes == ["brightness 0.5625", "brightness 0.625", "brightness 0.625"])
     #expect(h.host.huds == [
         "sun.max.fill 밝기 0.5625 56%",
-        "sun.max.fill 밝기 0.5625 바꿀 수 없어요",
+        "sun.max.trianglebadge.exclamationmark.fill 밝기 0.5625 바꿀 수 없어요",
         "sun.max.fill 밝기 0.625 63%",
     ])
 }
@@ -547,4 +547,29 @@ private func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom
     }
     #expect(h.brightness.writes.isEmpty)
     #expect(h.host.huds.isEmpty)
+}
+
+/// The notch draws only the symbol and the bar, so a change the display does not take shows a sun
+/// with an exclamation badge. It keeps the `sun.` prefix, by which the notch fills the bar warm,
+/// and the value: the bar shows what the display holds.
+@MainActor
+@Test func R25__a_refused_change_shows_the_exclamation_sun() throws {
+    let refused = "sun.max.trianglebadge.exclamationmark.fill"
+    #expect(NSImage(systemSymbolName: refused, accessibilityDescription: nil) != nil)
+    #expect(refused != "sun.max.fill")
+    #expect(refused.hasPrefix("sun."))
+
+    let h = try Harness()
+    h.plugin.activate()
+    _ = h.send(2, down)                       // taken
+    h.brightness.refuses = true
+    _ = h.send(2, down, repeat: true)         // refused, consumed
+    h.brightness.refuses = false
+    _ = h.send(2, down, repeat: true)         // taken
+
+    #expect(h.host.huds == [
+        "sun.max.fill 밝기 0.5625 56%",
+        "\(refused) 밝기 0.5625 바꿀 수 없어요",
+        "sun.max.fill 밝기 0.625 63%",
+    ])
 }
