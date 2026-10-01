@@ -8,6 +8,7 @@
 #   Contents/MacOS/NotchTheRock              app executable (hardened runtime + entitlements)
 #   Contents/Frameworks/libNotchKit.dylib    the single NotchKit copy every plugin binds to
 #   Contents/PlugIns/<Name>.notchplugin      built-in plugins, packaged by scripts/build-plugin.sh
+#                                            (with their helpers in Contents/Helpers, if any)
 #   Contents/Info.plist                      from Resources/Info.plist
 # Everything is signed inside-out with the identity from scripts/signing-identity.sh, so the
 # designated requirement stays the same across rebuilds. Safe to run again.
@@ -70,6 +71,8 @@ done
 
 say "안쪽부터 서명해요."
 sign "$APP/Contents/Frameworks/libNotchKit.dylib"
+# build-plugin.sh already signed each plugin's helpers with IDENTITY (created above, before the
+# plugins were built); signing the plugin bundle again seals those signatures as they are.
 for plugin in "$APP"/Contents/PlugIns/*.notchplugin; do
     sign "$plugin"
 done

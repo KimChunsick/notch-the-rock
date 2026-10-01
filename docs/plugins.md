@@ -46,7 +46,8 @@ scripts/build-plugin.sh Plugins/Clock --out ~/out     # ~/out/Clock.notchplugin
 Clock.notchplugin/Contents/
 ├── Info.plist        # PluginManifest에서 만들어요
 ├── MacOS/Clock       # 플러그인 실행 파일(dylib)
-└── Resources/        # SwiftPM 리소스 번들(<패키지>_<타깃>.bundle)
+├── Resources/        # SwiftPM 리소스 번들(<패키지>_<타깃>.bundle)
+└── Helpers/          # 도우미 실행 파일과 라이브러리, 도우미가 있을 때만 생겨요
 ```
 
 `Package.swift`에서 타깃의 `resources:`에 적은 파일은 SwiftPM이 dylib 옆에 `<패키지>_<타깃>.bundle`로
@@ -72,6 +73,55 @@ NotchKit은 앱 안에 한 벌만 있어요. 플러그인 실행 파일은 Notch
 
 로컬 서명 인증서(`scripts/signing-identity.sh`가 만들어요)가 있으면 그 인증서로 서명하고, 없으면 임시
 서명을 해요. 앱에 넣을 때는 `scripts/build-app.sh`가 앱 인증서로 다시 서명해요.
+
+### 도우미 실행 파일과 라이브러리
+
+플러그인 코드는 앱 프로세스 안에서 돌아요. 앱 밖에서 따로 실행할 프로그램이 필요하면 도우미(helper)로
+만들어요. 예를 들어 Claude Code 훅이 실행하는 명령이나 `/usr/bin/perl`이 불러오는 작은 라이브러리가
+도우미예요. `Package.swift`에 제품을 하나 더 적으면 돼요.
+
+```swift
+products: [
+    .library(name: "Clock", type: .dynamic, targets: ["Clock"]),               // 플러그인 자신
+    .executable(name: "clock-hook", targets: ["ClockHook"]),                   // 실행 파일 도우미
+    .library(name: "ClockBridge", type: .dynamic, targets: ["ClockBridge"]),   // 라이브러리 도우미
+],
+targets: [
+    .target(name: "Clock", dependencies: [.product(name: "NotchKit", package: "NotchKit")]),
+    .executableTarget(name: "ClockHook"),
+    .target(name: "ClockBridge"),
+]
+```
+
+`build-plugin.sh`는 플러그인 자신의 라이브러리 말고도 실행 파일 제품과 동적 라이브러리 제품을 모두 빌드해서
+`Contents/Helpers`에 넣어요. 파일은 SwiftPM이 빌드한 그대로 복사하고, 라이브러리 파일 이름도 SwiftPM이
+붙인 `lib<제품 이름>.dylib`를 그대로 써요. 정적 라이브러리(`type: .static`)와 종류를 정하지 않은
+라이브러리는 도우미가 아니라서 넣지 않아요. 도우미 제품이 없으면 `Contents/Helpers` 폴더도 생기지 않아요.
+
+| 제품 | 번들 안 위치 |
+|---|---|
+| `.executable(name: "clock-hook", ...)` | `Contents/Helpers/clock-hook` |
+| `.library(name: "ClockBridge", type: .dynamic, ...)` | `Contents/Helpers/libClockBridge.dylib` |
+
+플러그인 코드에서는 설치된 번들 위치에서 도우미를 찾아요. 번들은 내장 플러그인이면 앱 안에, 직접 넣은
+플러그인이면 사용자 폴더에 있으니 경로를 코드에 적어 두지 않아요.
+
+```swift
+let hook = context.bundleURL.appendingPathComponent("Contents/Helpers/clock-hook")
+let bridge = context.bundleURL.appendingPathComponent("Contents/Helpers/libClockBridge.dylib")
+```
+
+도우미는 앱과 다른 프로세스에서 실행돼서 앱에 한 벌만 있는 NotchKit을 찾지 못해요. 그래서 도우미 타깃은
+시스템 프레임워크와 같은 패키지의 다른 타깃만 의존할 수 있어요. 앱 모듈 `NotchTheRock`이나 다른 플러그인도
+의존하면 안 되고, NotchKit을 링크한 도우미는 스크립트가 거부해요. 플러그인과 도우미가 같은 코드를 써야
+한다면 NotchKit을 쓰지 않는 타깃(예: `ClockCore`)으로 떼어 내고 양쪽에서 그 타깃을 의존해요.
+
+도우미는 번들과 같은 인증서로 먼저 서명하고, 그다음 번들 서명이 도우미의 서명까지 함께 묶어요.
+`scripts/build-app.sh`는 플러그인을 빌드하기 전에 앱 인증서를 준비하니, 앱에 들어가는 도우미는 앱과 같은
+인증서로 서명돼요. 앱에 넣으면서 번들을 다시 서명해도 도우미 서명은 그대로 남아요. 도우미에는 강화된
+런타임(hardened runtime)을 켜지 않아요. 공증하지 않는 로컬 인증서에는 팀 ID가 없어서, 강화된 런타임을 켠
+실행 파일은 시스템 라이브러리가 아닌 라이브러리를 불러오지 못해요. 라이브러리 도우미는 자기 서명 옵션과
+상관없이 불러오는 프로세스의 규칙을 따라요.
 
 ## 3. 검사하기: notchkit-probe
 
