@@ -43,30 +43,32 @@ private func expectDefinite(_ size: CGSize, within limit: CGSize, _ what: String
     #expect(size.width <= limit.width && size.height <= limit.height, "\(what): \(size) does not fit \(limit)")
 }
 
-/// The tile comes wide (the default) or small, and both sizes and the tab have a definite size that
-/// fits the app's frame for it, empty and with long entries of every kind.
-@MainActor
-@Test func R16__clipboard_tile_and_tab_fit_the_home_at_every_size() throws {
-    let plugin = try makePlugin()
-    let tile = try #require(plugin.tile)
-    #expect(tile.supportedSizes == [.wide, .small])
-    #expect(tile.defaultSize == .wide)
-    for size in tile.supportedSizes {
-        expectDefinite(NSHostingView(rootView: tile.content(size)).fittingSize, within: try #require(tileFrames[size]), "plugin \(size)")
-    }
-    expectDefinite(NSHostingView(rootView: try #require(plugin.expandedTab).content).fittingSize, within: largestTab, "plugin tab")
+extension MainActorTimingTests {
+    /// The tile comes wide (the default) or small, and both sizes and the tab have a definite size that
+    /// fits the app's frame for it, empty and with long entries of every kind.
+    @MainActor
+    @Test func R16__clipboard_tile_and_tab_fit_the_home_at_every_size() throws {
+        let plugin = try makePlugin()
+        let tile = try #require(plugin.tile)
+        #expect(tile.supportedSizes == [.wide, .small])
+        #expect(tile.defaultSize == .wide)
+        for size in tile.supportedSizes {
+            expectDefinite(NSHostingView(rootView: tile.content(size)).fittingSize, within: try #require(tileFrames[size]), "plugin \(size)")
+        }
+        expectDefinite(NSHostingView(rootView: try #require(plugin.expandedTab).content).fittingSize, within: largestTab, "plugin tab")
 
-    let history = makeHistory(directory: try makeDirectory(), key: makeKey())
-    history.record(try #require(ClipCapture(png: samplePNG())))
-    history.record(.link("https://example.com/" + String(repeating: "long-path/", count: 30)))
-    history.record(.text(String(repeating: "한 줄에 다 들어가지 않는 아주 긴 글이에요. ", count: 20)))
-    for item in history.items {
-        history.setPinned(true, for: item.id)
+        let history = makeHistory(directory: try makeDirectory(), key: makeKey())
+        history.record(try #require(ClipCapture(png: samplePNG())))
+        history.record(.link("https://example.com/" + String(repeating: "long-path/", count: 30)))
+        history.record(.text(String(repeating: "한 줄에 다 들어가지 않는 아주 긴 글이에요. ", count: 20)))
+        for item in history.items {
+            history.setPinned(true, for: item.id)
+        }
+        for size in tile.supportedSizes {
+            expectDefinite(NSHostingView(rootView: ClipboardTile(history: history, size: size)).fittingSize, within: try #require(tileFrames[size]), "\(size)")
+        }
+        expectDefinite(NSHostingView(rootView: ClipboardView(history: history)).fittingSize, within: largestTab, "tab")
     }
-    for size in tile.supportedSizes {
-        expectDefinite(NSHostingView(rootView: ClipboardTile(history: history, size: size)).fittingSize, within: try #require(tileFrames[size]), "\(size)")
-    }
-    expectDefinite(NSHostingView(rootView: ClipboardView(history: history)).fittingSize, within: largestTab, "tab")
 }
 
 /// The wide tile lists the three most recently copied entries, newest first and pinned ones
@@ -88,34 +90,36 @@ private func expectDefinite(_ size: CGSize, within limit: CGSize, _ what: String
     #expect(ClipboardTile(history: history, size: .small).entries.map(\.text) == ["two"])
 }
 
-/// The tile follows the tab's notice rule: it marks a history kept in memory only when the stored
-/// history cannot be read, or once entries have stayed unsaved for the notice delay, and still
-/// draws the entries of the session.
-@MainActor
-@Test func R16__clipboard_tile_warns_when_the_history_is_kept_in_memory_only() throws {
-    let directory = try makeDirectory()
-    let saved = makeHistory(directory: directory, key: makeKey())
-    saved.record(.text("saved"))
-    saved.flush()
-    #expect(!ClipboardTile(history: saved, size: .wide).showsWarning(at: .now))
+extension MainActorTimingTests {
+    /// The tile follows the tab's notice rule: it marks a history kept in memory only when the stored
+    /// history cannot be read, or once entries have stayed unsaved for the notice delay, and still
+    /// draws the entries of the session.
+    @MainActor
+    @Test func R16__clipboard_tile_warns_when_the_history_is_kept_in_memory_only() throws {
+        let directory = try makeDirectory()
+        let saved = makeHistory(directory: directory, key: makeKey())
+        saved.record(.text("saved"))
+        saved.flush()
+        #expect(!ClipboardTile(history: saved, size: .wide).showsWarning(at: .now))
 
-    let unreadable = makeHistory(directory: directory, key: makeKey())
-    #expect(unreadable.isStoreUnreadable)
-    unreadable.record(.text("captured while unreadable"))
-    for size in [TileSize.wide, .small] {
-        let tile = ClipboardTile(history: unreadable, size: size)
-        #expect(tile.showsWarning(at: .now))
-        #expect(tile.entries.map(\.text) == ["captured while unreadable"])
-        expectDefinite(NSHostingView(rootView: tile).fittingSize, within: try #require(tileFrames[size]), "unreadable \(size)")
+        let unreadable = makeHistory(directory: directory, key: makeKey())
+        #expect(unreadable.isStoreUnreadable)
+        unreadable.record(.text("captured while unreadable"))
+        for size in [TileSize.wide, .small] {
+            let tile = ClipboardTile(history: unreadable, size: size)
+            #expect(tile.showsWarning(at: .now))
+            #expect(tile.entries.map(\.text) == ["captured while unreadable"])
+            expectDefinite(NSHostingView(rootView: tile).fittingSize, within: try #require(tileFrames[size]), "unreadable \(size)")
+        }
+
+        let clock = ManualClock()
+        let memoryOnly = ClipboardHistory(logError: { _ in }, now: { clock.now })
+        memoryOnly.open(nil)
+        memoryOnly.record(.text("not saved"))
+        let tile = ClipboardTile(history: memoryOnly, size: .wide)
+        #expect(!tile.showsWarning(at: clock.now + ClipboardHistory.unsavedNoticeDelay - 0.1))
+        #expect(tile.showsWarning(at: clock.now + ClipboardHistory.unsavedNoticeDelay))
     }
-
-    let clock = ManualClock()
-    let memoryOnly = ClipboardHistory(logError: { _ in }, now: { clock.now })
-    memoryOnly.open(nil)
-    memoryOnly.record(.text("not saved"))
-    let tile = ClipboardTile(history: memoryOnly, size: .wide)
-    #expect(!tile.showsWarning(at: clock.now + ClipboardHistory.unsavedNoticeDelay - 0.1))
-    #expect(tile.showsWarning(at: clock.now + ClipboardHistory.unsavedNoticeDelay))
 }
 
 /// How far the outermost ink of `view` (any channel at least 14 over black, as the end-to-end
@@ -156,47 +160,51 @@ private func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom
 }
 
 
-/// The tab is the size of what it draws with no history, a short one and one longer than the list:
-/// the host adds the margin around it.
-@MainActor
-@Test func R15__clipboard_tab_draws_to_its_edges() throws {
-    let empty = makeHistory(directory: try makeDirectory(), key: makeKey())
-    let short = makeHistory(directory: try makeDirectory(), key: makeKey())
-    short.record(.text("회의 메모"))
-    short.record(.link("https://example.com"))
-    let long = makeHistory(directory: try makeDirectory(), key: makeKey())
-    for index in 1...12 {
-        long.record(.text("기록 \(index)"))
-    }
-    for (name, history) in [("empty", empty), ("short", short), ("long", long)] {
-        expectNoOuterSpace(try inkInsets(ClipboardView(history: history)), name)
+extension MainActorTimingTests {
+    /// The tab is the size of what it draws with no history, a short one and one longer than the list:
+    /// the host adds the margin around it.
+    @MainActor
+    @Test func R15__clipboard_tab_draws_to_its_edges() throws {
+        let empty = makeHistory(directory: try makeDirectory(), key: makeKey())
+        let short = makeHistory(directory: try makeDirectory(), key: makeKey())
+        short.record(.text("회의 메모"))
+        short.record(.link("https://example.com"))
+        let long = makeHistory(directory: try makeDirectory(), key: makeKey())
+        for index in 1...12 {
+            long.record(.text("기록 \(index)"))
+        }
+        for (name, history) in [("empty", empty), ("short", short), ("long", long)] {
+            expectNoOuterSpace(try inkInsets(ClipboardView(history: history)), name)
+        }
     }
 }
 
-/// Offered more width than its own, as the host does when the band beside the camera makes the
-/// notch wider than the screen, the search field and the card row run across it, so more cards show; at its own width it keeps today's size.
-@MainActor
-@Test func R15__clipboard_screen_fills_a_wider_offer() throws {
-    let empty = makeHistory(directory: try makeDirectory(), key: makeKey())
-    let long = makeHistory(directory: try makeDirectory(), key: makeKey())
-    for index in 1...12 {
-        long.record(.text("기록 \(index)"))
-    }
-    // Today's sizes. The cards keep their width, so the row may end a card spacing short of the
-    // edge; the search field above it spans the offer.
-    let cases: [(String, ClipboardView, CGSize)] = [
-        ("empty", ClipboardView(history: empty), CGSize(width: 360, height: 45)),
-        ("long", ClipboardView(history: long), CGSize(width: 360, height: 117)),
-    ]
-    for (name, view, today) in cases {
-        let ideal = NSHostingView(rootView: view).fittingSize
-        print("R15 clipboard \(name) ideal \(ideal)")
-        #expect(abs(ideal.width - today.width) <= 0.5 && abs(ideal.height - today.height) <= 0.5, "\(name): the screen's own size changed: \(ideal)")
-        let offered = ideal.width + 80
-        let wide = NSHostingView(rootView: view.frame(width: offered)).fittingSize
-        #expect(abs(wide.height - ideal.height) <= 1, "\(name): wrapped or cut at \(offered) pt: \(wide) vs \(ideal)")
-        let insets = try inkInsets(view.frame(width: offered))
-        print("R15 clipboard \(name) offered \(offered) pt: ink insets left \(insets.left) right \(insets.right)")
-        #expect(insets.left <= 2 && insets.right <= 2, "\(name): the screen does not reach both edges of a \(offered) pt offer: \(insets)")
+extension MainActorTimingTests {
+    /// Offered more width than its own, as the host does when the band beside the camera makes the
+    /// notch wider than the screen, the search field and the card row run across it, so more cards show; at its own width it keeps today's size.
+    @MainActor
+    @Test func R15__clipboard_screen_fills_a_wider_offer() throws {
+        let empty = makeHistory(directory: try makeDirectory(), key: makeKey())
+        let long = makeHistory(directory: try makeDirectory(), key: makeKey())
+        for index in 1...12 {
+            long.record(.text("기록 \(index)"))
+        }
+        // Today's sizes. The cards keep their width, so the row may end a card spacing short of the
+        // edge; the search field above it spans the offer.
+        let cases: [(String, ClipboardView, CGSize)] = [
+            ("empty", ClipboardView(history: empty), CGSize(width: 360, height: 45)),
+            ("long", ClipboardView(history: long), CGSize(width: 360, height: 117)),
+        ]
+        for (name, view, today) in cases {
+            let ideal = NSHostingView(rootView: view).fittingSize
+            print("R15 clipboard \(name) ideal \(ideal)")
+            #expect(abs(ideal.width - today.width) <= 0.5 && abs(ideal.height - today.height) <= 0.5, "\(name): the screen's own size changed: \(ideal)")
+            let offered = ideal.width + 80
+            let wide = NSHostingView(rootView: view.frame(width: offered)).fittingSize
+            #expect(abs(wide.height - ideal.height) <= 1, "\(name): wrapped or cut at \(offered) pt: \(wide) vs \(ideal)")
+            let insets = try inkInsets(view.frame(width: offered))
+            print("R15 clipboard \(name) offered \(offered) pt: ink insets left \(insets.left) right \(insets.right)")
+            #expect(insets.left <= 2 && insets.right <= 2, "\(name): the screen does not reach both edges of a \(offered) pt offer: \(insets)")
+        }
     }
 }

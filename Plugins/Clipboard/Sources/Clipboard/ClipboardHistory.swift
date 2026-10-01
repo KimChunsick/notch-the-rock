@@ -10,9 +10,13 @@ import Observation
 ///
 /// An entry is saved once its image file, if it has one, and a list on disk that names it are both
 /// written; the image file always comes first. Until then the entry lives in memory only, image
-/// original included, and `open(_:)` drops it: turning the plugin off and on, or quitting, loses
-/// it. Without a writable store (no key, or a store that cannot be read) every entry lives in
-/// memory only.
+/// original included, and `open(_:)` keeps it and saves it in the store it opens; only quitting
+/// loses it. Without a writable store (no key yet, none, or a store that cannot be read) every entry
+/// lives in memory only. Every copy shows in the list as soon as it is recorded, whatever the store.
+///
+/// A deletion, clearing or pin change made before a list is read, while a store is being opened or
+/// without a readable store, is kept and applied to the next list read: what the user deleted then
+/// does not come back from disk, and a pin set or cleared then holds.
 @MainActor
 @Observable
 final class ClipboardHistory {
@@ -40,6 +44,22 @@ final class ClipboardHistory {
     @ObservationIgnored private let logError: @MainActor (String) -> Void
     @ObservationIgnored private let now: @MainActor () -> Date
     @ObservationIgnored private let sources: SourceAppLookup
+    /// Whether a store is being opened: set by `beginOpening()`, cleared by `open(_:)`.
+    @ObservationIgnored private var isOpening = false
+    /// The entries copied while a store was being opened. One may have been written to the store
+    /// opened before, which need not be the next one, so `open(_:)` keeps them whatever it finds.
+    @ObservationIgnored private var copiedWhileOpening: Set<ClipItem.ID> = []
+    /// The user's deletions, clearings and pin changes, in order, that the next list read may not
+    /// have: made while a store was being opened, or while there was no readable store. Applied by
+    /// the next `open(_:)` that reads a list; a reset of an unreadable store drops them.
+    @ObservationIgnored private var edits: [Edit] = []
+
+    /// A change the user made to the entries with some content, or to every unpinned entry.
+    private enum Edit {
+        case delete(ClipItem.Content)
+        case setPinned(Bool, ClipItem.Content)
+        case clearUnpinned
+    }
 
     /// `now` gives the time `unsavedSince` records; tests pass a clock they move themselves.
     /// `sources` finds the app a pasteboard change came from.
@@ -63,19 +83,105 @@ final class ClipboardHistory {
     /// Whether the stored history could not be read, so this session is kept in memory only.
     var isStoreUnreadable: Bool { unreadableStore != nil }
 
-    /// Replaces the history with what `store` holds and saves every later change there; entries
-    /// that were not saved are dropped. Image files the stored list does not name were never saved,
-    /// or belong to removed entries, and are deleted. A list that cannot be read, or a directory
-    /// that cannot be listed, leaves the history empty and in memory, and the store untouched. With
-    /// nil the history starts empty and keeps its entries in memory only.
+    /// Replaces the history with what `store` holds and saves every later change there, keeping the
+    /// entries this session still owes: every entry that no list on disk names and every entry
+    /// copied since `beginOpening()`. The user's edits not saved there come first: the stored
+    /// entries they deleted or cleared go, and the pins they set or cleared hold. Then each owed
+    /// entry goes back where its date puts it, newest first; one whose content is stored already
+    /// merges into that entry (see `merge(_:png:)`). Then the oldest unpinned entries beyond the
+    /// limit go, and the list is saved. Image files the stored list does not name were never saved,
+    /// or belong to removed entries, and are deleted. A list that cannot be read, or a directory that
+    /// cannot be listed, leaves the store untouched and the owed entries in memory until
+    /// `resetUnreadableStore()`. With nil only the owed entries remain, in memory, for the next
+    /// opening. Without a list read, the edits wait for the next opening that reads one.
     func open(_ store: ClipboardStore?) {
+        let owed = takeOwedEntries()
+        replaceContents(with: store)
+        let appliesEdits = writer != nil && !edits.isEmpty
+        let removedImages = appliesEdits ? applyEdits(sparing: Set(owed.map(\.item.id))) : []
+        guard !owed.isEmpty || appliesEdits else {
+            refreshUnsavedCount()
+            return
+        }
+        for entry in owed {
+            merge(entry.item, png: entry.png)
+        }
+        dropUnpinnedOverLimit(deletingImagesOf: removedImages)
+    }
+
+    /// Applies the edits to the list just read, in order and by content, and forgets them. The owed
+    /// entries are left alone: they carry every edit already, and may be newer than it (copied again
+    /// after a deletion). Returns the removed images, whose files go once a list without them is
+    /// written.
+    private func applyEdits(sparing owed: Set<ClipItem.ID>) -> Set<ClipItem.ID> {
+        var removedImages: Set<ClipItem.ID> = []
+        for edit in edits {
+            switch edit {
+            case .delete(let content):
+                removedImages.formUnion(removeEntries { !owed.contains($0.id) && $0.content.isSameClip(as: content) })
+            case .clearUnpinned:
+                removedImages.formUnion(removeEntries { !owed.contains($0.id) && !$0.isPinned })
+            case .setPinned(let pinned, let content):
+                for index in items.indices where !owed.contains(items[index].id) && items[index].content.isSameClip(as: content) {
+                    items[index].isPinned = pinned
+                }
+            }
+        }
+        edits = []
+        return removedImages
+    }
+
+    /// Call when a store starts opening: the copies recorded until the next `open(_:)` are kept by
+    /// it whatever that store holds. An opening that never finishes keeps them for the next one.
+    func beginOpening() {
+        isOpening = true
+    }
+
+    /// The entries the next store must keep, oldest first, each image with its PNG: from memory, or
+    /// read from the current store before the next one deletes the files its list does not name. An
+    /// image that cannot be read is reported and left out.
+    private func takeOwedEntries() -> [(item: ClipItem, png: Data?)] {
         flush()
+        let listedIDs = writer?.listedIDs ?? []
+        let copied = copiedWhileOpening
+        copiedWhileOpening = []
+        isOpening = false
+        return items.reversed().compactMap { item in
+            guard !listedIDs.contains(item.id) || copied.contains(item.id) else { return nil }
+            guard item.kind == .image else { return (item, nil) }
+            guard let png = imageData(for: item) else { return nil }
+            return (item, png)
+        }
+    }
+
+    /// Puts an owed entry back before the first entry that is not newer. A stored entry with the
+    /// same content stays instead, with the later date and the owed entry's source when it has one;
+    /// the same entry takes the owed pin, which is newer, and another keeps a pin of either. An owed
+    /// image's PNG is written first, under the id that stays, unless the stored file already holds
+    /// it: a stored file that is missing or damaged is repaired. A PNG that cannot be written stays
+    /// in memory.
+    private func merge(_ owed: ClipItem, png: Data?) {
+        var entry = owed
+        var storedPNG: Data?
+        if let index = items.firstIndex(where: { $0.content.isSameClip(as: owed.content) }) {
+            entry = items.remove(at: index)
+            entry.date = max(entry.date, owed.date)
+            if let source = owed.source { entry.source = source }
+            entry.isPinned = entry.id == owed.id ? owed.isPinned : entry.isPinned || owed.isPinned
+            if png != nil { storedPNG = try? store?.imageData(for: entry.id) }
+        }
+        if let png, storedPNG != png, !writeImageFile(png, for: entry.id) {
+            originals[entry.id] = png
+        }
+        items.insert(entry, at: items.firstIndex { $0.date <= entry.date } ?? items.endIndex)
+    }
+
+    private func replaceContents(with store: ClipboardStore?) {
         self.store = nil
         writer = nil
         unreadableStore = nil
         originals = [:]
         items = []
-        defer { refreshUnsavedCount() }
         guard let store else { return }
         do {
             items = try store.loadList()
@@ -105,6 +211,8 @@ final class ClipboardHistory {
             return
         }
         unreadableStore = nil
+        // The history the edits were kept for is gone; the entries saved in its place carry them.
+        edits = []
         attach(store, listedIDs: [])
         for (id, png) in originals where writeImageFile(png, for: id) {
             originals[id] = nil
@@ -120,16 +228,20 @@ final class ClipboardHistory {
     }
 
     /// Records the pasteboard's current content, with the app it came from, unless it is excluded
-    /// or empty.
+    /// or empty. While a store is being opened, the next `open(_:)` keeps it.
     func record(from pasteboard: NSPasteboard) {
-        if let capture = ClipCapture.read(from: pasteboard) {
-            record(capture, source: sources.source(of: pasteboard))
+        guard let capture = ClipCapture.read(from: pasteboard) else { return }
+        let id = record(capture, source: sources.source(of: pasteboard))
+        if isOpening {
+            copiedWhileOpening.insert(id)
         }
     }
 
-    /// A repeat keeps the app it was copied from before when `source` is nil, so copying an entry
-    /// back from this app does not lose it.
-    func record(_ capture: ClipCapture, at date: Date = .now, source: SourceApp? = nil) {
+    /// Returns the id of the entry that holds the copy, at the top. A repeat keeps the app it was
+    /// copied from before when `source` is nil, so copying an entry back from this app does not lose
+    /// it.
+    @discardableResult
+    func record(_ capture: ClipCapture, at date: Date = .now, source: SourceApp? = nil) -> ClipItem.ID {
         let content: ClipItem.Content
         var png: Data?
         switch capture {
@@ -148,7 +260,7 @@ final class ClipboardHistory {
             if let source { item.source = source }
             items.insert(item, at: 0)
             save()
-            return
+            return item.id
         }
 
         let item = ClipItem(id: UUID(), content: content, date: date, isPinned: false, source: source)
@@ -158,11 +270,13 @@ final class ClipboardHistory {
         }
         items.insert(item, at: 0)
         dropUnpinnedOverLimit()
+        return item.id
     }
 
     func setPinned(_ pinned: Bool, for id: ClipItem.ID) {
         guard let index = items.firstIndex(where: { $0.id == id }), items[index].isPinned != pinned else { return }
         items[index].isPinned = pinned
+        note(.setPinned(pinned, items[index].content))
         if pinned {
             save()
         } else {
@@ -171,12 +285,23 @@ final class ClipboardHistory {
     }
 
     func delete(_ id: ClipItem.ID) {
+        guard let item = items.first(where: { $0.id == id }) else { return }
+        note(.delete(item.content))
         remove { $0.id == id }
     }
 
     /// Deletes every entry that is not pinned.
     func clearUnpinned() {
+        note(.clearUnpinned)
         remove { !$0.isPinned }
+    }
+
+    /// Keeps `edit` for the next list `open(_:)` reads when that list may not have it: while a store
+    /// is being opened (the list read may be another store's, or written before this edit), or
+    /// while there is no readable store to save it in.
+    private func note(_ edit: Edit) {
+        guard isOpening || writer == nil else { return }
+        edits.append(edit)
     }
 
     /// Entries whose text or URL contains `query`, ignoring case; every entry for a blank query.
@@ -237,33 +362,40 @@ final class ClipboardHistory {
         }
     }
 
-    private func dropUnpinnedOverLimit() {
+    /// Drops the oldest unpinned entries beyond the limit and saves the list; the image files of
+    /// `removedImages`, entries removed before, go with theirs once it is written.
+    private func dropUnpinnedOverLimit(deletingImagesOf removedImages: Set<ClipItem.ID> = []) {
+        var removedImages = removedImages
         var unpinned = items.filter { !$0.isPinned }.count
-        guard unpinned > Self.unpinnedLimit else {
-            save()
-            return
+        if unpinned > Self.unpinnedLimit {
+            // `items` is newest first, so the unpinned entries past the limit are the oldest.
+            var dropped: Set<ClipItem.ID> = []
+            for item in items.reversed() where !item.isPinned && unpinned > Self.unpinnedLimit {
+                dropped.insert(item.id)
+                unpinned -= 1
+            }
+            removedImages.formUnion(removeEntries { dropped.contains($0.id) })
         }
-        // `items` is newest first, so the unpinned entries past the limit are the oldest.
-        var dropped: Set<ClipItem.ID> = []
-        for item in items.reversed() where !item.isPinned && unpinned > Self.unpinnedLimit {
-            dropped.insert(item.id)
-            unpinned -= 1
-        }
-        remove { dropped.contains($0.id) }
+        save(deletingImagesOf: removedImages)
     }
 
     /// Removes matching entries and saves the list. Their image files are deleted once that list
     /// is written; an interruption leaves at worst an image file the list on disk does not name,
     /// which the next `open(_:)` deletes.
     private func remove(where shouldRemove: (ClipItem) -> Bool) {
-        let removed = items.filter(shouldRemove)
-        guard !removed.isEmpty else { return }
+        guard items.contains(where: shouldRemove) else { return }
+        save(deletingImagesOf: removeEntries(where: shouldRemove))
+    }
+
+    /// Removes matching entries with their originals and returns the removed images, whose files
+    /// must go only once a list without them is written.
+    private func removeEntries(where shouldRemove: (ClipItem) -> Bool) -> Set<ClipItem.ID> {
+        let removedImages = Set(items.filter { shouldRemove($0) && $0.kind == .image }.map(\.id))
         items.removeAll(where: shouldRemove)
-        let removedImages = Set(removed.filter { $0.kind == .image }.map(\.id))
         for id in removedImages {
             originals[id] = nil
         }
-        save(deletingImagesOf: removedImages)
+        return removedImages
     }
 
     /// Queues the list for writing. It leaves out the images without a file, so a list on disk

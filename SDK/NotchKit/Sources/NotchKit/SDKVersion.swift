@@ -43,7 +43,7 @@ public enum NotchKitSDK {
     /// built with rather than the version of the host that later loads it. Inside NotchKit itself
     /// (the loader) it is the version of the loaded dylib.
     @_alwaysEmitIntoClient
-    public static var version: SDKVersion { SDKVersion(major: 1, minor: 1) }
+    public static var version: SDKVersion { SDKVersion(major: 1, minor: 2) }
 }
 
 extension Character {

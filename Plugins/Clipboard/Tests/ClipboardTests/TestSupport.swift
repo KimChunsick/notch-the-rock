@@ -144,3 +144,23 @@ func renderOffscreen(_ view: some View) throws -> (image: CGImage, scale: CGFloa
     hosting.cacheDisplay(in: hosting.bounds, to: rep)
     return (try #require(rep.cgImage), window.backingScaleFactor)
 }
+
+/// The tests that time how fast a copy shows and the tests that hold the main actor for long
+/// (offscreen windows, hosting views, a deliberate stall) run here one at a time, so none of them
+/// holds the main actor while another is timed. Tests outside this suite still run in parallel.
+@Suite(.serialized) struct MainActorTimingTests {}
+
+/// Waits until the main actor has answered every short wait on time for 200 ms in a row (giving up
+/// after 30 s), so a burst of other tests holding it ends before a copy is timed. Nothing is
+/// discounted afterwards: the copy's own time is measured as it is.
+@MainActor
+func waitForAQuietMainActor() async {
+    let giveUp = ContinuousClock.now + .seconds(30)
+    var quiet = Duration.zero
+    while quiet < .milliseconds(200), ContinuousClock.now < giveUp {
+        let start = ContinuousClock.now
+        try? await Task.sleep(for: .milliseconds(10))
+        let took = ContinuousClock.now - start
+        quiet = took < .milliseconds(25) ? quiet + took : .zero
+    }
+}

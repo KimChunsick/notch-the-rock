@@ -63,7 +63,7 @@ Clock.notchplugin/Contents/
 |---|---|
 | `CFBundleIdentifier` | `PluginManifest.id` |
 | `CFBundleExecutable` | 패키지 이름 |
-| `NotchKitSDKVersion` | 플러그인을 빌드한 SDK 버전(예: `1.1`) |
+| `NotchKitSDKVersion` | 플러그인을 빌드한 SDK 버전(예: `1.2`) |
 | `NotchPluginEntry` | 진입 함수 이름, `notchkit_plugin_entry` |
 
 NotchKit은 앱 안에 한 벌만 있어요. 플러그인 실행 파일은 NotchKit을 `@rpath/libNotchKit.dylib`로만
@@ -225,7 +225,7 @@ public final class ClockPlugin: NotchPlugin {
 | 노치 전체를 잠시 차지하기 | `present(Takeover(duration:content:))` |
 | 사용자에게 묻기 | `await requestAttention(AttentionRequest(...)) -> AttentionResponse` |
 | 펼치기와 접기 | `expand()` (이 플러그인의 탭을 연 채로 펼쳐요), `collapse()` |
-| 저장소 | `storage.directory`, `storage.defaults`, `storage.keychainData(for:)`, `setKeychainData(_:for:)`, `deleteKeychainData(for:)` |
+| 저장소 | `storage.directory`, `storage.defaults`, `storage.keychainData(for:)`, `setKeychainData(_:for:)`, `setKeychainData(_:for:access:)` (SDK 1.2), `deleteKeychainData(for:)` |
 | 번들과 리소스 | `bundleURL` (설치된 `.notchplugin` 번들), `resourceBundle(named:)` (없으면 `nil`) |
 | 권한 | `permissions.isAccessibilityTrusted`, `permissions.requestAccessibility()` |
 | 기록 | `log.debug(_:)`, `log.info(_:)`, `log.error(_:)` |
@@ -238,6 +238,28 @@ HUD는 접힌 노치를 아래로 늘이지 않고 양옆으로만 넓혀서 보
 같은 `id`로 `post`하면 이전 표시를 바꿔요. `expiresAfter`를 주면 그 시간이 지나 저절로 사라지고, 주지
 않으면 `clear(activityID:)`를 부를 때까지 남아요. `storage`의 폴더, 기본값 저장소, 키체인 항목은
 플러그인마다 따로 있어서 다른 플러그인과 섞이지 않아요.
+
+### 키체인
+
+`storage`의 키체인 함수는 키체인 대화상자를 띄우지 않아요. 사용자에게 물어야 하는 호출은 묻는 대신
+곧바로 `KeychainError`를 던지고, 이 오류의 `needsAccess`는 `true`예요. 항목의 접근 권한에 이 앱이
+없을 때(서명이 바뀐 새 빌드가 예전 빌드의 항목을 읽을 때)나 키체인이 잠겨 있을 때 이렇게 돼요. 항목이
+없으면 오류 대신 `nil`이 돌아오니 두 경우를 나눠서 처리할 수 있어요. 키체인 호출은 시스템 응답을
+기다리느라 늦어질 수 있으니 메인 스레드 밖에서 불러 주세요.
+
+`setKeychainData(_:for:access:)`(SDK 1.2)로 저장하면 접근 권한을 고를 수 있어요.
+
+| `access` | 대화상자 없이 읽는 앱 |
+|---|---|
+| `.thisApp` | 저장한 앱만 읽어요. macOS 기본값이에요. 권한이 앱 서명에 묶여 있어서, 서명이 다른 빌드는 사용자가 키체인 접근 앱에서 허용하기 전까지 `needsAccess` 오류를 받아요. |
+| `.anyApplication` | 이 Mac의 모든 앱이 읽어요. 그만큼 보호가 약해서, 사용자 계정으로 실행되는 프로그램이면 무엇이든 값을 꺼낼 수 있어요. |
+
+이 함수는 기존 항목을 지운 뒤 새로 저장해요. 새 항목을 넣다가 실패하면 그 계정에는 항목이 남지
+않아요. `setKeychainData(_:for:)`는 지금까지처럼 기존 항목의 접근 권한은 두고 값만 바꾸며, 새
+항목은 `.thisApp`으로 만들어요.
+
+`.anyApplication`은 앱 서명이 빌드마다 바뀌어도 대화상자 없이 읽어야 하는 값에만 써요. 내장 클립보드
+플러그인이 기록을 암호화하는 키를 이렇게 저장하고, 디스크에 남는 기록 파일은 그대로 암호문이에요.
 
 ### 표시 우선순위
 
@@ -385,7 +407,7 @@ public func notchkitPluginEntry() -> UnsafeMutableRawPointer {
 
 ## 8. SDK 버전
 
-지금 SDK는 `NotchKitSDK.version` = `1.1`이에요. 버전은 `주.부` 형식이고, 앱은 아래 조건을 만족하는
+지금 SDK는 `NotchKitSDK.version` = `1.2`예요. 버전은 `주.부` 형식이고, 앱은 아래 조건을 만족하는
 플러그인만 불러와요.
 
 - 주 버전이 앱과 같아요.
@@ -400,10 +422,11 @@ public func notchkitPluginEntry() -> UnsafeMutableRawPointer {
 |---|---|
 | `1.0` | 처음 공개한 API예요. |
 | `1.1` | 홈 타일을 위한 `TileSize`, `PluginTile`, `NotchPlugin.tile`이 추가됐어요. |
+| `1.2` | 키체인 접근 권한을 고르는 `KeychainAccess`와 `setKeychainData(_:for:access:)`, 묻지 않고 실패한 호출을 알려 주는 `KeychainError.needsAccess`가 추가됐어요. 앱에 들어 있는 SDK가 키체인 대화상자를 띄우지 않으니, 예전 버전으로 빌드한 플러그인의 키체인 호출도 묻지 않고 실패해요. |
 
-1.0으로 빌드한 플러그인에는 `tile` 구현이 없어서, 1.1 앱은 기본 구현이 돌려주는 `nil`을 읽어요. 이런
+1.0으로 빌드한 플러그인에는 `tile` 구현이 없어서, 1.1 이후 앱은 기본 구현이 돌려주는 `nil`을 읽어요. 이런
 플러그인은 "홈과 타일"의 규칙대로 격자 아래 아이콘으로 보이고, 앱의 기본 타일로 격자에 올릴 수 있어요. 1.0 SDK로 빌드한 템플릿을
-1.1 로더로 불러오는 검사는 아래 스크립트가 해요. 스크립트는 1.0 코드를 임시 git 작업 트리로 꺼내
+지금 로더로 불러오는 검사는 아래 스크립트가 해요. 스크립트는 1.0 코드를 임시 git 작업 트리로 꺼내
 빌드하고, 끝나면 지워요.
 
 ```sh

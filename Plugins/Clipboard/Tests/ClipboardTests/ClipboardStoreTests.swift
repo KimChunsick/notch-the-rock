@@ -379,11 +379,12 @@ import Testing
     #expect(history.unsavedCount == 0)
 }
 
-/// Reopening the store, as turning the clipboard feature off and on does, keeps what was saved and
-/// drops what was not: an image whose file could not be written and the entries of a list that
-/// could not be written. The image file that list would have named goes with them.
+/// Reopening the store, as turning the clipboard feature off and on does, keeps what was not saved
+/// as well as what was: an image whose file could not be written and the entries of a list that
+/// could not be written stay in the history, in memory while the disk refuses them, and are saved
+/// by the first reopening that can write them.
 @MainActor
-@Test func R09__reopening_drops_unsaved_entries_and_keeps_saved_ones() throws {
+@Test func R09__reopening_keeps_unsaved_entries_and_saves_them() throws {
     let directory = try makeDirectory()
     let key = makeKey()
     let fault = WriteFault()
@@ -411,16 +412,26 @@ import Testing
     #expect(!FileManager.default.fileExists(atPath: imageFile(for: withoutFile.id, in: directory).path))
     #expect(FileManager.default.fileExists(atPath: imageFile(for: withoutList.id, in: directory).path))
 
+    let captured = history.items
+
     history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
-    #expect(history.items == saved)
+    history.flush()
+    #expect(history.items == captured)
+    #expect(history.unsavedCount == 3)
+    #expect(try ClipboardStore(directory: directory, key: key).loadList() == saved)
+
+    fault.failsList = false
+    history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
+    history.flush()
+    #expect(history.items == captured)
     #expect(history.unsavedCount == 0)
-    #expect(!FileManager.default.fileExists(atPath: imageFile(for: withoutList.id, in: directory).path))
-    #expect(try files(in: directory).count == 1)
+    #expect(makeHistory(directory: directory, key: key).items == captured)
+    #expect(try files(in: directory).count == 3)
 }
 
 /// A reset saves this session under the same rule: an image whose file cannot be written stays in
 /// the history, copyable from memory and counted as not saved, and the list on disk leaves it out.
-/// It is not tried again; reopening the store drops it.
+/// Reopening the store keeps it and writes its file and a list that names it.
 @MainActor
 @Test func R09__a_reset_keeps_an_image_it_could_not_save_in_memory_only() throws {
     let directory = try makeDirectory()
@@ -458,9 +469,13 @@ import Testing
     history.record(.link("https://example.com"))
     history.flush()
     #expect(history.unsavedCount == 1)
+    let beforeReopening = history.items
     history.open(ClipboardStore(directory: directory, key: key))
-    #expect(history.items.map(\.content) == [.link("https://example.com"), .text("kept after the reset")])
+    history.flush()
+    #expect(history.items == beforeReopening)
     #expect(history.unsavedCount == 0)
+    #expect(makeHistory(directory: directory, key: key).items == beforeReopening)
+    #expect(history.imageData(for: image) == png)
 }
 
 /// An image file goes only after a list without its entry is on disk: when that write fails the
@@ -494,35 +509,46 @@ import Testing
     #expect(reloaded.imageData(for: restored) == png)
 }
 
-private func bytes(of key: SymmetricKey) -> Data {
-    key.withUnsafeBytes { Data($0) }
-}
-
-/// The real Keychain: the key is created once, reused afterwards, and never replaced when what is
-/// stored cannot be used.
+/// An image copied again while the key loads merges into the stored entry with that image. When
+/// the stored file is missing or damaged, the copy's PNG is written in its place, so the entry
+/// copies again; when that write fails too, the PNG stays in memory and the failure is logged.
 @MainActor
-@Test func R09__the_history_key_lives_in_the_keychain() throws {
-    let service = "com.notchtherock.clipboard.tests.\(UUID().uuidString)"
-    let storage = try PluginStorage(
-        directory: try makeDirectory(),
-        defaultsSuiteName: "clipboard-tests.com.notchtherock.clipboard",
-        keychainService: service
-    )
-    defer { try? storage.deleteKeychainData(for: HistoryKey.account) }
-    #expect(try storage.keychainData(for: HistoryKey.account) == nil)
+@Test func R09__an_image_copied_again_repairs_a_missing_or_damaged_stored_file() throws {
+    let png = samplePNG(seed: 4)
+    for damage in ["missing", "damaged", "missing on a full disk"] {
+        let comment = Comment(rawValue: damage)
+        let directory = try makeDirectory()
+        let key = makeKey()
+        let stored = makeHistory(directory: directory, key: key)
+        let id = stored.record(.image(png: png, thumbnail: png))
+        stored.flush()
+        let file = imageFile(for: id, in: directory)
+        if damage == "damaged" {
+            try Data("damaged".utf8).write(to: file)
+        } else {
+            try FileManager.default.removeItem(at: file)
+        }
+        let fault = WriteFault()
+        fault.failsImages = damage.hasSuffix("full disk")
+        let errors = ErrorLog()
+        let history = ClipboardHistory(logError: errors.append)
+        history.record(.image(png: png, thumbnail: png))
 
-    let created = try HistoryKey.loadOrCreate(in: storage)
-    #expect(created.bitCount == 256)
-    #expect(try storage.keychainData(for: HistoryKey.account) == bytes(of: created))
+        history.open(ClipboardStore(directory: directory, key: key) { try fault.write($0, to: $1) })
+        history.flush()
 
-    let history = makeHistory(directory: storage.directory, key: created)
-    history.record(.text("encrypted with the keychain key"))
-    history.flush()
-    let reused = try HistoryKey.loadOrCreate(in: storage)
-    #expect(bytes(of: reused) == bytes(of: created))
-    #expect(makeHistory(directory: storage.directory, key: reused).items.map(\.content) == [.text("encrypted with the keychain key")])
-
-    try storage.setKeychainData(Data([1, 2, 3]), for: HistoryKey.account)
-    #expect(throws: HistoryKey.InvalidKeyError.self) { try HistoryKey.loadOrCreate(in: storage) }
-    #expect(try storage.keychainData(for: HistoryKey.account) == Data([1, 2, 3]))
+        #expect(history.items.map(\.id) == [id], comment)
+        let entry = try #require(history.items.first, comment)
+        let pasteboard = makePasteboard()
+        #expect(history.copy(entry, to: pasteboard), comment)
+        #expect(pasteboard.data(forType: .png) == png, comment)
+        pasteboard.releaseGlobally()
+        if fault.failsImages {
+            #expect(errors.messages.contains { $0.contains("keeping it in memory") }, comment)
+            #expect(history.unsavedCount == 1, comment)
+        } else {
+            #expect(try ClipboardStore(directory: directory, key: key).imageData(for: id) == png, comment)
+            #expect(history.unsavedCount == 0, comment)
+        }
+    }
 }
