@@ -53,23 +53,49 @@ final class ManualClock {
         }
     }
 
-    @Test func R30__a_burst_of_unlock_signals_greets_once() throws {
+    /// The launch greeting does not hold back an unlock: the unlock replaces it with a fresh one.
+    @Test func R30__an_unlock_right_after_launch_greets_again() throws {
+        try withContext { context, host in
+            var picks = 0
+            let plugin = plugin(context) { picks += 1 }
+            plugin.activate()
+            clock.advance(by: .seconds(1))
+            unlocks.fire()
+            #expect(host.takeovers.count == 2)
+            #expect(picks == 2)
+            #expect(host.takeovers.allSatisfy { $0.duration == HelloTimeline.hello.duration })
+        }
+    }
+
+    /// A second unlock while the first unlock's greeting still shows greets again.
+    @Test func R30__distinct_unlocks_seconds_apart_greet_each_time() throws {
         try withContext { context, host in
             let plugin = plugin(context)
             plugin.activate()
-            // The launch greeting is still on screen: an unlock does not restart it.
+            clock.advance(by: .seconds(60))
             unlocks.fire()
-            #expect(host.takeovers.count == 1)
+            #expect(host.takeovers.count == 2)
+            clock.advance(by: .seconds(3))
+            unlocks.fire()
+            #expect(host.takeovers.count == 3)
+        }
+    }
 
+    /// Signals less than a second after the unlock that counted are the same unlock; the first
+    /// signal a second or more after it greets.
+    @Test func R30__a_duplicate_unlock_signal_greets_once() throws {
+        try withContext { context, host in
+            let plugin = plugin(context)
+            plugin.activate()
             clock.advance(by: .seconds(60))
             unlocks.fire()
             clock.advance(by: .milliseconds(300))
             unlocks.fire()
-            clock.advance(by: .seconds(2))
+            clock.advance(by: .milliseconds(600))
             unlocks.fire()
             #expect(host.takeovers.count == 2)
 
-            clock.advance(by: .seconds(60))
+            clock.advance(by: .milliseconds(100))
             unlocks.fire()
             #expect(host.takeovers.count == 3)
         }
