@@ -24,8 +24,8 @@ Raycast 단축키를 지정하면 플러그인별 단축키처럼 쓸 수 있어
 
 ## Raycast에 불러오기
 
-Node.js 22 이상과 npm이 필요해요. 이 폴더에서 아래 명령을 실행하면 Raycast가 개발용 확장으로
-불러와요.
+Node.js 22.22.2 이상과 npm이 필요해요. `@raycast/api`가 이 버전 이상을 요구해요. 이 폴더에서 아래
+명령을 실행하면 Raycast가 개발용 확장으로 불러와요.
 
 ```sh
 cd Integrations/Raycast
