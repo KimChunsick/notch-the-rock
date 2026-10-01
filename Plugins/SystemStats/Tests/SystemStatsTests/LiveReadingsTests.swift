@@ -6,8 +6,10 @@ import Testing
 // The R11 acceptance check: at the same moment, the plugin's live samplers and the command-line
 // tools must agree within the tolerances written next to each comparison. Values that are read once
 // bracket the tool between two plugin readings taken right before and right after it (plugin, tool,
-// plugin), so a value that moves while the tool runs still has to land between the two. Rates are
-// the collector's own, read the way the plugin reads them.
+// plugin), so a value that moves while the tool runs still has to land between the two. The GPU
+// statistic jumps too far within milliseconds for that: it brackets a plugin reading between two
+// tool runs instead and gets a few attempts (see its test). Rates are the collector's own, read the
+// way the plugin reads them.
 
 /// Runs a tool to completion and returns its standard output. It is async so the wait happens off
 /// the main actor, where the other tests of the package keep running.
@@ -259,19 +261,37 @@ struct R11LiveReadings {
         #expect(sent.contains(rates.outbound))
     }
 
-    /// GPU: IOAccelerator "Device Utilization %" must read 0…100. Compared against the same statistic
-    /// as `ioreg -r -c IOAccelerator` prints it: between the two plugin readings ±15 points (the driver
-    /// refreshes it on its own schedule while ioreg runs).
+    /// GPU: IOAccelerator "Device Utilization %" must read 0…100 and agree with the same statistic as
+    /// `ioreg -r -c IOAccelerator` prints it. The driver refreshes the statistic on its own schedule,
+    /// and while other processes render it jumps by tens of points between readings milliseconds
+    /// apart (ioreg read 0% between plugin readings of 31% and 30%, and 48% between 30% and 0%). So an
+    /// attempt brackets one plugin reading with an ioreg run right before and right after it, and the
+    /// reading must lie between the two ±15 points. Under a bursty Metal load that swung ioreg between
+    /// 0% and 100% from one run to the next, 15 of 30 attempts agreed and one test needed six; up to
+    /// ten attempts, 100 ms apart, of which one must agree, leave such a load about a 0.1% chance to
+    /// fail the test. Repeating lets no wrong reading through while the load holds steady: then the
+    /// two ioreg runs agree and every attempt must match them. Every plugin reading must be 0…100.
     @Test func R11__gpu_utilization_reads_0_to_100_like_ioreg() async throws {
         let sampler = AcceleratorSampler()
-        let first = try #require(sampler.utilization())
-        let ioreg = try await run("/usr/sbin/ioreg", ["-r", "-c", "IOAccelerator", "-d", "1"])
-        let second = try #require(sampler.utilization())
-        let cli = try #require(ioreg.matches(of: /"Device Utilization %"=(\d+)/).compactMap { Int($0.1) }.max())
-        print("R11 ioreg GPU: \(cli)% | plugin: \(StatFormat.percent(first))…\(StatFormat.percent(second))")
+        func ioreg() async throws -> Int {
+            let output = try await run("/usr/sbin/ioreg", ["-r", "-c", "IOAccelerator", "-d", "1"])
+            return try #require(output.matches(of: /"Device Utilization %"=(\d+)/).compactMap { Int($0.1) }.max())
+        }
 
-        #expect((0...100).contains(first) && (0...100).contains(second))
-        #expect(between(cli, Int(first.rounded()), Int(second.rounded()), slack: 15))
+        var attempts: [String] = []
+        var agreed = false
+        for attempt in 1...10 where !agreed {
+            if attempt > 1 { try await Task.sleep(for: .milliseconds(100)) }
+            let before = try await ioreg()
+            let value = try #require(sampler.utilization())
+            let after = try await ioreg()
+            attempts.append("ioreg \(before)%…\(after)% | plugin \(StatFormat.percent(value))")
+            #expect((0...100).contains(value))
+            agreed = between(Int(value.rounded()), before, after, slack: 15)
+        }
+        print("R11 GPU: \(attempts.joined(separator: "; "))")
+
+        #expect(agreed, "no attempt agreed: \(attempts.joined(separator: "; "))")
     }
 
     /// At least one SMC temperature sensor reads, and the averages the tab shows are plausible die
