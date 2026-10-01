@@ -186,12 +186,7 @@ import Testing
 
     @Test func R15__the_clipboard_screen_keeps_the_same_padding_on_every_side_with_a_short_history() async throws {
         let gaps = try await measure("clipboard-rows", pluginScreen("클립보드", ClipboardRowsStandIn()))
-        // The last row is a 26 pt hover box around 12 pt text, so its ink ends about 6 pt above the
-        // box. Closing that gap changes how the rows look (a resting background, or shorter rows), a
-        // product decision left open.
-        withKnownIssue("ClipRow's hover box leaves about 6 pt under the last row's text") {
-            expectEqualPadding(gaps, "clipboard-rows")
-        }
+        expectEqualPadding(gaps, "clipboard-rows")
     }
 
     @Test func R15__the_system_stats_screen_keeps_the_same_padding_on_every_side() async throws {
@@ -346,13 +341,13 @@ private struct ClipboardStandIn: View {
     }
 }
 
-/// `ClipboardView` with two text entries, not hovered.
+/// `ClipboardView` with two text entries, not hovered: each row on its resting background.
 private struct ClipboardRowsStandIn: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ClipboardSearchStandIn()
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 1) {
+                LazyVStack(alignment: .leading, spacing: 2) {
                     row("회의 메모", "방금")
                     row("https://example.com", "3분 전")
                 }
@@ -386,6 +381,7 @@ private struct ClipboardRowsStandIn: View {
         .font(.system(size: 12))
         .padding(.horizontal, 8)
         .frame(height: 26)
+        .background(RoundedRectangle(cornerRadius: 6).fill(.white.opacity(0.08)))
     }
 }
 
