@@ -13,8 +13,6 @@ struct HomeEntry: Equatable {
     let name: String
     let symbol: String
     let kind: Kind
-    /// Whether choosing the entry opens the plugin's screen (the plugin has a tab).
-    let opensDetail: Bool
 }
 
 /// A tile on the grid with the plugin it shows.
@@ -43,6 +41,8 @@ final class HomeModel {
     /// Why the last add in edit mode put nothing on the grid; cleared by the next edit and when
     /// editing ends.
     private(set) var notice: String?
+    /// The strip icon under the pointer, whose name shows in a bubble over it.
+    private(set) var hoveredIcon: String?
 
     static let fullGridNotice = "빈 칸이 없어서 위젯으로 올릴 수 없어요"
 
@@ -75,6 +75,16 @@ final class HomeModel {
 
     func plugin(_ pluginID: String) -> HomePlugin? {
         plugins.first { $0.pluginID == pluginID }
+    }
+
+    /// The pointer entered (`true`) or left a strip icon. A leave reported after the pointer
+    /// entered the next icon does not clear that one.
+    func setHovering(_ hovering: Bool, icon pluginID: String) {
+        if hovering {
+            hoveredIcon = pluginID
+        } else if hoveredIcon == pluginID {
+            hoveredIcon = nil
+        }
     }
 
     // MARK: Edit mode
@@ -157,6 +167,6 @@ final class HomeModel {
     }
 
     private static func entry(_ plugin: HomePlugin, kind: HomeEntry.Kind) -> HomeEntry {
-        HomeEntry(pluginID: plugin.pluginID, name: plugin.name, symbol: plugin.symbol, kind: kind, opensDetail: plugin.tab != nil)
+        HomeEntry(pluginID: plugin.pluginID, name: plugin.name, symbol: plugin.symbol, kind: kind)
     }
 }

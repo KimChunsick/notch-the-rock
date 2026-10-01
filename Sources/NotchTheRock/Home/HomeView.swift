@@ -78,7 +78,7 @@ private struct HomeGridView: View {
 }
 
 /// One tile: the plugin's own, or the host's default tile (`DefaultTile`) for a plugin without one.
-/// Tapping it opens the plugin's screen when the plugin has one. In edit mode it shows
+/// Tapping it opens the plugin's screen. In edit mode it shows
 /// a remove button and a size menu, and it can be dragged to another grid place; the home knows
 /// about the drag from its start to its drop or cancellation, so the notch stays open meanwhile.
 private struct TileView: View {
@@ -209,10 +209,51 @@ private struct DefaultTile: View {
     }
 }
 
+/// The host's screen for a plugin without one of its own: the plugin's symbol and name on a card as
+/// wide as the host offers and, when the plugin has a settings page, a button that opens it. Like
+/// any plugin's screen it adds no padding of its own.
+struct DefaultScreen: View {
+    let plugin: HomePlugin
+    let openSettings: @MainActor (_ pluginID: String?) -> Void
+
+    /// What 설정 열기 does; nil for a plugin without a settings page, which has no button.
+    var settingsAction: (@MainActor () -> Void)? {
+        guard plugin.hasSettings else { return nil }
+        return { [openSettings, plugin] in openSettings(plugin.pluginID) }
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: plugin.symbol)
+                .font(.system(size: 28, weight: .medium))
+            Text(plugin.name)
+                .font(.system(size: 15, weight: .semibold))
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+            if let settingsAction {
+                Button(action: settingsAction) {
+                    Text("설정 열기")
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.vertical, 6)
+                        .padding(.horizontal, 14)
+                        .background(Capsule().fill(.white.opacity(0.14)))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.vertical, 20)
+        .frame(maxWidth: .infinity)
+        .background(RoundedRectangle(cornerRadius: HomeGrid.cornerRadius, style: .continuous).fill(Color(white: 0.11)))
+    }
+}
+
 /// The plugins without a grid place as one row of round icons, as wide as the grid. It scrolls
 /// sideways when they are more than the grid holds, and to the icon with the keyboard's focus ring
 /// (`NotchHostModel.listScrollTarget`). In edit mode the icons carry a + badge, with room above and
-/// after them.
+/// after them. The name of the icon under the pointer or the focus shows in a bubble over it, drawn
+/// outside the scroll view so the strip does not clip it.
 private struct HomeStrip: View {
     let host: NotchHostModel
     let plugins: [HomePlugin]
@@ -234,6 +275,14 @@ private struct HomeStrip: View {
             }
             .scrollIndicators(.never)
             .frame(width: HomeGrid.size.width, height: HomeGrid.stripIcon + room, alignment: .leading)
+            .overlayPreferenceValue(StripBubbleKey.self) { bubble in
+                if let bubble {
+                    GeometryReader { proxy in
+                        BubblePlacement(icon: proxy[bubble.icon]) { StripBubble(name: bubble.name) }
+                    }
+                    .allowsHitTesting(false)
+                }
+            }
             // The focus also outlives a visit to a plugin's screen, where the strip is gone.
             .onAppear { if let target = host.listScrollTarget { proxy.scrollTo(target) } }
             .onChange(of: host.listScrollTarget) { _, target in
@@ -243,18 +292,17 @@ private struct HomeStrip: View {
     }
 }
 
-/// A plugin's symbol on a circle, with its name as the tooltip and the VoiceOver label. It opens
-/// the plugin's screen; in edit mode it puts the plugin on the grid (`NotchHostModel.tapHomePlugin(_:)`).
-struct StripIcon: View {
+/// A plugin's symbol on a circle, with its name in a bubble while the pointer or the keyboard's
+/// focus is on it, and as the VoiceOver label. It opens the plugin's screen; in edit mode it puts the
+/// plugin on the grid (`NotchHostModel.tapHomePlugin(_:)`).
+private struct StripIcon: View {
     let host: NotchHostModel
     let plugin: HomePlugin
 
-    /// Shown while the pointer rests on the icon (`.help`; the notch's panel allows tooltips while
-    /// the app is inactive) and read by VoiceOver.
-    var tooltip: String { plugin.name }
-
     var body: some View {
         let editing = host.home.isEditing
+        let hovered = host.home.hoveredIcon == plugin.pluginID
+        let showsName = hovered || (!editing && host.keyboard.focus == plugin.pluginID)
         let size = HomeGrid.stripIcon
         Button {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { host.tapHomePlugin(plugin.pluginID) }
@@ -282,9 +330,64 @@ struct StripIcon: View {
                     .allowsHitTesting(false)
             }
         }
-        .help(tooltip)
-        .accessibilityLabel(tooltip)
+        .onHover { host.home.setHovering($0, icon: plugin.pluginID) }
+        .onDisappear { host.home.setHovering(false, icon: plugin.pluginID) }
+        .anchorPreference(key: StripBubbleKey.self, value: .bounds) { icon in
+            showsName ? StripBubbleKey.Bubble(name: plugin.name, icon: icon, isHovered: hovered) : nil
+        }
+        .accessibilityLabel(plugin.name)
         .accessibilityHint(editing ? "위젯으로 올려요" : "")
+    }
+}
+
+/// The strip icon whose name shows, the one under the pointer before the one with the focus.
+private struct StripBubbleKey: PreferenceKey {
+    struct Bubble {
+        let name: String
+        let icon: Anchor<CGRect>
+        let isHovered: Bool
+    }
+
+    static var defaultValue: Bubble? { nil }
+
+    static func reduce(value: inout Bubble?, nextValue: () -> Bubble?) {
+        guard let next = nextValue(), value == nil || (next.isHovered && value?.isHovered == false) else { return }
+        value = next
+    }
+}
+
+/// A strip icon's name on a small light capsule.
+private struct StripBubble: View {
+    let name: String
+
+    var body: some View {
+        Text(name)
+            .font(.system(size: 11, weight: .semibold))
+            .lineLimit(1)
+            .foregroundStyle(.black)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(.white.opacity(0.92)))
+            .fixedSize()
+    }
+}
+
+/// Places its one subview, the bubble, just above `icon`: centred on it, but kept within the
+/// strip's width so it stays inside the notch.
+private struct BubblePlacement: Layout {
+    let icon: CGRect
+
+    static let gap: CGFloat = 4
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        proposal.replacingUnspecifiedDimensions()
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let bubble = subviews.first else { return }
+        let size = bubble.sizeThatFits(.unspecified)
+        let x = max(min(icon.midX - size.width / 2, bounds.width - size.width), 0)
+        bubble.place(at: CGPoint(x: bounds.minX + x, y: bounds.minY + icon.minY - Self.gap - size.height), proposal: ProposedViewSize(size))
     }
 }
 

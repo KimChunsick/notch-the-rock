@@ -120,8 +120,8 @@ struct NotchRootView: View {
                     .transition(Self.contentTransition)
             }
         case .expanded:
-            if let plugin = shownPlugin, let tab = plugin.tab {
-                measured(tab.content, minWidth: screenWidth)
+            if let plugin = shownPlugin {
+                measured(plugin.tab?.content ?? AnyView(DefaultScreen(plugin: plugin, openSettings: openSettings)), minWidth: screenWidth)
                     .id(plugin.pluginID)
                     .transition(Self.contentTransition)
             } else {
@@ -146,8 +146,8 @@ struct NotchRootView: View {
 
     /// The plugin whose screen the expanded notch shows; nil on the home.
     private var shownPlugin: HomePlugin? {
-        guard case .detail(let pluginID) = host.screen, let plugin = host.home.plugin(pluginID), plugin.tab != nil else { return nil }
-        return plugin
+        guard case .detail(let pluginID) = host.screen else { return nil }
+        return host.home.plugin(pluginID)
     }
 
     /// `content` at its own size, or `minWidth` wide when it fills that, which becomes the size the

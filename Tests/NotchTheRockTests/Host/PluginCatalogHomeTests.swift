@@ -85,8 +85,8 @@ extension PluginFixture {
 
 @MainActor
 @Suite struct PluginCatalogHomeTests {
-    func entry(_ id: String, _ name: String, _ symbol: String, _ kind: HomeEntry.Kind, opens: Bool) -> HomeEntry {
-        HomeEntry(pluginID: id, name: name, symbol: symbol, kind: kind, opensDetail: opens)
+    func entry(_ id: String, _ name: String, _ symbol: String, _ kind: HomeEntry.Kind) -> HomeEntry {
+        HomeEntry(pluginID: id, name: name, symbol: symbol, kind: kind)
     }
 
     @Test func R16__every_enabled_plugin_reaches_the_home_with_its_manifest_name_symbol_tab_and_tile() throws {
@@ -113,10 +113,10 @@ extension PluginFixture {
         // Tile and tab: a tile that opens the screen; tab only: a strip icon that opens it; tile
         // only: a tile that opens nothing; neither: a strip icon that opens nothing (R35, R36).
         #expect(host.homeEntries == [
-            entry(both, "타일과 화면", "a.circle", .tile(.small), opens: true),
-            entry(tileOnly, "타일만", "c.circle", .tile(.wide), opens: false),
-            entry(tabOnly, "화면만", "b.circle", .row, opens: true),
-            entry(neither, "둘 다 없음", "d.circle", .row, opens: false),
+            entry(both, "타일과 화면", "a.circle", .tile(.small)),
+            entry(tileOnly, "타일만", "c.circle", .tile(.wide)),
+            entry(tabOnly, "화면만", "b.circle", .row),
+            entry(neither, "둘 다 없음", "d.circle", .row),
         ])
     }
 
@@ -140,9 +140,9 @@ extension PluginFixture {
 
         #expect(host.plugins.map(\.pluginID) == [first, second, third])
         #expect(host.homeEntries == [
-            entry(first, "첫째", "1.circle", .tile(.small), opens: true),
-            entry(third, "셋째", "3.circle", .tile(.small), opens: false),
-            entry(second, "둘째", "2.circle", .row, opens: true),
+            entry(first, "첫째", "1.circle", .tile(.small)),
+            entry(third, "셋째", "3.circle", .tile(.small)),
+            entry(second, "둘째", "2.circle", .row),
         ])
         // The tile is read once, when the plugin loads, like its tab.
         #expect(ShapedPlugin.tileReads[first] == 1)
@@ -166,7 +166,7 @@ extension PluginFixture {
 
         #expect(catalog.records.first { $0.identifier == off }?.state == .off)
         #expect(host.plugins.map(\.pluginID) == [shown])
-        #expect(host.homeEntries == [entry(shown, "켜짐", "sun.max", .tile(.small), opens: true)])
+        #expect(host.homeEntries == [entry(shown, "켜짐", "sun.max", .tile(.small))])
         #expect(fixture.defaults.data(forKey: HomeLayoutStore.key) == stored)
 
         catalog.setEnabled(true, for: try fixture.recordID(of: off, in: catalog))

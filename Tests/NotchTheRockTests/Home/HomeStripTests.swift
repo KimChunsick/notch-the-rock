@@ -139,12 +139,15 @@ struct HomeStripTests {
         home.finishEditing()
         #expect(home.entries.map(\.kind) == [.tile(.small), .tile(.small), .tile(.small)])
 
-        // A tap on the default tile opens the plugin's screen; a plugin without one stays home.
+        // A tap on the default tile opens the plugin's screen, the host's fallback screen for a plugin
+        // without one of its own; Esc returns home from both.
         host.setHovering(true)
         host.tapHomePlugin("agents")
         #expect(host.screen == .detail(pluginID: "agents"))
         host.back()
         host.tapHomePlugin("hello")
+        #expect(host.screen == .detail(pluginID: "hello"))
+        host.escape()
         #expect(host.screen == .home)
 
         // The default tile is kept like any other.
@@ -167,6 +170,16 @@ struct HomeStripTests {
         #expect(bands >= 2, "ink rows \(inked)")
         // The default tile has the tiles' fill.
         #expect((20...40).contains(image.brightness(Int(frame.minX) + 6, Int(frame.midY))))
+    }
+
+    @Test func R35__the_fallback_screens_button_opens_the_plugins_settings() throws {
+        defer { fixture.cleanUp() }
+        var opened: [String?] = []
+        let hello = HomePlugin(pluginID: "hello", name: "인사", symbol: "hand.wave", tab: nil, tile: nil, hasSettings: true)
+        let action = try #require(DefaultScreen(plugin: hello, openSettings: { opened.append($0) }).settingsAction)
+        action()
+        #expect(opened == ["hello"])
+        #expect(DefaultScreen(plugin: Self.symbolPlugins[1], openSettings: { opened.append($0) }).settingsAction == nil)
     }
 
     // MARK: R36 — the strip
@@ -215,17 +228,34 @@ struct HomeStripTests {
         #expect(strip.frame.height <= HomeGrid.stripIcon + 0.5)
     }
 
-    /// SwiftUI draws a `.help` tooltip only on screen and builds no accessibility tree without an
-    /// assistive client, so this checks the text the icon hands to `.help` and VoiceOver, and that the
-    /// notch's panel shows tooltips while the app stays inactive behind it.
-    @Test func R36__hovering_an_icon_shows_the_plugin_name_as_a_tooltip() {
+    /// The icon under the pointer or the keyboard's focus shows its name in a light bubble above it,
+    /// drawn over what lies above the strip rather than clipped by it; a longer name makes a wider
+    /// bubble, and the bubble goes when the pointer leaves.
+    @Test func R36__hovering_or_focusing_an_icon_shows_its_name_in_a_bubble() throws {
         defer { fixture.cleanUp() }
-        let host = host([homePlugin("agents", sizes: [], name: "코딩 에이전트")])
-        let plugin = host.home.list[0]
-        #expect(StripIcon(host: host, plugin: plugin).tooltip == "코딩 에이전트")
-        host.home.beginEditing()
-        #expect(StripIcon(host: host, plugin: plugin).tooltip == "코딩 에이전트")
-        #expect(NotchPanel().allowsToolTipsWhenApplicationIsInactive)
+        let host = host(Self.symbolPlugins)
+        #expect(try bubble(host, "R36-render-no-bubble-T121.png") == nil)
+
+        host.toggleFromKeyboard()
+        #expect(host.keyboard.focus == "agents")
+        let long = try #require(try bubble(host, "R36-render-focus-bubble-T121.png"))
+        expectBubble(long, over: 0)
+        _ = host.handleKey(.right)
+        let short = try #require(try bubble(host, "R36-render-focus-bubble-2-T121.png"))
+        expectBubble(short, over: 1)
+        #expect(short.width < long.width - 10, "인사 \(short), 코딩 에이전트 \(long)")
+
+        // The pointer on the third icon wins over the focus on the second, and leaving removes it.
+        host.home.setHovering(true, icon: "notes")
+        let hovered = try #require(try bubble(host, "R36-render-hover-bubble-T121.png"))
+        expectBubble(hovered, over: 2)
+        #expect(hovered.minX > HomeGrid.stripIcon * 1.5 + HomeGrid.gap, "a second bubble beside \(hovered)")
+        host.home.setHovering(true, icon: "hello")
+        host.home.setHovering(false, icon: "notes")
+        #expect(host.home.hoveredIcon == "hello")
+        host.home.setHovering(false, icon: "hello")
+        host.keyboard.reset()
+        #expect(try bubble(host, "R36-render-hover-left-T121.png") == nil)
     }
 
     @Test func R36__a_tap_opens_the_screen_and_in_edit_mode_puts_the_plugin_on_the_grid() {
@@ -233,12 +263,16 @@ struct HomeStripTests {
         let host = host(
             (0..<7).map { homePlugin("t\($0)") }
                 + [homePlugin("wide", sizes: [.wide, .small]), homePlugin("agents", sizes: [], name: "코딩 에이전트")]
+                + [homePlugin("hello", sizes: [], tab: false, name: "인사")]
         )
         let home = host.home
-        #expect(home.list.map(\.pluginID) == ["wide", "agents"])
+        #expect(home.list.map(\.pluginID) == ["wide", "agents", "hello"])
         host.setHovering(true)
         host.tapHomePlugin("agents")
         #expect(host.screen == .detail(pluginID: "agents"))
+        host.back()
+        host.tapHomePlugin("hello")
+        #expect(host.screen == .detail(pluginID: "hello"))
         host.back()
 
         home.beginEditing()
@@ -327,6 +361,37 @@ struct HomeStripTests {
         [("agents", "코딩 에이전트", "apple.terminal", true), ("hello", "인사", "hand.wave", false), ("notes", "메모", "note.text", true)].map { id, name, symbol, tab in
             HomePlugin(pluginID: id, name: name, symbol: symbol, tab: tab ? PluginTab(title: name, symbol: symbol) { Text(name) } : nil, tile: nil)
         }
+    }
+
+    /// Room over the home in bubble renders, where the notch has its band and padding.
+    static let bubbleRoom: CGFloat = 40
+
+    /// Renders the home under `bubbleRoom` and returns the box of light (bubble) ink above the
+    /// strip, which nothing but the bubble draws; nil when there is none.
+    func bubble(_ host: NotchHostModel, _ name: String) throws -> CGRect? {
+        let image = try render(HomeView(host: host).padding(.top, Self.bubbleRoom), name: name)
+        var box: CGRect?
+        for y in 0..<Int(Self.bubbleRoom) {
+            for x in 0..<Int(image.size.width) where image.brightness(x, y) > 200 {
+                box = (box ?? CGRect(x: x, y: y, width: 1, height: 1)).union(CGRect(x: x, y: y, width: 1, height: 1))
+            }
+        }
+        guard let box else { return nil }
+        // Dark text on the light fill: the name's ink inside the box.
+        let ink = (Int(box.minY) + 2..<Int(box.maxY) - 2).flatMap { y in
+            (Int(box.minX) + 4..<Int(box.maxX) - 4).filter { image.brightness($0, y) < 120 }
+        }
+        #expect(ink.count > 20, "no text in the bubble \(box)")
+        return box
+    }
+
+    /// The bubble sits over the strip's `index`th icon, inside the strip's width and above it.
+    func expectBubble(_ box: CGRect, over index: Int) {
+        let left = CGFloat(index) * (HomeGrid.stripIcon + HomeGrid.gap)
+        #expect(box.minX <= left + HomeGrid.stripIcon && box.maxX >= left, "bubble \(box) not over icon \(index)")
+        #expect(box.minX >= 0 && box.maxX <= HomeGrid.size.width, "bubble \(box) outside the strip")
+        #expect(box.maxY <= Self.bubbleRoom, "bubble \(box) over the icons")
+        #expect(box.height >= 14, "bubble \(box)")
     }
 
     struct Pixels {

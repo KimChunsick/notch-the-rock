@@ -8,14 +8,14 @@ import NotchKit
 /// has one (`tab`).
 struct HomePlugin {
     let pluginID: String
-    /// The plugin's name, shown on its default tile and as its icon's tooltip, and searched by name.
+    /// The plugin's name, shown on its default tile and in its strip icon's bubble, and searched by name.
     let name: String
     /// SF Symbol of the plugin's strip icon and default tile.
     let symbol: String
     let tab: PluginTab?
     let tile: PluginTile?
     /// Whether the plugin has a page in the Settings window (`NotchPlugin.settingsView`), which the
-    /// gear on its screen opens.
+    /// gear on its screen opens, and 설정 열기 on the host's fallback screen (`DefaultScreen`).
     var hasSettings = false
 
     /// The sizes its grid tile can take, the first being the one it starts at: its own tile's, or

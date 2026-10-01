@@ -42,7 +42,7 @@ struct KeyboardTests {
     let commandK = KeyShortcut(keyCode: UInt16(kVK_ANSI_K), modifiers: [.command, .shift])
 
     /// A large tile (A), two small ones (B, C) and a wide one (D) under them, then two strip icons
-    /// (E, F) and a display-only tile (G) that no longer fits the grid.
+    /// (E, F) and a tile-only plugin (G) that no longer fits the grid.
     ///
     ///     ┌─────────┬────┬────┐
     ///     │         │ B  │ C  │
@@ -255,14 +255,14 @@ struct KeyboardTests {
         #expect(host.state == .expanded)
     }
 
-    @Test func R17__enter_on_a_display_only_tile_does_nothing() {
+    @Test func R17__enter_on_a_tile_only_plugin_opens_its_fallback_screen() {
         defer { fixture.cleanUp() }
         let host = NotchHostModel(now: { .now }, homeStore: fixture.store)
         host.plugins = [homePlugin("T", sizes: [.small], tab: false, name: "시계")]
         host.toggleFromKeyboard()
         #expect(host.keyboard.focus == "T")
         #expect(host.handleKey(.enter))
-        #expect(host.screen == .home)
+        #expect(host.screen == .detail(pluginID: "T"))
         #expect(host.state == .expanded)
     }
 

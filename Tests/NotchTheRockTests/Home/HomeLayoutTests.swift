@@ -178,15 +178,15 @@ struct HomeModelTests {
             homePlugin("neither", sizes: [], tab: false, name: "없음"),
         ]
         #expect(home.entries == [
-            HomeEntry(pluginID: "both", name: "둘 다", symbol: "circle", kind: .tile(.wide), opensDetail: true),
-            HomeEntry(pluginID: "tileOnly", name: "타일만", symbol: "circle", kind: .tile(.small), opensDetail: false),
-            HomeEntry(pluginID: "tabOnly", name: "탭만", symbol: "circle", kind: .row, opensDetail: true),
-            HomeEntry(pluginID: "neither", name: "없음", symbol: "circle", kind: .row, opensDetail: false),
+            HomeEntry(pluginID: "both", name: "둘 다", symbol: "circle", kind: .tile(.wide)),
+            HomeEntry(pluginID: "tileOnly", name: "타일만", symbol: "circle", kind: .tile(.small)),
+            HomeEntry(pluginID: "tabOnly", name: "탭만", symbol: "circle", kind: .row),
+            HomeEntry(pluginID: "neither", name: "없음", symbol: "circle", kind: .row),
         ])
-        // A tile-only plugin taken off the grid is a display-only strip icon, so it can be added back.
+        // A tile-only plugin taken off the grid is a strip icon, so it can be added back.
         home.remove("tileOnly")
         #expect(home.list.map(\.pluginID) == ["tabOnly", "tileOnly", "neither"])
-        #expect(home.entries[2] == HomeEntry(pluginID: "tileOnly", name: "타일만", symbol: "circle", kind: .row, opensDetail: false))
+        #expect(home.entries[2] == HomeEntry(pluginID: "tileOnly", name: "타일만", symbol: "circle", kind: .row))
     }
 
     @Test func R16__layout_survives_a_relaunch() {
