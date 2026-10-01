@@ -80,15 +80,23 @@ final class ClaudeBridge {
     func decide(_ message: HookMessage) async -> HookDecision? {
         let sessionID = message.payload["session_id"]?.string ?? ""
         record(sessionID, message)
+        let waiting = track(sessionID, message)
         let title = projectName(sessionID, message)
+        let decision: HookDecision?
         switch message.event {
         case .permissionRequest:
-            return await decidePermission(message, title: title)
+            decision = await decidePermission(message, title: title)
         case .preToolUse:
-            return await answerQuestions(message, title: title)
-        case .sessionStart, .stop, .notification:
-            return nil
+            decision = await answerQuestions(message, title: title)
+        case .sessionStart, .userPromptSubmit, .stop, .notification, .sessionEnd:
+            decision = nil
         }
+        // Answered in the notch, or in the terminal (the hook went away and cancelled this task).
+        // Released or timed out, the terminal asks now, so the session still waits.
+        if let waiting, decision != nil || Task.isCancelled {
+            screen.sessions.answered(Key(agent: .claude, id: sessionID), waiting: waiting)
+        }
+        return decision
     }
 
     /// Handles one hook message. Returns the task that shows its notice, when it has one.
@@ -97,9 +105,10 @@ final class ClaudeBridge {
         let payload = message.payload
         let sessionID = payload["session_id"]?.string ?? ""
         record(sessionID, message)
+        track(sessionID, message)
         let title = projectName(sessionID, message)
         switch message.event {
-        case .sessionStart:
+        case .sessionStart, .userPromptSubmit, .sessionEnd:
             return nil
         case .stop:
             return notify(sessionID, title: title, message: "Claude Code가 작업을 마쳤어요.")
@@ -262,6 +271,38 @@ final class ClaudeBridge {
         }
         sessions[sessionID] = record
     }
+
+    /// Moves the session's row on the Agents screen. Returns the waiting state a request put the
+    /// session in.
+    @discardableResult
+    private func track(_ sessionID: String, _ message: HookMessage) -> AgentSessionState? {
+        guard !sessionID.isEmpty else { return nil }
+        let key = Key(agent: .claude, id: sessionID)
+        let state: AgentSessionState?
+        switch message.event {
+        case .sessionEnd:
+            screen.sessions.remove(key)
+            return nil
+        case .sessionStart, .stop:
+            state = .idle
+        case .userPromptSubmit:
+            state = .working
+        case .permissionRequest:
+            // AskUserQuestion waits through its PreToolUse hook.
+            state = message.payload["tool_name"]?.string == "AskUserQuestion" ? nil : .awaitingApproval
+        case .preToolUse:
+            state = .awaitingAnswer
+        case .notification:
+            state = nil
+        }
+        screen.sessions.update(
+            key, folder: projectName(sessionID, message), state: state,
+            terminal: sessions[sessionID]?.terminal, pid: message.context.claudePID
+        )
+        return state == .idle || state == .working ? nil : state
+    }
+
+    private typealias Key = AgentSession.Key
 
     /// The last folder name of the session's working folder, or of the project folder.
     private func projectName(_ sessionID: String, _ message: HookMessage) -> String {

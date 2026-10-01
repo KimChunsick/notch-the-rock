@@ -1,3 +1,4 @@
+import AppKit
 import Observation
 import SwiftUI
 
@@ -43,6 +44,8 @@ enum ScreenResponse: Equatable {
 final class AgentsScreenModel {
     /// Oldest first; the screen shows the first.
     private(set) var items: [ScreenItem] = []
+    /// The open sessions of every agent, listed under the requests.
+    let sessions = AgentSessionList()
     @ObservationIgnored private var waiting: [Int: CheckedContinuation<ScreenResponse, Never>] = [:]
     @ObservationIgnored private var count = 0
 
@@ -93,22 +96,34 @@ final class AgentsScreenModel {
     }
 }
 
-/// The plugin's screen in the expanded notch: the oldest waiting request, in full. The title and the
-/// controls always stay in view; the request itself scrolls in the height left between them, so the
-/// screen fits whatever size the host offers (on main up to 390 × 400 points, often less). Measured
-/// without a limit it asks for all of its content. The host adds the margin around it, so the screen
-/// adds none of its own.
+/// The plugin's screen in the expanded notch: the oldest waiting request, in full, and the open
+/// sessions under it. The title and the controls always stay in view; the request itself scrolls in
+/// the height left between them, so the screen fits whatever size the host offers (on main up to
+/// 390 × 400 points, often less). Measured without a limit it asks for all of its content. The host
+/// adds the margin around it, so the screen adds none of its own.
 struct AgentsScreen: View {
     /// The scrolling body never gets less than this, however little height the host offers.
     static let minimumBodyHeight: CGFloat = 56
     let model: AgentsScreenModel
+    /// The agents' marks; without one a row shows a symbol and the agent's name.
+    var logos: (any AgentLogoProviding)? = nil
+    /// Brings a session's terminal forward.
+    var open: (AgentSession) -> Void = { _ in }
 
     var body: some View {
-        Group {
+        let sessions = model.sessions.sessions
+        VStack(alignment: .leading, spacing: 12) {
             if let item = model.items.first {
                 ScreenItemView(item: item, others: model.items.count - 1) { model.respond(to: item.id, with: $0) }
                     .id(item.id)
-            } else {
+            }
+            if !sessions.isEmpty {
+                VStack(spacing: 6) {
+                    ForEach(sessions) { session in
+                        AgentSessionRow(session: session, logo: logos?.logo(for: session.agent), open: open)
+                    }
+                }
+            } else if model.items.isEmpty {
                 // A dimmed terminal and the message at either end of what the screen is offered.
                 HStack(spacing: 0) {
                     Image(systemName: "terminal.fill")
@@ -121,6 +136,69 @@ struct AgentsScreen: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+}
+
+/// One open session: the agent's mark, the project folder, the state and how long ago it changed,
+/// across the width the screen is offered. Tapping it brings the session's terminal forward; without
+/// a known terminal the row is dimmed and does nothing.
+struct AgentSessionRow: View {
+    static let logoSize: CGFloat = 16
+    let session: AgentSession
+    let logo: NSImage?
+    let open: (AgentSession) -> Void
+
+    var body: some View {
+        Button {
+            open(session)
+        } label: {
+            HStack(spacing: 8) {
+                mark
+                Text(session.folder)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 10)
+                Circle()
+                    .fill(session.state.color)
+                    .frame(width: 6, height: 6)
+                Text(session.state.title)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                TimelineView(.everyMinute) { timeline in
+                    Text(AgentSession.elapsed(since: session.changed, now: timeline.date))
+                        .font(.system(size: 11))
+                        .monospacedDigit()
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(session.terminal == nil)
+        .opacity(session.terminal == nil ? 0.5 : 1)
+        .help(session.terminal == nil ? "이 세션의 터미널을 찾지 못했어요." : "세션이 열린 터미널로 가요.")
+    }
+
+    @ViewBuilder private var mark: some View {
+        if let logo {
+            Image(nsImage: logo)
+                .renderingMode(logo.isTemplate ? .template : .original)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: Self.logoSize, height: Self.logoSize)
+                .accessibilityLabel(session.agent.name)
+        } else {
+            HStack(spacing: 4) {
+                Image(systemName: session.agent.symbol)
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: Self.logoSize, height: Self.logoSize)
+                Text(session.agent.name)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }
 

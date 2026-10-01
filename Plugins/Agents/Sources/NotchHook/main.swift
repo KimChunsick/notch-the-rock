@@ -13,7 +13,8 @@ let runner = HookRunner(
         ?? HookSocket.defaultPath(home: FileManager.default.homeDirectoryForCurrentUser),
     environment: environment,
     readInput: { FileHandle.standardInput.readDataToEndOfFile() },
-    findTerminal: { TerminalFinder.system.find(startingAt: getppid()) }
+    findTerminal: { TerminalFinder.system.find(startingAt: getppid()) },
+    findClaudeProcess: { ClaudeProcess.find(startingAt: getppid(), in: SystemProcessTable()) }
 )
 let output = runner.run(arguments: Array(CommandLine.arguments.dropFirst()))
 if !output.isEmpty {

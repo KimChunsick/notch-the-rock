@@ -27,7 +27,11 @@ public final class AgentsPlugin: NotchPlugin {
     let codex: CodexModel
     private let context: NotchContext
     private let socketPath: String
+    private let activator: any TerminalActivating
+    private let logos = InstalledAppLogos()
     private var server: HookServer?
+    /// Drops ended sessions from the list while the plugin is active.
+    private var pruning: Task<Void, Never>?
 
     public convenience init(context: NotchContext) {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -55,6 +59,7 @@ public final class AgentsPlugin: NotchPlugin {
     ) {
         self.context = context
         self.socketPath = socketPath
+        self.activator = activator
         let defaults = context.storage.defaults
         bridge = ClaudeBridge(context: context, activator: activator) {
             .seconds(ApprovalWait.seconds(in: defaults))
@@ -82,6 +87,14 @@ public final class AgentsPlugin: NotchPlugin {
     }
 
     public func activate() {
+        if pruning == nil {
+            pruning = Task { [sessions = bridge.screen.sessions] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: AgentSessionList.pruneInterval)
+                    sessions.prune()
+                }
+            }
+        }
         guard server == nil else { return }
         let bridge = bridge
         let log = context.log
@@ -105,15 +118,26 @@ public final class AgentsPlugin: NotchPlugin {
     public func deactivate() {
         server?.stop()
         server = nil
+        pruning?.cancel()
+        pruning = nil
         bridge.cancelAll()
         codexLink.stop()
         codexBridge.cancelAll()
+        // Events stop while the plugin is off; each session returns with its next one.
+        bridge.screen.sessions.removeAll()
     }
 
-    /// Requests too long for the notch, shown in full where they are answered.
+    /// Brings the terminal of a session on the Agents screen forward; a session without a known
+    /// terminal stays where it is.
+    func open(_ session: AgentSession) {
+        guard let terminal = session.terminal, !activator.activate(terminal) else { return }
+        context.log.error("The terminal of \(session.agent.name) session \(session.folder) is not running.")
+    }
+
+    /// Requests too long for the notch, shown in full where they are answered, and the open sessions.
     public var expandedTab: PluginTab? {
-        PluginTab(title: Self.manifest.name, symbol: Self.manifest.symbol) { [screen = bridge.screen] in
-            AgentsScreen(model: screen)
+        PluginTab(title: Self.manifest.name, symbol: Self.manifest.symbol) { [screen = bridge.screen, logos] in
+            AgentsScreen(model: screen, logos: logos) { [weak self] in self?.open($0) }
         }
     }
 
