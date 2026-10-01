@@ -291,6 +291,36 @@ struct NotchPointerTests {
         #expect(reentered.handle(.shapeDrawn(smaller), at: nearLowRow, now: t0 + .milliseconds(1500)) == .leave)
     }
 
+    /// A plugin screen taller than `detail`, still smaller than `halfway`: `inDetail` is on it,
+    /// `nearLowRow` off it.
+    var taller: NotchLayout.Metrics { NotchLayout.metrics(for: .expanded, notch: notchRect.size, content: CGSize(width: 191, height: 80)) }
+
+    @Test func R41__a_screen_growing_while_it_springs_keeps_the_kept_region_as_it_was() {
+        // Into the plugin screen while the home is still drawn (nothing kept any more), then the
+        // screen grows past it but not past the frame drawn; out onto the drawn frame and still:
+        // nothing is kept again, and the settled shape closes it.
+        var pointer = NotchPointer(notchRect: notchRect, metrics: home)
+        #expect(pointer.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
+        #expect(pointer.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0) == nil)
+        #expect(pointer.handle(.pointerMoved, at: inDetail, now: t0 + .milliseconds(100)) == nil)
+        #expect(pointer.handle(.shapeDrawn(halfway), at: inDetail, now: t0 + .milliseconds(150)) == nil)
+        #expect(pointer.handle(.shapeChanged(taller, expanded: true), at: inDetail, now: t0 + .milliseconds(200)) == nil)
+        #expect(pointer.keepOpenFloorEnd == nil)
+        #expect(pointer.handle(.pointerMoved, at: nearLowRow, now: t0 + .milliseconds(250)) == nil)
+        #expect(pointer.handle(.floorEnded, at: nearLowRow, now: t0 + .milliseconds(600)) == nil)
+        #expect(pointer.handle(.shapeDrawn(taller), at: nearLowRow, now: t0 + .milliseconds(700)) == .leave)
+
+        // Growing while the home's frame is still kept: kept as it was, the floor not restarted.
+        var kept = NotchPointer(notchRect: notchRect, metrics: home)
+        #expect(kept.handle(.pointerMoved, at: lowRow, now: t0) == .enter)
+        #expect(kept.handle(.shapeChanged(detail, expanded: true), at: lowRow, now: t0) == nil)
+        #expect(kept.handle(.shapeChanged(taller, expanded: true), at: lowRow, now: t0 + .milliseconds(200)) == nil)
+        #expect(kept.keepOpenFloorEnd == t0 + NotchPointer.shrinkFloor)
+        #expect(kept.handle(.shapeDrawn(taller), at: lowRow, now: t0 + .milliseconds(400)) == nil)
+        #expect(kept.handle(.floorEnded, at: lowRow, now: t0 + .milliseconds(600)) == nil)
+        #expect(kept.handle(.pointerMoved, at: away, now: t0 + .seconds(1)) == .leave)
+    }
+
     @Test func R16__escape_belongs_to_the_notch_only_while_its_window_is_key() {
         #expect(NotchWindowController.handlesEscape(keyCode: 53, inNotchWindow: true, notchIsKey: true, state: .expanded))
         // Settings or any other window is key: its Esc stays its own, even with the notch expanded by hover.

@@ -6,12 +6,13 @@ import CoreGraphics
 ///
 /// - Only pointer events start or end hovering. A change of the shape (content of another size,
 ///   another state, the frame springing toward it) never does by itself.
-/// - When the expanded shape shrinks (a tile opening a smaller plugin screen, back, another screen)
-///   while the pointer hovers it, the old frame (the one drawn too while it springs) and
-///   `keepOpenMargin` around it stay open until the pointer enters the new shape (the usual rules
-///   again), leaves that region away from the notch (it hangs from the screen top around the
-///   notch), or clicks beyond it off the shape. Each further shrink with the pointer in that region
-///   adds its old frame to it and starts over. For `shrinkFloor` after a shrink, leaving is ignored
+/// - When the expanded shape shrinks (a tile opening a smaller plugin screen, back, another screen:
+///   the new destination off the previous one's frame) while the pointer hovers it, the old frame
+///   (the one drawn too while it springs) and `keepOpenMargin` around it stay open until the pointer
+///   enters the new shape (the usual rules again), leaves that region away from the notch (it hangs
+///   from the screen top around the notch), or clicks beyond it off the shape. Each further shrink
+///   with the pointer in that region adds its old frame to it and starts over; a destination that
+///   grows leaves it as it is, kept or ended. For `shrinkFloor` after a shrink, leaving is ignored
 ///   so the resize cannot close it; where the pointer rests when it ends (`floorEnded`) counts as
 ///   a move. Once the keep-open has ended, the pointer still on the larger shape drawn while it
 ///   springs and off the new one closes the notch when the shape settles (or at the floor's end).
@@ -124,22 +125,23 @@ struct NotchPointer {
     /// Keeps the old frame open when the expanded shape shrinks under the hovering pointer; another
     /// state ends it.
     private mutating func reshaped(to metrics: NotchLayout.Metrics, expanded: Bool, pointer: CGPoint, now: ContinuousClock.Instant) {
-        // The frame shown when the shape changes: where it was heading and, while it springs, where
-        // it is drawn now.
-        let old = NotchLayout.frame(of: destination, notchRect: notchRect).union(NotchLayout.frame(of: drawn, notchRect: notchRect))
+        let previous = NotchLayout.frame(of: destination, notchRect: notchRect)
         destination = metrics
         guard expanded else {
             keepOpen = nil
             checksSettledShape = false
             return
         }
-        // A screen change can shrink in steps, and a plugin screen again later: what an earlier
-        // shrink keeps open stays kept with this frame.
-        var region = old.insetBy(dx: -Self.keepOpenMargin, dy: -Self.keepOpenMargin)
+        // Only a destination smaller than the previous one shrinks: one that grows while a larger
+        // shape is still drawn leaves the keep-open as it is, kept or ended.
+        guard !NotchLayout.frame(of: metrics, notchRect: notchRect).contains(previous) else { return }
+        // The frame shown when the shape changes: where it was heading and, while it springs, where
+        // it is drawn now. A screen change can shrink in steps, and a plugin screen again later:
+        // what an earlier shrink keeps open stays kept with this frame.
+        var region = previous.union(NotchLayout.frame(of: drawn, notchRect: notchRect))
+            .insetBy(dx: -Self.keepOpenMargin, dy: -Self.keepOpenMargin)
         if let keepOpen { region = region.union(keepOpen.region) }
-        guard !NotchLayout.frame(of: metrics, notchRect: notchRect).contains(old),
-              pointerInside, !isDragging, isIn(region, pointer)
-        else { return }
+        guard pointerInside, !isDragging, isIn(region, pointer) else { return }
         keepOpen = KeepOpen(region: region, floorEnd: now + Self.shrinkFloor)
         checksSettledShape = true
     }
