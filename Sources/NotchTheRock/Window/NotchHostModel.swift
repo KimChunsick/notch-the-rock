@@ -31,6 +31,9 @@ enum NotchState: Equatable {
 /// full time; a request that waits for an answer keeps the timeout it was asked with. No notice is
 /// dropped before it is shown. The queue stays short because a plugin cancels a source's older
 /// notice when that source sends a newer one, and a cancelled request leaves the queue by its id.
+/// A plugin that collapses the notch right after the user answered one of its requests (a jump to a
+/// terminal) folds it fully: the rest of the queue is held for `collapseHold` before the next request
+/// shows, with the same timing rules as behind a takeover.
 ///
 /// The expanded notch shows the home (`screen`): plugin tiles and a strip of icons, see `HomeModel`. API for
 /// the keyboard and URL plans (P17, P18): `showHome()`, `open(pluginID:)`, `back()`, `escape()` and
@@ -124,9 +127,20 @@ final class NotchHostModel: NotchHost {
     /// The home in the order it is shown, grid tiles then strip icons, with each plugin's name.
     var homeEntries: [HomeEntry] { home.entries }
 
+    /// How soon after the user answers one of a plugin's attention requests that plugin's
+    /// `collapse()` still belongs to the answer. Generous enough for a jump that holds the main actor
+    /// for a moment before it collapses, like selecting a Terminal tab with AppleScript.
+    static let answerCollapseWindow: Duration = .seconds(2)
+    /// How long the queue stays hidden after such a collapse before the next request shows.
+    static let collapseHold: Duration = .milliseconds(1500)
+
     private var activities: [ActivityKey: PostedActivity] = [:]
     /// Waiting requests, oldest first; only the first is shown.
     private var attentions: [PendingAttention] = []
+    /// Until when the queue stays hidden after a plugin collapsed the notch on its own answer.
+    private var queueHeldUntil: ContinuousClock.Instant?
+    /// The plugin whose request the user answered last, and when.
+    @ObservationIgnored private var lastAnswer: (pluginID: String, at: ContinuousClock.Instant)?
     private var postCount = 0
     private var attentionCount = 0
 
@@ -152,7 +166,7 @@ final class NotchHostModel: NotchHost {
 
     var state: NotchState {
         if takeover != nil { return .takeover }
-        if !attentions.isEmpty { return .attention }
+        if !attentions.isEmpty && queueHeldUntil == nil { return .attention }
         if isExpanded { return .expanded }
         if hud != nil { return .hud }
         return .collapsed
@@ -259,6 +273,7 @@ final class NotchHostModel: NotchHost {
     func respond(_ response: AttentionResponse, to id: PendingAttention.ID) {
         guard let index = attentions.firstIndex(where: { $0.id == id }) else { return }
         let pending = attentions.remove(at: index)
+        if response != .timedOut && response != .cancelled { lastAnswer = (pending.pluginID, now()) }
         pending.continuation.resume(returning: response)
         startShownNotice()
         scheduleExpiry()
@@ -272,6 +287,7 @@ final class NotchHostModel: NotchHost {
         }
         if let hud, hud.deadline <= current { self.hud = nil }
         if let takeover, takeover.deadline <= current { self.takeover = nil }
+        if let queueHeldUntil, queueHeldUntil <= current { self.queueHeldUntil = nil }
         for pending in attentions where pending.deadline.map({ $0 <= current }) ?? false {
             respond(.timedOut, to: pending.id)
         }
@@ -279,11 +295,11 @@ final class NotchHostModel: NotchHost {
         scheduleExpiry()
     }
 
-    /// Starts the display time of the notice the notch now shows. A takeover hides it, so a notice
-    /// covered by a takeover gets its full time again once the takeover ends.
+    /// Starts the display time of the notice the notch now shows. A takeover or a held queue hides it,
+    /// so a notice hidden that way gets its full time again once it shows.
     private func startShownNotice() {
         guard let first = attentions.first, first.isNotice else { return }
-        if takeover != nil {
+        if takeover != nil || queueHeldUntil != nil {
             if first.deadline != nil { attentions[0].deadline = nil }
         } else if first.deadline == nil, let timeout = first.request.timeout {
             attentions[0].deadline = now() + timeout
@@ -305,7 +321,7 @@ final class NotchHostModel: NotchHost {
         expiryTask?.cancel()
         let deadlines = activities.values.compactMap(\.deadline)
             + attentions.compactMap(\.deadline)
-            + [hud?.deadline, takeover?.deadline].compactMap { $0 }
+            + [hud?.deadline, takeover?.deadline, queueHeldUntil].compactMap { $0 }
         guard let next = deadlines.min() else {
             expiryTask = nil
             return
@@ -383,8 +399,17 @@ final class NotchHostModel: NotchHost {
         open(pluginID: pluginID)
     }
 
+    /// Within `answerCollapseWindow` of the user answering one of this plugin's requests, the collapse
+    /// also holds the rest of the queue for `collapseHold`, so the notch is left folded instead of
+    /// showing the next request at once. Nothing leaves the queue.
     func collapse(from pluginID: String) {
         setExpanded(false)
+        guard let answer = lastAnswer, answer.pluginID == pluginID,
+              now() - answer.at <= Self.answerCollapseWindow else { return }
+        lastAnswer = nil
+        queueHeldUntil = now() + Self.collapseHold
+        startShownNotice()
+        scheduleExpiry()
     }
 
     var isAccessibilityTrusted: Bool { AXIsProcessTrusted() }
