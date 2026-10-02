@@ -113,8 +113,9 @@ public final class ClipboardPlugin: NotchPlugin {
     }
 
     /// Opens the history with the encrypted store, or without one when the key file cannot be read
-    /// or created or an old history cannot be deleted yet: then the history, image originals
-    /// included, stays in memory and nothing is written to disk until an opening succeeds.
+    /// or created, an old history cannot be deleted yet or another opening keeps the opening lock
+    /// too long: then the history, image originals included, stays in memory and nothing is written
+    /// to disk until an opening succeeds.
     private func finishOpening(_ opened: Result<ClipboardStore.Opened, any Error>) {
         switch opened {
         case .success(let opened):

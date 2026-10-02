@@ -4,8 +4,9 @@ import NotchKit
 
 /// The history on disk: the list in one file and every image in a file of its own, each sealed
 /// with AES-GCM under the history key. Every file is mode 0600 and holds ciphertext only; the
-/// exceptions are the key file `HistoryKey.fileName` beside them and the empty
-/// `oldHistoryMarkerName` file a new key keeps while it runs.
+/// exceptions are the key file `HistoryKey.fileName` beside them, the empty
+/// `oldHistoryMarkerName` file a new key keeps while it runs, and the empty lock file
+/// `openingLockName`.
 ///
 /// Images are kept apart so that recording a text does not rewrite every image, and an image is
 /// written once when it is first copied. An image file is always written before any list names
@@ -112,6 +113,26 @@ extension ClipboardStore {
     /// is deleted.
     static let oldHistoryMarkerName = "old-history-to-delete"
 
+    /// An empty file in the directory that every opening holds an exclusive `flock` on while it
+    /// inspects and changes the key file and the history beside it, so that openings in this
+    /// process and in any other run one at a time. It holds no secret and is never removed: an
+    /// opening that removed it could let a later one lock a new file while an earlier one still
+    /// holds the old.
+    static let openingLockName = "history.lock"
+
+    /// How long an opening waits for another one to finish.
+    static let openingLockTimeout: Duration = .seconds(30)
+
+    /// The points in `open(in:)` where tests stop an opening, to run another one meanwhile.
+    enum OpeningStep: Sendable {
+        /// Another opening holds the lock, and this one starts waiting for it.
+        case waitingForLock
+        /// The key file is missing or not trusted; nothing is created or removed yet.
+        case keyInspected
+        /// The list does not open with the key; nothing is deleted yet.
+        case oldHistoryChecked
+    }
+
     /// What `open(in:)` returns: the store, the key it seals with, how that key was got, and
     /// whether a history sealed with another key was deleted.
     typealias Opened = (store: ClipboardStore, key: SymmetricKey, origin: HistoryKey.Origin, removedOldHistory: Bool)
@@ -128,21 +149,64 @@ extension ClipboardStore {
     /// marker is gone this throws, so no list is written under the new key beside them. A list that
     /// opens with that key is that key's history, whatever left the marker: it is kept, and only the
     /// marker goes.
-    static func open(in directory: URL) throws -> Opened {
+    ///
+    /// All of it runs under the opening lock, so no other opening, in this process or another,
+    /// changes the key file or the history between what this one finds and what it removes. When
+    /// another opening holds the lock for longer than `timeout`, this throws `ETIMEDOUT` with the key
+    /// file and the history untouched. `step` is called at the points `OpeningStep` names.
+    static func open(
+        in directory: URL,
+        waitingAtMost timeout: Duration = openingLockTimeout,
+        at step: (OpeningStep) -> Void = { _ in }
+    ) throws -> Opened {
+        let lock = try lockOpening(in: directory, waitingAtMost: timeout, at: step)
+        defer { close(lock) }
         let marker = directory.appendingPathComponent(oldHistoryMarkerName)
         let (key, origin) = try HistoryKey.load(in: directory) {
+            step(.keyInspected)
             try Data().write(to: marker)
         }
         let store = ClipboardStore(directory: directory, key: key)
         var removedOldHistory = false
         if try isPresent(marker) {
             if try !store.listOpensWithKey() {
+                step(.oldHistoryChecked)
                 try store.deleteAll()
                 removedOldHistory = true
             }
             try store.removeIfPresent(marker)
         }
         return (store, key, origin, removedOldHistory)
+    }
+
+    /// Takes the opening lock in `directory` and returns the descriptor that holds it; closing it
+    /// releases the lock. The lock file is created with mode 0600 and never through a symlink. While
+    /// another opening holds the lock this polls, and after `timeout` it throws `ETIMEDOUT`.
+    private static func lockOpening(
+        in directory: URL, waitingAtMost timeout: Duration, at step: (OpeningStep) -> Void
+    ) throws -> Int32 {
+        let url = directory.appendingPathComponent(openingLockName)
+        let descriptor = Darwin.open(url.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw HistoryKey.posixError(url) }
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        var isWaiting = false
+        while flock(descriptor, LOCK_EX | LOCK_NB) != 0 {
+            let failure = errno
+            guard failure == EWOULDBLOCK || failure == EINTR else {
+                close(descriptor)
+                throw HistoryKey.posixError(url, code: failure)
+            }
+            guard ContinuousClock.now < deadline else {
+                close(descriptor)
+                throw HistoryKey.posixError(url, code: ETIMEDOUT)
+            }
+            if !isWaiting {
+                isWaiting = true
+                step(.waitingForLock)
+            }
+            usleep(10_000)
+        }
+        return descriptor
     }
 
     /// Whether the stored list opens with this key, true when no list was written. Throws when the
@@ -277,7 +341,7 @@ enum HistoryKey {
         return key
     }
 
-    private static func posixError(_ url: URL, code: Int32 = errno) -> POSIXError {
+    fileprivate static func posixError(_ url: URL, code: Int32 = errno) -> POSIXError {
         POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO, userInfo: [NSFilePathErrorKey: url.path])
     }
 }

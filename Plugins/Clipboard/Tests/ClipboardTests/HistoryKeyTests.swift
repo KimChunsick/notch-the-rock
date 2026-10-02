@@ -64,6 +64,11 @@ private func storedContents(in directory: URL) throws -> [ClipItem.Content] {
     try ClipboardStore(directory: directory, key: storedKey(in: directory)).loadList().map(\.content)
 }
 
+/// The names of the regular files in `directory`.
+private func fileNames(in directory: URL) throws -> Set<String> {
+    Set(try files(in: directory).map(\.lastPathComponent))
+}
+
 /// The `lstat` of `url`: the entry itself, never what a symlink points to.
 private func entryStatus(_ url: URL) throws -> stat {
     var info = stat()
@@ -148,6 +153,10 @@ private func put(_ text: String, on pasteboard: NSPasteboard) {
     #expect(info.st_uid == geteuid())
     #expect(info.st_size == 32)
     #expect(try storedContents(in: directory) == [.text("copied before the key file existed")])
+    let lock = try entryStatus(directory.appendingPathComponent(ClipboardStore.openingLockName))
+    #expect(lock.st_mode & S_IFMT == S_IFREG)
+    #expect(lock.st_mode & 0o7777 == 0o600)
+    #expect(lock.st_size == 0)
 
     let key = try storedKey(in: directory)
     let again = try ClipboardStore.open(in: directory)
@@ -186,6 +195,32 @@ private func put(_ text: String, on pasteboard: NSPasteboard) {
     #expect(try entryStatus(keyFile(in: directory)).st_ino == created.st_ino)
 }
 
+/// Another process opens the history the way the plugin does, saves two copies and exits; this
+/// process then opens the same folder from the key file, with the same key, and finds the copies.
+@MainActor
+@Test func R57__another_process_reopens_the_history_with_the_same_key() throws {
+    let directory = try makeDirectory()
+    let helper = Process()
+    helper.executableURL = Bundle(for: OpeningGate.self).bundleURL
+        .deletingLastPathComponent().appendingPathComponent("ClipboardTestHelper")
+    helper.arguments = [directory.path, "copied in the other process", "copied there last"]
+    let output = Pipe()
+    helper.standardOutput = output
+    try helper.run()
+    let printed = output.fileHandleForReading.readDataToEndOfFile()
+    helper.waitUntilExit()
+    #expect(helper.terminationStatus == 0)
+
+    let opened = try ClipboardStore.open(in: directory)
+    let keyBytes = bytes(of: opened.key)
+    #expect(opened.origin == .stored)
+    #expect(keyBytes.map { String(format: "%02x", $0) }.joined() + "\n" == String(decoding: printed, as: UTF8.self))
+    #expect(try Data(contentsOf: keyFile(in: directory)) == keyBytes)
+    let history = ClipboardHistory(logError: { _ in })
+    history.open(opened.store)
+    #expect(history.items.map(\.content) == [.text("copied there last"), .text("copied in the other process")])
+}
+
 /// A key file that is not a private regular file of this user is never used: readable by others,
 /// a symlink (even to a private file holding the right key) or a directory. A new key file
 /// replaces it, and the history sealed with the distrusted key starts over; a symlink's target is
@@ -220,7 +255,7 @@ func R57__a_key_file_that_is_not_a_private_regular_file_is_not_trusted(_ tamperi
     #expect(info.st_mode & S_IFMT == S_IFREG)
     #expect(info.st_mode & 0o7777 == 0o600)
     #expect(bytes(of: try storedKey(in: directory)) == bytes(of: opened.key))
-    #expect(try files(in: directory).map(\.lastPathComponent) == [HistoryKey.fileName])
+    #expect(try fileNames(in: directory) == [HistoryKey.fileName, ClipboardStore.openingLockName])
     if tampering == "symlink" {
         #expect(try Data(contentsOf: elsewhere) == bytes(of: key))
     }
@@ -244,7 +279,7 @@ func R57__a_key_file_that_is_not_a_private_regular_file_is_not_trusted(_ tamperi
     plugin.deactivate()
 
     let stored = try contents(of: directory)
-    #expect(Set(stored.keys) == [HistoryKey.fileName, ClipboardStore.listFileName])
+    #expect(Set(stored.keys) == [HistoryKey.fileName, ClipboardStore.listFileName, ClipboardStore.openingLockName])
     for needle in [Data(text.utf8), try #require(text.data(using: .utf16LittleEndian))] {
         for (name, data) in stored {
             #expect(data.range(of: needle) == nil, "\(name) holds the copied text")
@@ -266,7 +301,7 @@ func R57__a_history_from_before_the_key_file_starts_a_new_history_once(withMarke
     let opened = try ClipboardStore.open(in: directory)
     #expect(opened.origin == .created)
     #expect(opened.removedOldHistory)
-    #expect(try files(in: directory).map(\.lastPathComponent) == [HistoryKey.fileName])
+    #expect(try fileNames(in: directory) == [HistoryKey.fileName, ClipboardStore.openingLockName])
 
     let history = ClipboardHistory(logError: { _ in })
     history.open(opened.store)
@@ -298,7 +333,7 @@ func R57__a_history_from_before_the_key_file_starts_a_new_history_once(withMarke
     #expect(opened.origin == .stored)
     #expect(opened.removedOldHistory)
     #expect(bytes(of: opened.key) == bytes(of: key))
-    #expect(try files(in: directory).map(\.lastPathComponent) == [HistoryKey.fileName])
+    #expect(try fileNames(in: directory) == [HistoryKey.fileName, ClipboardStore.openingLockName])
 }
 
 /// A marker left beside a history that the key file's key opens (a run that stopped after the
@@ -317,6 +352,103 @@ func R57__a_history_from_before_the_key_file_starts_a_new_history_once(withMarke
     #expect(!opened.removedOldHistory)
     #expect(!FileManager.default.fileExists(atPath: marker.path))
     #expect(try storedContents(in: directory) == [.text("readable with the key")])
+}
+
+// MARK: - Openings at the same time
+
+/// Runs `body` on a thread of its own, so that it can wait without holding a thread of the test's.
+private func onThread<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> T {
+    await withCheckedContinuation { continuation in
+        Thread.detachNewThread { continuation.resume(returning: body()) }
+    }
+}
+
+/// Opens `directory` twice at once, as two processes starting together would. The first opening
+/// stops at `step` until the second has either finished or started waiting for the first; the
+/// second saves `text` as soon as it is open. Every wait gives up after a minute, so an opening
+/// that is stuck fails the test instead of hanging it.
+private func openTwice(
+    _ directory: URL, firstStopsAt step: ClipboardStore.OpeningStep, secondSaves text: String
+) async throws -> (first: ClipboardStore.Opened, second: ClipboardStore.Opened) {
+    let firstStopped = DispatchSemaphore(value: 0)
+    let resumeFirst = DispatchSemaphore(value: 0)
+    let secondWaitsOrIsDone = DispatchSemaphore(value: 0)
+    async let first = onThread {
+        Result {
+            try ClipboardStore.open(in: directory) {
+                guard $0 == step else { return }
+                firstStopped.signal()
+                _ = resumeFirst.wait(timeout: .now() + 60)
+            }
+        }
+    }
+    #expect(await onThread { firstStopped.wait(timeout: .now() + 60) } == .success, "the first opening never got to \(step)")
+    async let second = onThread {
+        defer { secondWaitsOrIsDone.signal() }
+        return Result {
+            let opened = try ClipboardStore.open(in: directory) {
+                if $0 == .waitingForLock { secondWaitsOrIsDone.signal() }
+            }
+            try opened.store.saveList([ClipItem(id: UUID(), content: .text(text), date: .now, isPinned: false)])
+            return opened
+        }
+    }
+    #expect(await onThread { secondWaitsOrIsDone.wait(timeout: .now() + 60) } == .success)
+    resumeFirst.signal()
+    return try (await first.get(), await second.get())
+}
+
+/// Two openings find a key file that is not trusted. The second cannot finish while the first is
+/// between finding it and replacing it, so the first never removes a key file the second created:
+/// both get the one key in the key file, and what the second saved with it stays readable.
+@MainActor
+@Test func R57__two_openings_replacing_an_untrusted_key_file_end_with_one_key() async throws {
+    let directory = try makeDirectory()
+    writeHistory(in: directory, key: try ClipboardStore.open(in: directory).key, text: "sealed with the distrusted key")
+    try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: keyFile(in: directory).path)
+
+    let (first, second) = try await openTwice(directory, firstStopsAt: .keyInspected, secondSaves: "saved by the second opening")
+
+    let stored = bytes(of: try storedKey(in: directory))
+    #expect(bytes(of: first.key) == stored)
+    #expect(bytes(of: second.key) == stored)
+    #expect(try storedContents(in: directory) == [.text("saved by the second opening")])
+}
+
+/// Two openings find a history from before the key file. The second cannot finish while the first
+/// is between finding that the list does not open and deleting it, so the first never deletes the
+/// history the second saved with the new key.
+@MainActor
+@Test func R57__an_opening_never_deletes_a_history_another_opening_saved() async throws {
+    let directory = try makeDirectory()
+    try writeHistoryFromBeforeTheKeyFile(in: directory)
+
+    let (first, second) = try await openTwice(directory, firstStopsAt: .oldHistoryChecked, secondSaves: "saved by the second opening")
+
+    #expect(bytes(of: first.key) == bytes(of: second.key))
+    #expect(first.removedOldHistory && !second.removedOldHistory)
+    #expect(try storedContents(in: directory) == [.text("saved by the second opening")])
+    #expect(try fileNames(in: directory) == [HistoryKey.fileName, ClipboardStore.listFileName, ClipboardStore.openingLockName])
+}
+
+/// While another opening holds the lock longer than an opening waits, that opening fails and
+/// changes nothing: no key file is created and the old history, marker included, stays.
+@MainActor
+@Test func R57__an_opening_that_cannot_take_the_lock_changes_nothing() throws {
+    let directory = try makeDirectory()
+    try writeHistoryFromBeforeTheKeyFile(in: directory, withMarker: true)
+    let holder = open(directory.appendingPathComponent(ClipboardStore.openingLockName).path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+    try #require(holder >= 0)
+    defer { close(holder) }
+    try #require(flock(holder, LOCK_EX | LOCK_NB) == 0)
+    let before = try contents(of: directory)
+
+    let error = #expect(throws: POSIXError.self) {
+        try ClipboardStore.open(in: directory, waitingAtMost: .milliseconds(200))
+    }
+
+    #expect(error?.code == .ETIMEDOUT)
+    #expect(try contents(of: directory) == before)
 }
 
 /// The plugin's sources make no keychain call of any kind: no Security framework keychain symbol
@@ -362,7 +494,7 @@ func R57__a_history_from_before_the_key_file_starts_a_new_history_once(withMarke
 
     #expect(gate.onMain == [false])
     #expect(host.logs.contains { $0.0 == .info && $0.1.contains("new clipboard history") }, "\(host.logs)")
-    #expect(try files(in: directory).map(\.lastPathComponent) == [HistoryKey.fileName])
+    #expect(try fileNames(in: directory) == [HistoryKey.fileName, ClipboardStore.openingLockName])
 
     put("copied after opening", on: pasteboard)
     try await Task.sleep(for: PasteboardMonitor.interval * 3)

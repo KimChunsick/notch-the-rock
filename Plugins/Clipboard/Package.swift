@@ -26,6 +26,9 @@ let package = Package(
     ],
     targets: [
         .target(name: "Clipboard", dependencies: [.product(name: "NotchKit", package: "NotchKit")]),
+        // A helper the tests run as another process, to save a history and exit. It has no product,
+        // so scripts/build-plugin.sh never builds or packages it.
+        .executableTarget(name: "ClipboardTestHelper", dependencies: ["Clipboard"], path: "Tests/ClipboardTestHelper"),
         .testTarget(
             name: "ClipboardTests",
             dependencies: ["Clipboard", .product(name: "NotchKit", package: "NotchKit")]
