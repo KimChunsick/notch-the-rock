@@ -167,4 +167,10 @@ extension PeripheralBattery {
         }
         .joined(separator: " · ")
     }
+
+    /// "67%", or "80 · 75 · 50%" in `levels` order (left, right, case) for a device with several
+    /// batteries: short enough for a chip beside the app icons; `levelsText` names each part.
+    var compactLevelsText: String {
+        levels.map { "\($0.percentage)" }.joined(separator: " · ") + "%"
+    }
 }

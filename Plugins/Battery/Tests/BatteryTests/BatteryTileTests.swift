@@ -56,22 +56,26 @@ private final class SilentHost: NotchHost {
     }
 }
 
-/// How far the outermost ink of `view` (any channel at least 14 over black, as the end-to-end
-/// capture counts it) stays from its left, right and bottom edges, drawn offscreen at its ideal
-/// size. The host adds the notch's margin around a tab, so a tab's own outer padding shows here.
+/// `view` drawn offscreen at its ideal size in a dark window, at the window's backing scale as the
+/// app measures a tab: premultiplied RGBA rows from the top.
 @MainActor
-func inkInsets(_ view: some View) throws -> (left: CGFloat, right: CGFloat, bottom: CGFloat) {
+func renderedPixels(_ view: some View) throws -> (pixels: [UInt8], width: Int, height: Int, scale: CGFloat) {
     let hosting = NSHostingView(rootView: view.environment(\.colorScheme, .dark))
     let window = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
     window.appearance = NSAppearance(named: .darkAqua)
     window.contentView = hosting
-    // Measured in the window, at its backing scale, as the app measures a tab.
     let size = hosting.fittingSize
     window.setContentSize(size)
     hosting.layoutSubtreeIfNeeded()
     RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-    let rep = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
-    hosting.cacheDisplay(in: hosting.bounds, to: rep)
+    return try withExtendedLifetime(window) { try renderedPixels(of: hosting) }
+}
+
+/// What `view` draws now, at its window's backing scale: premultiplied RGBA rows from the top.
+@MainActor
+func renderedPixels(of view: NSView) throws -> (pixels: [UInt8], width: Int, height: Int, scale: CGFloat) {
+    let rep = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+    view.cacheDisplay(in: view.bounds, to: rep)
     let image = try #require(rep.cgImage)
     let width = image.width, height = image.height
     var pixels = [UInt8](repeating: 0, count: width * height * 4)
@@ -80,6 +84,15 @@ func inkInsets(_ view: some View) throws -> (left: CGFloat, right: CGFloat, bott
         space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
     ))
     context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    return (pixels, width, height, view.window?.backingScaleFactor ?? 1)
+}
+
+/// How far the outermost ink of `view` (any channel at least 14 over black, as the end-to-end
+/// capture counts it) stays from its left, right and bottom edges, drawn offscreen at its ideal
+/// size. The host adds the notch's margin around a tab, so a tab's own outer padding shows here.
+@MainActor
+func inkInsets(_ view: some View) throws -> (left: CGFloat, right: CGFloat, bottom: CGFloat) {
+    let (pixels, width, height, scale) = try renderedPixels(view)
     var minX = width, maxX = -1, maxY = -1
     for y in 0..<height {
         for x in 0..<width {
@@ -91,8 +104,7 @@ func inkInsets(_ view: some View) throws -> (left: CGFloat, right: CGFloat, bott
             }
         }
     }
-    try #require(maxX >= 0, "no ink in \(size)")
-    let scale = window.backingScaleFactor
+    try #require(maxX >= 0, "no ink in \(width)×\(height) px")
     return (CGFloat(minX) / scale, CGFloat(width - 1 - maxX) / scale, CGFloat(height - 1 - maxY) / scale)
 }
 
@@ -119,9 +131,8 @@ func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom: CGFloa
     ]
     for (name, status) in readings {
         plugin.update(status)
-        var insets = try inkInsets(tab.content)
-        // The battery symbol's image has room of its own left of the outline; the tab adds none.
-        insets.left -= try inkInsets(Image(systemName: status.glyph).font(.system(size: 44))).left
-        expectNoOuterSpace(insets, name)
+        // The battery symbol's outline starts at the tab's left edge: the view takes off the room
+        // the symbol's image keeps left of it.
+        expectNoOuterSpace(try inkInsets(tab.content), name)
     }
 }
