@@ -185,16 +185,14 @@ private func screen(apps: [AppEnergy], peripherals: [PeripheralBattery]) -> Batt
         heights[name] = size.height
         print("R28 render \(name): \(size)")
         #expect(size.width <= 390 && size.height <= 400, "\(name): \(size) does not fit the notch's 390×400")
-        var insets = try inkInsets(view)
-        insets.left -= try inkInsets(Image(systemName: onBattery.glyph).font(.system(size: 44))).left
-        expectNoOuterSpace(insets, "R28 \(name)")
+        expectNoOuterSpace(try inkInsets(view), "R28 \(name)")
         try captureRender(view, named: "R28-render-\(name)")
     }
     let none = try #require(heights["none"]), apps = try #require(heights["apps"])
     let peripherals = try #require(heights["peripherals"]), both = try #require(heights["both"])
-    #expect(apps > none + 60, "the app list adds its heading and three rows")
-    #expect(peripherals > none + 60, "the peripheral list adds its heading and three rows")
-    #expect(both > apps + 60 && both > peripherals + 60)
+    #expect(apps > none + 20, "the apps add their caption and their row of icons")
+    #expect(peripherals > none + 20, "the peripherals add their caption and their row of chips")
+    #expect(both >= max(apps, peripherals) - 1, "both lists show")
 }
 
 /// The screen samples only while it is on screen: mounting it starts sampling, taking it away
@@ -621,10 +619,10 @@ func R28__live_screen_peripherals_match_ioreg_and_system_profiler() async throws
 /// its own width it keeps today's size.
 @MainActor
 @Test func R15__battery_screen_fills_a_wider_offer() throws {
-    // Today's sizes: the battery alone, and with both lists.
+    // Its own sizes: the battery alone, and with both lists in the row below it.
     let cases: [(String, [AppEnergy], [PeripheralBattery], CGSize)] = [
-        ("none", [], [], CGSize(width: 165, height: 76)),
-        ("both", injectedApps, injectedPeripherals, CGSize(width: 335, height: 277)),
+        ("none", [], [], CGSize(width: 241, height: 32)),
+        ("both", injectedApps, injectedPeripherals, CGSize(width: 332, height: 86)),
     ]
     for (name, apps, peripherals, today) in cases {
         let view = screen(apps: apps, peripherals: peripherals)
@@ -633,8 +631,7 @@ func R28__live_screen_peripherals_match_ioreg_and_system_profiler() async throws
         let offered = ideal.width + 80
         let wide = NSHostingView(rootView: view.frame(width: offered)).fittingSize
         #expect(abs(wide.height - ideal.height) <= 1, "\(name): wrapped or cut at \(offered) pt: \(wide) vs \(ideal)")
-        var insets = try inkInsets(view.frame(width: offered))
-        insets.left -= try inkInsets(Image(systemName: onBattery.glyph).font(.system(size: 44))).left
+        let insets = try inkInsets(view.frame(width: offered))
         print("R15 battery \(name) ideal \(ideal), offered \(offered) pt: ink insets left \(insets.left) right \(insets.right)")
         #expect(insets.left <= 2 && insets.right <= 2, "\(name): the screen does not reach both edges of a \(offered) pt offer: \(insets)")
     }
@@ -647,7 +644,7 @@ func R28__live_screen_peripherals_match_ioreg_and_system_profiler() async throws
     // Its own sizes: the message row is as tall as the message alone was.
     let cases: [(String, [AppEnergy], CGSize)] = [
         ("none", [], CGSize(width: 223, height: 16)),
-        ("apps", injectedApps, CGSize(width: 223, height: 122)),
+        ("apps", injectedApps, CGSize(width: 223, height: 70)),
     ]
     for (name, apps, own) in cases {
         let model = BatteryModel(sampler: nil)
@@ -663,4 +660,136 @@ func R28__live_screen_peripherals_match_ioreg_and_system_profiler() async throws
         print("R15 battery without a reading \(name) offered \(offered) pt: ink insets left \(insets.left) right \(insets.right)")
         #expect(insets.left <= 2 && insets.right <= 2, "\(name): the screen does not reach both edges of a \(offered) pt offer: \(insets)")
     }
+}
+
+// MARK: - One compact row
+
+/// The screen's height with three apps and two peripherals in the vertical lists it had before R42,
+/// from a render of that layout.
+private let verticalListsHeight: CGFloat = 254
+
+private let twoPeripherals = Array(injectedPeripherals.prefix(2))
+
+@MainActor
+private func screenSize(_ apps: [AppEnergy], _ peripherals: [PeripheralBattery]) -> CGSize {
+    NSHostingView(rootView: screen(apps: apps, peripherals: peripherals)).fittingSize
+}
+
+/// With three apps and two peripherals the screen is far lower than the vertical lists were, and
+/// still fits the notch.
+@MainActor
+@Test func R42__screen_with_three_apps_and_two_peripherals_is_lower_than_the_vertical_lists() throws {
+    let view = screen(apps: injectedApps, peripherals: twoPeripherals)
+    let size = NSHostingView(rootView: view).fittingSize
+    print("R42 3 apps + 2 peripherals: \(size.width)×\(size.height) pt; the vertical lists were \(verticalListsHeight) pt tall")
+    try captureRender(view, named: "R42-render-3-apps-2-peripherals")
+    #expect(size.height <= verticalListsHeight * 0.6, "R42: \(size.height) pt is not well below the vertical lists' \(verticalListsHeight) pt")
+    #expect(size.width <= 390, "R42: \(size.width) pt does not fit the notch")
+}
+
+/// The apps show as icons in one row, at most five, without their names: more apps leave the
+/// height alone, a sixth shows nothing more, and much longer names change no pixel. The
+/// peripherals' chips sit in the same row band, also without the device names.
+@MainActor
+@Test func R42__apps_and_peripherals_share_one_row_of_icons_and_chips_without_names() throws {
+    let fiveApps = injectedApps + [
+        AppEnergy(bundlePath: "/System/Applications/Notes.app", name: "메모", power: 2.4),
+        AppEnergy(bundlePath: "/System/Applications/Mail.app", name: "Mail", power: 1.8),
+    ]
+    let sixApps = fiveApps + [AppEnergy(bundlePath: "/System/Applications/Maps.app", name: "지도", power: 0.9)]
+    let one = screenSize([injectedApps[0]], []), three = screenSize(injectedApps, []), five = screenSize(fiveApps, [])
+    let both = screenSize(injectedApps, twoPeripherals), peripherals = screenSize([], twoPeripherals)
+    print("R42 heights: 1 app \(one.height), 3 apps \(three.height), 5 apps \(five.height), 2 peripherals \(peripherals.height), 3 apps + 2 peripherals \(both.height) pt")
+    #expect(abs(three.height - one.height) <= 0.5 && abs(five.height - one.height) <= 0.5, "R42: more apps made the screen taller")
+    #expect(abs(both.height - three.height) <= 1 && abs(peripherals.height - three.height) <= 1, "R42: the chips are not in the icons' row band")
+    #expect(try renderedPixels(screen(apps: sixApps, peripherals: [])).pixels == renderedPixels(screen(apps: fiveApps, peripherals: [])).pixels,
+            "R42: more than five apps show")
+    let widest = screenSize(fiveApps, injectedPeripherals)
+    print("R42 5 apps + 3 peripherals: \(widest) pt")
+    #expect(widest.width <= 390 && abs(widest.height - three.height) <= 1, "R42: five apps and three peripherals do not fit the notch in one row")
+
+    let renamedApps = injectedApps.map { AppEnergy(bundlePath: $0.bundlePath, name: "\($0.name) with a name far longer than the row", power: $0.power) }
+    let renamedPeripherals = twoPeripherals.map { device in
+        var device = device
+        device.name += " with a name far longer than the row"
+        return device
+    }
+    #expect(try renderedPixels(screen(apps: injectedApps, peripherals: twoPeripherals)).pixels
+            == renderedPixels(screen(apps: renamedApps, peripherals: renamedPeripherals)).pixels, "R42: a name shows in the row")
+}
+
+/// The battery symbol's outline, not the room its image keeps left of it, starts at the screen's
+/// leading edge, so the screen keeps the same margin as the others; none of it is cut off there.
+@MainActor
+@Test func R42__battery_glyph_starts_at_the_screens_leading_edge() throws {
+    let readings: [(String, PowerStatus)] = [
+        ("on battery", onBattery),
+        ("charging", PowerStatus(percentage: 79, isExternalPowerConnected: true, isCharging: true, isFullyCharged: false,
+                                 timeToEmpty: nil, timeToFull: .minutes(332))),
+        ("low", PowerStatus(percentage: 9, isExternalPowerConnected: false, isCharging: false, isFullyCharged: false,
+                            timeToEmpty: .minutes(20), timeToFull: nil)),
+        ("full", PowerStatus(percentage: 100, isExternalPowerConnected: true, isCharging: false, isFullyCharged: true,
+                             timeToEmpty: nil, timeToFull: nil)),
+    ]
+    for (name, status) in readings {
+        let model = BatteryModel(sampler: nil)
+        model.status = status
+        let view = BatteryView(model: model)
+        let left = try inkInsets(view).left
+        let shifted = try inkInsets(view.padding(.leading, 6)).left
+        print("R42 \(name) (\(status.glyph)): outline \(left) pt from the leading edge, \(shifted) pt with 6 pt added; the symbol's image keeps \(try inkInsets(Image(systemName: status.glyph).font(.system(size: 44))).left) pt left of it")
+        #expect(left <= 1, "R42 \(name): the symbol's outline starts \(left) pt from the leading edge")
+        #expect(abs(shifted - 6 - left) <= 0.5, "R42 \(name): part of the symbol is cut off at the leading edge")
+    }
+}
+
+/// Hovering an item of the row shows its name in a capsule over it, inside the screen's bounds, at
+/// the row's first and last item, cut short when it is wider than the screen; the layout keeps its
+/// size. The hover is injected as the view's hovered item, the state the item's `.onHover` sets.
+@MainActor
+@Test func R42__hovering_an_icon_shows_its_name_in_a_bubble_inside_the_screen() throws {
+    let margin: CGFloat = 40
+    func bubble(_ apps: [AppEnergy], _ peripherals: [PeripheralBattery], hovering item: BatteryView.Hovered) throws -> (bounds: CGRect, screen: CGSize) {
+        let model = BatteryModel(sampler: nil)
+        model.status = onBattery
+        model.detail = BatteryDetail(apps: apps, peripherals: peripherals)
+        let plain = try renderedPixels(BatteryView(model: model).padding(margin))
+        let shown = try renderedPixels(BatteryView(model: model, hovered: item).padding(margin))
+        try #require(plain.width == shown.width && plain.height == shown.height, "R42 \(item): the bubble changed the screen's size")
+        var minX = plain.width, maxX = -1, minY = plain.height, maxY = -1
+        for y in 0..<plain.height {
+            for x in 0..<plain.width {
+                let i = (y * plain.width + x) * 4
+                if (0..<3).contains(where: { abs(Int(plain.pixels[i + $0]) - Int(shown.pixels[i + $0])) > 24 }) {
+                    minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+                }
+            }
+        }
+        try #require(maxX >= 0, "R42 \(item): no bubble")
+        let scale = plain.scale
+        let bounds = CGRect(x: CGFloat(minX) / scale - margin, y: CGFloat(minY) / scale - margin,
+                            width: CGFloat(maxX - minX + 1) / scale, height: CGFloat(maxY - minY + 1) / scale)
+        let screen = CGSize(width: CGFloat(plain.width) / scale - 2 * margin, height: CGFloat(plain.height) / scale - 2 * margin)
+        print("R42 bubble for \(item): \(bounds) in a \(screen) screen")
+        #expect(bounds.minX >= -0.5 && bounds.maxX <= screen.width + 0.5 && bounds.minY >= -0.5 && bounds.maxY <= screen.height + 0.5,
+                "R42 \(item): the bubble \(bounds) leaves the \(screen) screen")
+        return (bounds, screen)
+    }
+    let long = " with a name much wider than the whole battery screen, so its bubble ends in an ellipsis"
+    var longApps = injectedApps
+    longApps[0].name += long
+    var longPeripherals = twoPeripherals
+    longPeripherals[1].name += long
+
+    let first = try bubble(injectedApps, twoPeripherals, hovering: .app(injectedApps[0].bundlePath))
+    let firstLong = try bubble(longApps, twoPeripherals, hovering: .app(injectedApps[0].bundlePath))
+    let lastLong = try bubble(injectedApps, longPeripherals, hovering: .peripheral(twoPeripherals[1].id))
+    #expect(firstLong.bounds.width > first.bounds.width + 40, "R42: the bubble does not show the app's name")
+    #expect(firstLong.bounds.width <= firstLong.screen.width + 0.5 && lastLong.bounds.width <= lastLong.screen.width + 0.5,
+            "R42: a long name's bubble is wider than the screen")
+
+    let model = BatteryModel(sampler: nil)
+    model.status = onBattery
+    model.detail = BatteryDetail(apps: injectedApps, peripherals: twoPeripherals)
+    try captureRender(BatteryView(model: model, hovered: .app(injectedApps[1].bundlePath)), named: "R42-render-hover")
 }
