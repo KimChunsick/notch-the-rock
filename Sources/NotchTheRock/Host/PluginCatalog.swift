@@ -98,11 +98,13 @@ final class PluginCatalog {
     @ObservationIgnored var onEnabledChange: (@MainActor () -> Void)?
 
     /// A loaded plugin with what the home shows of it: the manifest's name and symbol, and the tab
-    /// and tile read once when it loaded.
+    /// and tile read once when it loaded. The context is kept for its settings store, which the
+    /// Settings page writes to.
     private struct Running {
         let pluginID: String
         let manifest: PluginManifest
         let plugin: any NotchPlugin
+        let context: NotchContext
         let tab: PluginTab?
         let tile: PluginTile?
         var isEnabled: Bool
@@ -234,10 +236,14 @@ final class PluginCatalog {
         records.first { $0.key == PluginKey(pluginID) && $0.state == .on }?.id
     }
 
-    /// The plugin's own Settings page while it is on.
-    func settingsView(for id: PluginRecord.ID) -> AnyView? {
+    /// What the plugin's page in Settings shows below its header while it is on; nil while it is off.
+    func page(for id: PluginRecord.ID) -> PluginPage? {
         guard let running = running[id], running.isEnabled else { return nil }
-        return running.plugin.settingsView
+        return PluginPage(
+            description: running.plugin.pluginDescription,
+            settings: running.context.settings,
+            customView: running.plugin.settingsView
+        )
     }
 
     /// The onboarding steps of the running, enabled plugins that offer setup, in load order.
@@ -354,6 +360,7 @@ final class PluginCatalog {
             pluginID: info.identifier,
             manifest: opened.manifest,
             plugin: plugin,
+            context: context,
             tab: plugin.expandedTab,
             tile: plugin.tile,
             isEnabled: false
@@ -397,7 +404,7 @@ final class PluginCatalog {
                 symbol: entry.manifest.symbol,
                 tab: entry.tab,
                 tile: entry.tile,
-                hasSettings: entry.plugin.settingsView != nil
+                hasSettings: entry.plugin.settingsView != nil || entry.plugin.pluginDescription?.settings.isEmpty == false
             )
         }
     }

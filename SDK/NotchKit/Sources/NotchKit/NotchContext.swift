@@ -30,6 +30,9 @@ public final class NotchContext {
     /// The plugin's installed `.notchplugin` bundle.
     public let bundleURL: URL
     public let storage: PluginStorage
+    /// The values of the settings the plugin declares in `pluginDescription`, kept in `storage`.
+    /// (SDK 1.4)
+    public let settings: PluginSettings
     public let permissions: PermissionCenter
     public let log: PluginLogger
     private let host: any NotchHost
@@ -39,6 +42,7 @@ public final class NotchContext {
         self.bundleURL = bundleURL
         self.host = host
         self.storage = storage
+        self.settings = PluginSettings(defaults: storage.defaults)
         self.permissions = PermissionCenter(pluginID: pluginID, host: host)
         self.log = PluginLogger(pluginID: pluginID, host: host)
     }

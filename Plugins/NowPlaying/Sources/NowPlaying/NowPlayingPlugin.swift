@@ -204,6 +204,15 @@ public final class NowPlayingPlugin: NotchPlugin {
         context.clear(activityID: Self.activityID)
         isActivityPosted = false
     }
+
+    public var pluginDescription: PluginDescription? {
+        PluginDescription(
+            summary: "지금 재생 중인 곡과 앨범 아트를 노치에 보여 주고, 펼친 화면에서 재생과 일시정지, 앞뒤 곡 넘기기를 할 수 있어요.",
+            permissions: [
+                PluginPermission(.helperProcesses, reason: "macOS가 재생 정보를 Apple 프로그램에만 알려 줘서, /usr/bin/perl로 도우미를 띄워 재생 정보를 읽고 재생을 조작해요."),
+            ]
+        )
+    }
 }
 
 /// The delay before starting a helper again that ended unexpectedly: 1 s, doubling after each run

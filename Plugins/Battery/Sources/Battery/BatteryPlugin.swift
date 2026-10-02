@@ -106,6 +106,15 @@ public final class BatteryPlugin: NotchPlugin {
         context.clear(activityID: Self.chargingActivityID)
         postedChargingPercentage = nil
     }
+
+    public var pluginDescription: PluginDescription? {
+        PluginDescription(
+            summary: "배터리 잔량과 충전 상태를 노치에 보여 주고, 펼친 화면에서 남은 시간, 연결한 기기의 배터리, 에너지를 많이 쓰는 앱을 보여줘요.",
+            permissions: [
+                PluginPermission(.helperProcesses, reason: "펼친 화면을 보는 동안 앱별 에너지 사용은 /usr/bin/top으로, 블루투스 기기 배터리는 system_profiler로 읽어요."),
+            ]
+        )
+    }
 }
 
 /// The C entry symbol the app resolves after loading the bundle. Keep one per plugin.

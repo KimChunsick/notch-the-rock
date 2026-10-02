@@ -13,7 +13,7 @@ private final class NoSetupPlugin: NotchPlugin {
 @MainActor
 @Suite struct PluginSetupTests {
     @Test func R43__sdk_1_3_adds_the_setup_step_and_a_plugin_without_one_reads_nil() throws {
-        #expect(NotchKitSDK.version == SDKVersion(major: 1, minor: 3))
+        #expect(NotchKitSDK.version >= SDKVersion(major: 1, minor: 3))
         #expect(NotchKitSDK.version.supports(SDKVersion(major: 1, minor: 2)))
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("PluginSetupTests-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }

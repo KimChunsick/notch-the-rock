@@ -87,8 +87,7 @@ final class FakeUnlocks: ScreenUnlockSource {
 
     @Test func R30__unlocks_do_not_greet_while_greetings_are_off() throws {
         try withContext { context, host in
-            let preferences = HelloPreferences(defaults: context.storage.defaults)
-            preferences.showsGreeting = false
+            context.settings.set(false, for: HelloPreferences.showsGreeting)
             let plugin = plugin(context)
             plugin.activate()
             for _ in 1...2 {
@@ -97,7 +96,7 @@ final class FakeUnlocks: ScreenUnlockSource {
             #expect(host.takeovers.isEmpty)
 
             // Turned back on in Settings, the next unlock greets without restarting the app.
-            preferences.showsGreeting = true
+            context.settings.set(true, for: HelloPreferences.showsGreeting)
             unlocks.fire()
             #expect(host.takeovers.count == 1)
         }

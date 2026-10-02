@@ -9,8 +9,8 @@ import SwiftUI
 /// or denied, and AskUserQuestion answered, in the notch; "터미널에서 답하기" or the end of the wait
 /// hands them back to the terminal. An operation too long for the notch, and typed answers to several
 /// questions, are shown in full on the plugin's screen and answered there. The settings page
-/// installs and removes the hooks in `~/.claude/settings.json` and sets the wait; the onboarding's
-/// setup step connects the same way (`AgentSetup`).
+/// declares what the plugin uses and the wait, and its own rows install and remove the hooks in
+/// `~/.claude/settings.json`; the onboarding's setup step connects the same way (`AgentSetup`).
 @MainActor
 public final class AgentsPlugin: NotchPlugin {
     public static let manifest = PluginManifest(
@@ -75,8 +75,10 @@ public final class AgentsPlugin: NotchPlugin {
         let logos = InstalledAppLogos()
         self.logos = logos
         let defaults = context.storage.defaults
+        ApprovalWait.migrate(defaults)
+        let settings = context.settings
         bridge = ClaudeBridge(context: context, activator: activator, logos: logos) {
-            .seconds(ApprovalWait.seconds(in: defaults))
+            .seconds(ApprovalWait.seconds(in: settings))
         }
         hooks = ClaudeHooksModel(installer: HookInstaller(
             settingsURL: settingsURL,
@@ -84,7 +86,7 @@ public final class AgentsPlugin: NotchPlugin {
             entries: HookEntry.claude(helper: context.bundleURL.appendingPathComponent("Contents/Helpers/notch-hook"))
         ))
         let codexBridge = CodexBridge(context: context, activator: activator, screen: bridge.screen, terminal: codexTerminal, logos: logos) {
-            .seconds(ApprovalWait.seconds(in: defaults))
+            .seconds(ApprovalWait.seconds(in: settings))
         }
         let link = CodexLink(
             supervisor: CodexSupervisor(endpoint: codexEndpoint, executable: codexExecutable, launcher: codexLauncher),
@@ -174,8 +176,23 @@ public final class AgentsPlugin: NotchPlugin {
         }
     }
 
+    /// Connecting Claude Code and Codex does not fit a declared item, so those rows stay the plugin's own.
     public var settingsView: AnyView? {
-        AnyView(AgentsSettingsView(model: hooks, codex: codex, defaults: context.storage.defaults))
+        AnyView(AgentsSettingsView(model: hooks, codex: codex))
+    }
+
+    public var pluginDescription: PluginDescription? {
+        PluginDescription(
+            summary: "Claude Code와 Codex 세션이 입력을 기다리거나 작업을 마치면 노치에 알려 줘요. 권한 요청과 질문에는 노치에서 바로 답할 수 있어요.",
+            permissions: [
+                PluginPermission(.otherAppSettings(app: "Claude Code"), reason: "연결하면 ~/.claude/settings.json을 같은 폴더에 백업한 뒤 알림 훅을 더하고, 해제하면 더한 훅만 지워요."),
+                PluginPermission(.files(path: "~/.claude/projects/*"), reason: "세션마다 context 사용량을 보여 주려고 Claude Code 대화 기록을 읽어요."),
+                PluginPermission(.files(path: "$CODEX_HOME/sessions"), reason: "Codex 데스크톱 앱 세션을 목록과 알림에 보여 주려고 기록 파일을 읽어요."),
+                PluginPermission(.helperProcesses, reason: "Claude Code 훅이 함께 담긴 notch-hook을 실행해요. Codex를 연결하면 떠 있는 공유 app-server를 쓰고, 없으면 codex app-server를 직접 띄워요."),
+                PluginPermission(.automation(app: "터미널"), reason: "터미널로 이동할 때 세션이 열린 탭을 고르려고 터미널에 Apple Events를 보내요."),
+            ],
+            settings: [ApprovalWait.item]
+        )
     }
 
     public var setup: PluginSetup? {

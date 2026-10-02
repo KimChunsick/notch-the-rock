@@ -93,8 +93,19 @@ public final class ClipboardPlugin: NotchPlugin {
         }
     }
 
+    /// Clearing and resetting the history are actions, not declared items, so they stay the plugin's own.
     public var settingsView: AnyView? {
         AnyView(ClipboardSettingsView(history: history))
+    }
+
+    public var pluginDescription: PluginDescription? {
+        PluginDescription(
+            summary: "복사한 텍스트와 이미지, 링크를 기록해 두고 노치에서 찾아 다시 복사할 수 있어요. 비밀번호 관리자가 표시한 내용은 기록하지 않아요.",
+            permissions: [
+                PluginPermission(.pasteboard, reason: "복사할 때마다 클립보드 내용을 읽어 기록에 더하고, 고른 기록을 클립보드에 다시 넣어요."),
+                PluginPermission(.keychain, reason: "디스크에 암호화해 저장하는 기록의 키를 키체인에 보관해요."),
+            ]
+        )
     }
 
     /// Opens the history with the encrypted store, or without one when the Keychain cannot give a

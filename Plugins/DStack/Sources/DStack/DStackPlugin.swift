@@ -55,8 +55,19 @@ public final class DStackPlugin: NotchPlugin {
         }
     }
 
+    /// The folder list does not fit a declared item, so it stays the plugin's own.
     public var settingsView: AnyView? {
         AnyView(DStackSettingsView(model: model))
+    }
+
+    public var pluginDescription: PluginDescription? {
+        PluginDescription(
+            summary: "D-STACK을 쓰는 프로젝트의 목표와 계획, 태스크, 요구사항이 얼마나 진행됐는지 노치에 보여줘요. 파일을 읽기만 하고 아무것도 쓰지 않아요.",
+            permissions: [
+                PluginPermission(.files(path: "~/.claude/projects"), reason: "Claude Code에서 연 프로젝트 가운데 D-STACK을 쓰는 곳을 찾으려고 폴더 이름을 읽어요."),
+                PluginPermission(.files(path: "프로젝트 폴더/.dstack"), reason: "진행 상황을 보여 주려고 각 프로젝트의 D-STACK 저장소 파일을 읽어요."),
+            ]
+        )
     }
 }
 

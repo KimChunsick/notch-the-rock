@@ -63,7 +63,7 @@ Clock.notchplugin/Contents/
 |---|---|
 | `CFBundleIdentifier` | `PluginManifest.id` |
 | `CFBundleExecutable` | 패키지 이름 |
-| `NotchKitSDKVersion` | 플러그인을 빌드한 SDK 버전(예: `1.3`) |
+| `NotchKitSDKVersion` | 플러그인을 빌드한 SDK 버전(예: `1.4`) |
 | `NotchPluginEntry` | 진입 함수 이름, `notchkit_plugin_entry` |
 
 NotchKit은 앱 안에 한 벌만 있어요. 플러그인 실행 파일은 NotchKit을 `@rpath/libNotchKit.dylib`로만
@@ -135,7 +135,8 @@ PROBE="$(swift build -c release --package-path SDK/NotchKit/Probe --show-bin-pat
 ```
 
 성공하면 manifest, 플러그인 화면(`expandedTab`), 타일이 지원하는 크기(`tile: small (2x2)`, 타일이
-없으면 `tile: none`)를 출력하고 종료 코드 0으로 끝나요. 실패하면 이유를 한 줄로 출력하고 1로 끝나요.
+없으면 `tile: none`), 설정 화면에 보일 설명·권한·설정 항목(선언하지 않았으면 `description: none`)을
+출력하고 종료 코드 0으로 끝나요. 실패하면 이유를 한 줄로 출력하고 1로 끝나요.
 앱의 설정 화면에도 같은 문장이 표시돼요.
 
 | 출력되는 이유 | 고칠 곳 |
@@ -175,6 +176,32 @@ scripts/check-plugin-deps.sh              # Plugins/ 전체를 검사해요
 scripts/check-plugin-deps.sh <폴더>        # 다른 폴더를 검사해요
 ```
 
+### 내장 플러그인이 선언한 권한
+
+내장 플러그인 아홉 개도 `pluginDescription`으로 설명, 권한, 설정 항목을 선언해요. 설정 화면의 권한 칸에는
+아래 내용이 이유와 함께 보여요. 권한이 없는 플러그인은 '쓰는 권한 없음'으로 보여요.
+
+| 플러그인 | 권한 | 쓰는 이유 | 설정 항목 |
+|---|---|---|---|
+| 코딩 에이전트 | Claude Code 설정 변경 | 연결하면 `~/.claude/settings.json`을 백업한 뒤 알림 훅을 더하고, 해제하면 그 훅만 지워요. | 노치에서 기다리는 시간 |
+| | 파일: `~/.claude/projects/*` | 세션마다 context 사용량을 보여 주려고 대화 기록을 읽어요. | |
+| | 파일: `$CODEX_HOME/sessions` | Codex 데스크톱 앱 세션을 목록과 알림에 보여 주려고 기록 파일을 읽어요. | |
+| | 도우미 프로그램 실행 | Claude Code 훅이 `notch-hook`을 실행하고, Codex를 연결하면 `codex app-server`를 쓰거나 띄워요. | |
+| | 자동화: 터미널 | 터미널로 이동할 때 세션이 열린 탭을 고르려고 Apple Events를 보내요. | |
+| 배터리 | 도우미 프로그램 실행 | 앱별 에너지 사용은 `top`으로, 블루투스 기기 배터리는 `system_profiler`로 읽어요. | |
+| 밝기 | 손쉬운 사용 | 밝기 키를 가로채서 노치에서 처리해요. | |
+| 볼륨 | 손쉬운 사용 | 볼륨·음소거 키를 가로채서 노치에서 처리해요. | |
+| 클립보드 | 클립보드 | 복사한 내용을 읽어 기록하고, 고른 기록을 클립보드에 다시 넣어요. | |
+| | 키체인 | 암호화한 기록의 키를 보관해요. | |
+| D-STACK | 파일: `~/.claude/projects` | D-STACK을 쓰는 프로젝트를 찾으려고 폴더 이름을 읽어요. | |
+| | 파일: 프로젝트 폴더/`.dstack` | 진행 상황을 보여 주려고 저장소 파일을 읽기만 해요. | |
+| Hello | 쓰는 권한 없음 | | 인사 애니메이션 보여주기 |
+| 지금 재생 중 | 도우미 프로그램 실행 | `/usr/bin/perl`로 도우미를 띄워 재생 정보를 읽고 재생을 조작해요. | |
+| 시스템 상태 | 쓰는 권한 없음 | | |
+
+연결 버튼(코딩 에이전트), 기록 지우기(클립보드), 폴더 목록(D-STACK), 손쉬운 사용 권한 열기(밝기, 볼륨)처럼
+선언으로 나타낼 수 없는 것만 각 플러그인이 `settingsView`로 직접 그려요.
+
 ## 6. API
 
 NotchKit 타입은 `import NotchKit`으로 가져오고, 화면을 그리는 `Text`나 `Image` 같은 SwiftUI 타입은
@@ -205,7 +232,8 @@ public final class ClockPlugin: NotchPlugin {
     public var tile: PluginTile? {                  // 선택: 홈의 타일 (SDK 1.1)
         PluginTile(supportedSizes: [.small]) { _ in Text("12:00").padding(8) }
     }
-    public var settingsView: AnyView? { nil }       // 선택: 설정 화면의 페이지
+    public var pluginDescription: PluginDescription? { nil }  // 선택: 설정 화면의 설명, 권한, 설정 항목 (SDK 1.4)
+    public var settingsView: AnyView? { nil }       // 선택: 설정 화면에서 플러그인이 직접 그리는 칸
     public var setup: PluginSetup? { nil }          // 선택: 처음 실행 안내의 설정 단계 (SDK 1.3)
 }
 ```
@@ -426,6 +454,83 @@ public var setup: PluginSetup? {
 돌려줘요. 스스로 다시 시도하는 중이면 그 사실을 `message`에 적어 줘요. 사용자가 이 단계를 건너뛸 수
 있으니 같은 일을 설정 화면에서도 할 수 있게 해 주세요.
 
+### 설정 화면: 설명, 권한, 설정 항목 (SDK 1.4)
+
+설정 화면의 플러그인 칸은 모든 플러그인이 같은 틀을 따라요. 이름, 버전, 켜기 스위치 아래에 `설명`,
+`권한`, `설정`이 차례로 놓이고, 플러그인이 직접 그린 `settingsView`는 맨 아래 `추가 설정`에 들어가요.
+플러그인은 `pluginDescription`으로 내용만 선언하고, 그리는 일은 앱이 해요. 연결 버튼처럼 틀에 맞지 않는
+것만 `settingsView`에 남겨요.
+
+```swift
+static let showsSeconds = PluginSettingItem.toggle(
+    key: "showsSeconds", title: "초 보이기", detail: "시계에 초를 함께 보여줘요.", default: false)
+static let style = PluginSettingItem.choice(key: "style", title: "시계 모양", options: [
+    PluginSettingOption("digital", title: "숫자"),
+    PluginSettingOption("analog", title: "바늘"),
+], default: "digital")
+
+public var pluginDescription: PluginDescription? {
+    PluginDescription(
+        summary: "접힌 노치 옆에 지금 시각을 보여줘요.",
+        permissions: [
+            PluginPermission(.files(path: "~/Library/Calendars"), reason: "다음 일정을 시계 옆에 보여줘요."),
+        ],
+        settings: [Self.showsSeconds, Self.style]
+    )
+}
+```
+
+- `summary`는 한두 문장으로 써요. 긴 안내 문단은 설명과 권한의 이유로 나눠 줘요.
+- `permissions`에는 플러그인이 쓰는 권한과 민감한 자원을 모두 적고, 항목마다 왜 쓰는지 짧게 적어요.
+  하나도 쓰지 않으면 빈 배열을 넘겨요. 앱이 `쓰는 권한 없음`이라고 보여줘요. 선언은 사용자에게
+  보여주는 내용이고, 앱이 그 범위로 막지는 않아요.
+- `settings`의 항목은 앱의 기본 컨트롤로 그려지고, 값은 플러그인 저장소(`PluginStorage.defaults`)에
+  항목의 `key`로 저장돼요.
+
+| `PluginPermission.Kind` | 설정 화면 표시 |
+|---|---|
+| `.accessibility` | 손쉬운 사용 |
+| `.automation(app:)` | 자동화: 앱 이름 (Apple Events를 보내는 앱) |
+| `.screenRecording` | 화면 기록 |
+| `.bluetooth` | 블루투스 |
+| `.notifications` | 알림 |
+| `.files(path:)` | 파일: 경로 (플러그인 폴더 밖의 파일, `~/.claude/projects/*` 같은 패턴) |
+| `.keychain` | 키체인 (플러그인 저장소의 항목 말고 다른 키체인 항목) |
+| `.network` | 네트워크 |
+| `.helperProcesses` | 도우미 프로그램 실행 |
+| `.otherAppSettings(app:)` | 앱 이름 설정 변경 (다른 앱의 설정 파일을 바꿀 때) |
+| `.pasteboard` | 클립보드 (다른 앱이 복사한 내용을 읽거나 클립보드에 넣을 때) |
+
+| `PluginSettingItem` | 컨트롤 | 읽는 함수 |
+|---|---|---|
+| `.toggle(key:title:detail:default:)` | 스위치 | `bool(_:)` |
+| `.choice(key:title:options:default:)` | 고르기 메뉴, 값은 고른 옵션의 `value` | `string(_:)` |
+| `.number(key:title:range:step:unit:default:)` | 값과 증감 버튼, `unit`은 값 뒤에 붙어요(`5초`) | `number(_:)` |
+| `.text(key:title:placeholder:default:)` | 글 입력 칸 | `string(_:)` |
+
+값은 `context.settings`로 읽어요. 저장된 값이 없거나 항목에 맞지 않으면(다른 종류, 범위 밖, 옵션에 없는
+값) 선언한 기본값을 돌려줘요. 사용자가 컨트롤을 바꾸면 앱이 `context.settings`에 쓰고, 바뀐 항목의
+`key`가 `changes()` 스트림으로 전달돼요. SwiftUI 화면에서 값을 읽으면 바뀔 때 다시 그려져요.
+
+```swift
+public func activate() {
+    let changes = context.settings.changes()
+    watching = Task { [weak self] in
+        for await key in changes where key == Self.showsSeconds.key {
+            self?.model.showsSeconds = self?.context.settings.bool(Self.showsSeconds) ?? false
+        }
+    }
+}
+
+public func deactivate() {
+    watching?.cancel()   // 스트림도 함께 끝나요
+}
+```
+
+플러그인이 직접 값을 바꿀 때도 `context.settings.set(_:for:)`을 써야 다른 쪽이 바뀐 값을 받아요.
+설정 화면의 칸은 플러그인이 켜져 있을 때만 보여요. 1.4보다 낮은 SDK로 빌드한 플러그인은
+`pluginDescription`이 `nil`로 읽혀서, 이름과 스위치 아래에 `settingsView`만 예전처럼 보여요.
+
 ## 7. 진입 함수
 
 앱은 번들의 실행 파일을 연 다음 `Info.plist`의 `NotchPluginEntry`에 적힌 C 함수를 찾아 불러요. 플러그인마다
@@ -441,7 +546,7 @@ public func notchkitPluginEntry() -> UnsafeMutableRawPointer {
 
 ## 8. SDK 버전
 
-지금 SDK는 `NotchKitSDK.version` = `1.2`예요. 버전은 `주.부` 형식이고, 앱은 아래 조건을 만족하는
+지금 SDK는 `NotchKitSDK.version` = `1.4`예요. 버전은 `주.부` 형식이고, 앱은 아래 조건을 만족하는
 플러그인만 불러와요.
 
 - 주 버전이 앱과 같아요.
@@ -457,6 +562,8 @@ public func notchkitPluginEntry() -> UnsafeMutableRawPointer {
 | `1.0` | 처음 공개한 API예요. |
 | `1.1` | 홈 타일을 위한 `TileSize`, `PluginTile`, `NotchPlugin.tile`이 추가됐어요. |
 | `1.2` | 키체인 접근 권한을 고르는 `KeychainAccess`와 `setKeychainData(_:for:access:)`, 묻지 않고 실패한 호출을 알려 주는 `KeychainError.needsAccess`가 추가됐어요. 앱에 들어 있는 SDK가 키체인 대화상자를 띄우지 않으니, 예전 버전으로 빌드한 플러그인의 키체인 호출도 묻지 않고 실패해요. |
+| `1.3` | 처음 실행 안내의 설정 단계를 위한 `PluginSetup`, `PluginSetupItem`, `PluginSetupState`와 `NotchPlugin.setup`이 추가됐어요. |
+| `1.4` | 설정 화면에 보일 설명, 권한, 설정 항목을 선언하는 `PluginDescription`, `PluginPermission`, `PluginSettingItem`과 `NotchPlugin.pluginDescription`, 설정 값을 읽고 바뀐 값을 받는 `NotchContext.settings`(`PluginSettings`)가 추가됐어요. |
 
 1.0으로 빌드한 플러그인에는 `tile` 구현이 없어서, 1.1 이후 앱은 기본 구현이 돌려주는 `nil`을 읽어요. 이런
 플러그인은 "홈과 타일"의 규칙대로 격자 아래 아이콘으로 보이고, 앱의 기본 타일로 격자에 올릴 수 있어요. 1.0 SDK로 빌드한 템플릿을

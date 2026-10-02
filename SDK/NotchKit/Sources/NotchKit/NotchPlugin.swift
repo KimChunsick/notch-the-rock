@@ -44,7 +44,8 @@ public protocol NotchPlugin: AnyObject {
     func deactivate()
     /// The plugin's screen in the expanded notch, or nil for none.
     var expandedTab: PluginTab? { get }
-    /// The plugin's page in the Settings window, or nil for none.
+    /// The plugin's own part of its page in the Settings window, or nil for none. A plugin that
+    /// declares `pluginDescription` keeps here only what the declaration cannot express.
     var settingsView: AnyView? { get }
     /// The plugin's tile in the home grid, or nil for none. Added in SDK 1.1; a plugin built
     /// against 1.0 reads nil.
@@ -52,6 +53,10 @@ public protocol NotchPlugin: AnyObject {
     /// The plugin's step in the first-launch onboarding, or nil for none. Added in SDK 1.3; a plugin
     /// built against an earlier SDK reads nil.
     var setup: PluginSetup? { get }
+    /// What the plugin's page in the Settings window says about it: summary, permissions and
+    /// settings, drawn by the host above `settingsView`. Added in SDK 1.4; a plugin built against an
+    /// earlier SDK reads nil, and its page shows its header and `settingsView` as before.
+    var pluginDescription: PluginDescription? { get }
 }
 
 extension NotchPlugin {
@@ -59,6 +64,7 @@ extension NotchPlugin {
     public var settingsView: AnyView? { nil }
     public var tile: PluginTile? { nil }
     public var setup: PluginSetup? { nil }
+    public var pluginDescription: PluginDescription? { nil }
 }
 
 /// A plugin's screen in the expanded notch, opened from the plugin's tile or, without a tile, from
