@@ -3,7 +3,8 @@ import SwiftUI
 
 /// The home tile; tapping it opens the Agents screen. It draws the session list the screen draws.
 /// Wide: up to three sessions, those waiting for an approval or an answer first, then those at work,
-/// then the idle ones, a line each with the agent's mark, the folder and the state in its colour, and
+/// then the idle ones, a line each with the agent's mark, the folder, the context use when known and
+/// the state in its colour, and
 /// how many more there are. Small: the marks of the agents with open sessions, how many are open and,
 /// highlighted, how many wait for the user. Without sessions both marks are dimmed.
 struct AgentsTile: View {
@@ -76,6 +77,9 @@ struct AgentsTile: View {
                         .font(.system(size: 11, weight: .medium))
                         .truncationMode(.middle)
                     Spacer(minLength: 6)
+                    if let percent = session.contextPercent {
+                        ContextMeter(percent: percent)
+                    }
                     Text(session.state.title)
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(session.state.color)

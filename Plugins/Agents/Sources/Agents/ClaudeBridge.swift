@@ -7,6 +7,8 @@ import SwiftUI
 struct SessionRecord: Hashable {
     var terminal: TerminalLocation?
     var cwd: String?
+    /// The session's transcript (`transcript_path`), where its context use is read.
+    var transcript: String?
     /// The session finished its turn and said so; Claude Code's idle reminder (`idle_prompt`) in the
     /// same pause adds no alert. A prompt, a request or a new session starts the next pause.
     var alertedPause = false
@@ -81,6 +83,11 @@ final class ClaudeBridge {
     private var noticeCount = 0
     /// Requests whose hook waits for a decision, by number.
     private var decisions: [Int: Task<HookDecision?, Never>] = [:]
+    /// The pending read of each session's transcript, and when each session's last read began.
+    private var contextReads: [String: Task<Void, Never>] = [:]
+    private var contextReadAt: [String: ContinuousClock.Instant] = [:]
+    /// The least time between two reads of one session's transcript.
+    static let contextInterval: Duration = .seconds(3)
     private var decisionCount = 0
     private var waitCount = 0
 
@@ -189,7 +196,32 @@ final class ClaudeBridge {
             decision.cancel()
         }
         decisions.removeAll()
+        for read in contextReads.values {
+            read.cancel()
+        }
+        contextReads.removeAll()
         screen.cancelAll()
+    }
+
+    /// Reads the session's context use from the end of its transcript after a hook event: at once when
+    /// the last read began `contextInterval` ago or more, otherwise once it has; events meanwhile share
+    /// that read. Nil when the session's transcript is not known. A use the transcript leaves unknown
+    /// clears what the row shows.
+    @discardableResult
+    func refreshContext(_ sessionID: String) -> Task<Void, Never>? {
+        guard let path = sessions[sessionID]?.transcript else { return nil }
+        if let pending = contextReads[sessionID] { return pending }
+        let wait = contextReadAt[sessionID].map { $0 + Self.contextInterval - .now } ?? .zero
+        let task = Task {
+            if wait > .zero { try? await Task.sleep(for: wait) }
+            self.contextReads[sessionID] = nil
+            guard !Task.isCancelled else { return }
+            self.contextReadAt[sessionID] = .now
+            let percent = await Task.detached(priority: .utility) { ContextUsage.claude(transcript: URL(fileURLWithPath: path)) }.value
+            self.screen.sessions.setContext(Key(agent: .claude, id: sessionID), percent)
+        }
+        contextReads[sessionID] = task
+        return task
     }
 
     /// 허용 or 거부 for one tool call. 거부 then asks for a message to Claude in a text field. The
@@ -323,6 +355,9 @@ final class ClaudeBridge {
         if let terminal = message.context.terminal {
             record.terminal = terminal
         }
+        if let transcript = message.payload["transcript_path"]?.string {
+            record.transcript = transcript
+        }
         if let cwd = message.payload["cwd"]?.string {
             record.cwd = cwd
         }
@@ -379,6 +414,7 @@ final class ClaudeBridge {
             key, folder: projectName(sessionID, message), state: state,
             terminal: sessions[sessionID]?.terminal, pid: message.context.claudePID
         )
+        refreshContext(sessionID)
         return opened
     }
 

@@ -23,6 +23,8 @@ struct ScreenItem: Identifiable {
     /// A denial carries the typed reason back to the agent (Claude Code's does; codex's `decline`
     /// has no room for one).
     var takesDenyReason = false
+    /// What hands the request back to where it came from.
+    var releaseTitle: String
 }
 
 enum ScreenResponse: Equatable {
@@ -32,7 +34,7 @@ enum ScreenResponse: Equatable {
     case deny(reason: String)
     /// Picked options and typed answers by question index.
     case answers(picked: [Int: [String]], typed: [Int: String])
-    /// 터미널에서 답하기.
+    /// Handed back: 터미널에서 답하기, or the Codex app's for a desktop thread.
     case released
     case timedOut
     case cancelled
@@ -57,6 +59,7 @@ final class AgentsScreenModel {
         accent: Color,
         allowsSession: Bool = false,
         takesDenyReason: Bool = false,
+        releaseTitle: String = ClaudeBridge.releaseTitle,
         until deadline: ContinuousClock.Instant
     ) async -> ScreenResponse {
         guard !Task.isCancelled else { return .cancelled }
@@ -74,7 +77,7 @@ final class AgentsScreenModel {
                 waiting[id] = continuation
                 items.append(ScreenItem(
                     id: id, title: title, content: content, expires: expires, accent: accent,
-                    allowsSession: allowsSession, takesDenyReason: takesDenyReason
+                    allowsSession: allowsSession, takesDenyReason: takesDenyReason, releaseTitle: releaseTitle
                 ))
             }
         } onCancel: {
@@ -177,6 +180,9 @@ struct AgentSessionRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 10)
+                if let percent = session.contextPercent {
+                    ContextMeter(percent: percent)
+                }
                 Circle()
                     .fill(session.state.color)
                     .frame(width: 6, height: 6)
@@ -195,7 +201,8 @@ struct AgentSessionRow: View {
         .buttonStyle(.plain)
         .disabled(session.terminal == nil)
         .opacity(session.terminal == nil ? 0.5 : 1)
-        .help(session.terminal == nil ? "이 세션의 터미널을 찾지 못했어요." : "세션이 열린 터미널로 가요.")
+        .help(session.terminal == nil ? "이 세션의 터미널을 찾지 못했어요."
+            : session.terminal == CodexRollouts.desktopApp ? "Codex 앱으로 가요." : "세션이 열린 터미널로 가요.")
     }
 
     @ViewBuilder private var mark: some View {
@@ -217,6 +224,34 @@ struct AgentSessionRow: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+/// How full a session's context window is: the percent and a thin bar, warm above `warmAbove`. As
+/// tall as the row's smaller text, so a row is as tall with it as without.
+struct ContextMeter: View {
+    static let warmAbove = 80
+    static let width: CGFloat = 20
+    let percent: Int
+
+    var body: some View {
+        let warm = percent > Self.warmAbove
+        HStack(spacing: 3) {
+            Text("\(percent)%")
+                .font(.system(size: 10, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(warm ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.15))
+                Capsule()
+                    .fill(warm ? Color.orange : Color.secondary)
+                    .frame(width: Self.width * CGFloat(min(100, max(0, percent))) / 100)
+            }
+            .frame(width: Self.width, height: 3)
+        }
+        .fixedSize()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("context 창 \(percent)% 사용")
     }
 }
 
@@ -294,7 +329,7 @@ private struct ScreenItemView: View {
                     .textFieldStyle(.roundedBorder)
             }
             HStack(spacing: 8) {
-                Button(ClaudeBridge.releaseTitle) { respond(.released) }
+                Button(item.releaseTitle) { respond(.released) }
                     .buttonStyle(.bordered)
                 Spacer(minLength: 0)
                 Button("거부") { respond(.deny(reason: reason)) }
@@ -343,7 +378,7 @@ private struct ScreenItemView: View {
             }
             .frame(minHeight: AgentsScreen.minimumBodyHeight, maxHeight: .infinity)
             HStack(spacing: 8) {
-                Button(ClaudeBridge.releaseTitle) { respond(.released) }
+                Button(item.releaseTitle) { respond(.released) }
                     .buttonStyle(.bordered)
                 Spacer(minLength: 0)
                 Button("보내기") { respond(draft.response) }

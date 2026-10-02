@@ -67,6 +67,8 @@ struct AgentSession: Identifiable, Hashable {
     var terminal: TerminalLocation?
     /// The agent's process, when known; the session is over once it is gone.
     var pid: pid_t?
+    /// How full the session's context window is, in percent; nil when unknown.
+    var contextPercent: Int?
 
     var agent: AgentKind { id.agent }
 
@@ -109,12 +111,14 @@ final class AgentSessionList {
     subscript(key: AgentSession.Key) -> AgentSession? { byKey[key] }
 
     /// Records an event of `key`'s session. A nil `state`, `terminal` or `pid` keeps what the list
-    /// knows; a session seen for the first time without a state is idle.
-    func update(_ key: AgentSession.Key, folder: String, state: AgentSessionState?, terminal: TerminalLocation? = nil, pid: pid_t? = nil) {
-        var session = byKey[key] ?? AgentSession(id: key, folder: folder, state: state ?? .idle, changed: now())
+    /// knows; a session seen for the first time without a state is idle. `changed` is when the event
+    /// happened, when that was not just now (a rollout indexed at launch).
+    func update(_ key: AgentSession.Key, folder: String, state: AgentSessionState?, terminal: TerminalLocation? = nil, pid: pid_t? = nil, changed: Date? = nil) {
+        let changed = changed ?? now()
+        var session = byKey[key] ?? AgentSession(id: key, folder: folder, state: state ?? .idle, changed: changed)
         session.folder = folder
         session.state = state ?? session.state
-        session.changed = now()
+        session.changed = changed
         session.terminal = terminal ?? session.terminal
         session.pid = pid ?? session.pid
         byKey[key] = session
@@ -126,6 +130,13 @@ final class AgentSessionList {
         guard let state = byKey[key]?.state, state == .awaitingApproval || state == .awaitingAnswer else { return }
         byKey[key]?.state = waiting ?? .working
         byKey[key]?.changed = now()
+    }
+
+    /// Sets how full the context window of `key`'s session is. Not an event: the row keeps its place
+    /// and its time, and a session not on the list stays off it.
+    func setContext(_ key: AgentSession.Key, _ percent: Int?) {
+        guard byKey[key] != nil else { return }
+        byKey[key]?.contextPercent = percent
     }
 
     func remove(_ key: AgentSession.Key) {

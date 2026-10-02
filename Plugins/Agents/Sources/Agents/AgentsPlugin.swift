@@ -26,6 +26,8 @@ public final class AgentsPlugin: NotchPlugin {
     let codexBridge: CodexBridge
     let codexLink: CodexLink
     let codex: CodexModel
+    /// Codex sessions the bridge does not follow, the desktop app's among them, read from their rollouts.
+    let rollouts: CodexRollouts
     private let context: NotchContext
     /// Whether a `claude` executable was found at launch; without one the onboarding card says so.
     private let claudeInstalled: Bool
@@ -89,12 +91,21 @@ public final class AgentsPlugin: NotchPlugin {
             bridge: codexBridge,
             log: { [log = context.log] in log.error($0) }
         )
-        let codex = CodexModel(defaults: defaults, executable: codexExecutable, start: { link.start() }, stop: { link.stop() })
+        let rollouts = CodexRollouts(
+            root: codexEndpoint.home.appendingPathComponent("sessions"), context: context, bridge: codexBridge,
+            activator: activator, terminal: codexTerminal, logos: logos
+        )
+        // The rollouts follow the same switch as the bridge.
+        let codex = CodexModel(
+            defaults: defaults, executable: codexExecutable,
+            start: { link.start(); rollouts.start() }, stop: { link.stop(); rollouts.stop() }
+        )
         // The plugin owns the model and the link; the model's closures own the link, so the link
         // must not own the model back.
         link.onState = { [weak codex] in codex?.state = $0 }
         self.codexBridge = codexBridge
         codexLink = link
+        self.rollouts = rollouts
         self.codex = codex
     }
 
@@ -124,6 +135,7 @@ public final class AgentsPlugin: NotchPlugin {
         }
         if codex.enabled {
             codexLink.start()
+            rollouts.start()
         }
     }
 
@@ -134,6 +146,7 @@ public final class AgentsPlugin: NotchPlugin {
         pruning = nil
         bridge.cancelAll()
         codexLink.stop()
+        rollouts.stop()
         codexBridge.cancelAll()
         // Events stop while the plugin is off; each session returns with its next one.
         bridge.screen.sessions.removeAll()

@@ -7,8 +7,9 @@ import SwiftUI
 /// loaded thread and to each new one (`thread/started`), and turns the server's requests into notch
 /// requests. Command and file-change approvals are answered `accept`, `acceptForSession` or
 /// `decline`; questions are answered by question id. A request answered elsewhere
-/// (`serverRequest/resolved`), one the user hands back to the terminal and one that times out leave
-/// the notch unanswered, so the `codex` TUI keeps its own prompt. A finished or failed turn and a
+/// (`serverRequest/resolved`), one the user hands back and one that times out leave the notch
+/// unanswered, so the `codex` TUI keeps its own prompt; a desktop thread's is handed back to the Codex
+/// app, which comes forward. A finished or failed turn and a
 /// closed thread glow with the Codex mark and the project name, and from there the user jumps to the
 /// TUI's terminal.
 @MainActor
@@ -23,6 +24,12 @@ final class CodexBridge {
     /// How many times a refused `thread/loaded/list` or `thread/resume` is sent before the bridge
     /// reports the sessions it could not follow.
     static let discoveryAttempts = 4
+    /// The `source` of a thread the Codex desktop app started (its rollouts say the same); the TUI's say `cli`.
+    static let desktopSource = "vscode"
+    /// What hands a desktop thread's request back to the Codex app; the TUI's say `ClaudeBridge.releaseTitle`.
+    static let desktopReleaseTitle = "Codex 앱에서 보기"
+    /// How many finished turns and closed threads the bridge remembers.
+    static let remembered = 1024
     /// A neutral slate, so codex's requests never look like Claude Code's and borrow no brand colour.
     static let accent = Color(red: 0.44, green: 0.53, blue: 0.62)
     static let clientInfo: JSONValue = .object([
@@ -46,12 +53,23 @@ final class CodexBridge {
     /// Thread folders by thread id, kept across connections.
     private(set) var threads: [String: String] = [:]
     /// The terminal found when each thread joined, kept across connections like `threads`. Its own
-    /// TUI's terminal: a lookup by folder later may find another TUI in the same folder.
+    /// TUI's terminal: a lookup by folder later may find another TUI in the same folder. A desktop
+    /// thread's is the Codex app.
     private var terminals: [String: TerminalLocation] = [:]
+    /// Threads the Codex desktop app started, kept across connections like `threads`.
+    private var desktopThreads: Set<String> = []
     /// The threads that joined on this connection (started, or listed and resumed) and have not
     /// closed. The Agents screen's list may drop a silent thread's row; this does not, so the
     /// thread's end still alerts, once.
     private var joined: Set<String> = []
+    /// The threads this connection put on the Agents screen. `close()` takes only their rows away: the
+    /// rollout watcher's stay.
+    private var listed: Set<String> = []
+    /// Turns whose end alerted already, here or in the rollout watcher, as "thread/turn".
+    private var alertedTurns = RecentIDs(capacity: remembered)
+    /// Threads that closed and did not join again, kept across connections: the rollout watcher never
+    /// brings them back from what it reads later.
+    private var closedThreads = RecentIDs(capacity: remembered)
 
     // One connection's state; `close()` clears it.
     private var send: (@MainActor (JSONValue) -> Void)?
@@ -157,7 +175,27 @@ final class CodexBridge {
         }
         pending.removeAll()
         // Without a connection nothing tells how the sessions go on; the next one lists them again.
-        screen.sessions.removeAll(.codex)
+        for thread in listed {
+            screen.sessions.remove(AgentSession.Key(agent: .codex, id: thread))
+        }
+        listed.removeAll()
+    }
+
+    /// Whether this connection follows `thread`; the rollout watcher leaves such a thread to the bridge.
+    func owns(_ thread: String) -> Bool {
+        joined.contains(thread)
+    }
+
+    /// True the first time the end of `turn` of `thread` asks to alert, from the bridge or the rollout
+    /// watcher, so a turn both see alerts once. A turn without an id always alerts.
+    func claimTurnAlert(_ thread: String, turn: String?) -> Bool {
+        guard let turn else { return true }
+        return alertedTurns.insert(thread + "/" + turn)
+    }
+
+    /// Whether `thread` closed here and has not joined since.
+    func isClosed(_ thread: String) -> Bool {
+        closedThreads.contains(thread)
     }
 
     /// Closes the connection's state, then tells the link why it should drop the connection.
@@ -247,6 +285,7 @@ final class CodexBridge {
             if let cwd = result["thread"]?["cwd"]?.string ?? result["cwd"]?.string {
                 threads[thread] = cwd
             }
+            note(thread, source: result["thread"]?["source"])
             // A thread in the middle of a turn is working; any other loaded thread waits for the user.
             join(thread, result["thread"]?["status"]?["type"]?.string == "active" ? .working : .idle)
         }
@@ -292,6 +331,7 @@ final class CodexBridge {
         case "thread/started":
             guard let thread = params["thread"], let id = thread["id"]?.string else { return nil }
             if let cwd = thread["cwd"]?.string { threads[id] = cwd }
+            note(id, source: thread["source"])
             join(id, .idle)
             resume(id)
         case "item/started" where params["item"]?["type"]?.string == "fileChange":
@@ -312,12 +352,20 @@ final class CodexBridge {
             if let thread = params["threadId"]?.string {
                 endWait(params["requestId"], of: thread)
             }
+        case "thread/tokenUsage/updated":
+            if let thread = params["threadId"]?.string {
+                let usage = params["tokenUsage"]
+                let percent = ContextUsage.codex(lastTotal: usage?["last"]?["totalTokens"], window: usage?["modelContextWindow"])
+                screen.sessions.setContext(AgentSession.Key(agent: .codex, id: thread), percent)
+            }
         case "turn/started":
             if let thread = params["threadId"]?.string { track(thread, .working) }
         case "thread/closed":
             guard let thread = params["threadId"]?.string else { return nil }
+            closedThreads.insert(thread)
             waits.removeAll { $0.thread == thread }
             screen.sessions.remove(AgentSession.Key(agent: .codex, id: thread))
+            listed.remove(thread)
             // One alert per thread that joined, whether or not the list still shows it. The TUI may
             // be gone already; the alert takes the user to the terminal the thread joined in.
             guard joined.remove(thread) != nil else { return nil }
@@ -326,6 +374,7 @@ final class CodexBridge {
             guard let thread = params["threadId"]?.string else { return nil }
             waits.removeAll { $0.thread == thread }
             track(thread, .idle)
+            guard claimTurnAlert(thread, turn: params["turn"]?["id"]?.string) else { return nil }
             switch params["turn"]?["status"]?.string {
             case "completed": return notify(thread, message: "Codex가 작업을 마쳤어요.", saved: terminals[thread])
             case "failed": return notify(thread, message: "Codex 작업이 오류로 멈췄어요.", saved: terminals[thread])
@@ -412,7 +461,7 @@ final class CodexBridge {
     }
 
     private func decideCommand(_ params: JSONValue) async -> String? {
-        let detail = Self.commandDetail(params, threadFolder: threadFolder(params))
+        let detail = Self.commandDetail(params, threadFolder: threadFolder(params), desktop: desktopThread(params) != nil)
         let title = "\(projectName(params)) · \(params["kind"]?.string == "writeStdin" ? "터미널 입력" : "명령 실행")"
         let available = params["availableDecisions"]?.array?.compactMap(\.string)
         let allowsSession = available?.contains("acceptForSession") ?? true
@@ -444,11 +493,12 @@ final class CodexBridge {
             )
             buttons.append(AttentionButton(id: Self.detailsButtonID, title: "자세히 보기", role: .primary))
         } else {
+            let there = Self.checkThere(desktop: desktopThread(params) != nil)
             detail = OperationDetail(
                 tool: "파일 수정", sections: [], notchText: nil,
                 headline: changes == nil
-                    ? "바뀌는 내용을 알 수 없어서 노치에서는 허용할 수 없어요. 터미널에서 확인해 주세요."
-                    : "바뀌는 내용 중 읽지 못한 부분이 있어서 노치에서는 허용할 수 없어요. 터미널에서 확인해 주세요."
+                    ? "바뀌는 내용을 알 수 없어서 노치에서는 허용할 수 없어요. \(there)"
+                    : "바뀌는 내용 중 읽지 못한 부분이 있어서 노치에서는 허용할 수 없어요. \(there)"
             )
         }
         // codex lets every file change be allowed for the session.
@@ -459,15 +509,14 @@ final class CodexBridge {
     private func decide(title: String, detail: OperationDetail, buttons: [AttentionButton], allowsSession: Bool, params: JSONValue) async -> String? {
         let wait = wait()
         let deadline = ContinuousClock.now + wait
-        let response = await context.requestAttention(AttentionRequest(
+        let response = await ask(AttentionRequest(
             title: title,
             message: detail.notchText ?? detail.headline,
             accent: Self.accent,
             sourceIcon: icon(params),
             buttons: buttons,
-            releaseTitle: ClaudeBridge.releaseTitle,
             timeout: wait
-        ))
+        ), params)
         guard case .answered(let answer) = response else { return nil }
         let offered = Set(buttons.map(\.id))
         switch answer.buttonID {
@@ -478,7 +527,7 @@ final class CodexBridge {
         case Self.allowForSessionButtonID? where offered.contains(Self.allowForSessionButtonID):
             return "acceptForSession"
         case Self.detailsButtonID? where offered.contains(Self.detailsButtonID):
-            switch await showOnScreen(title, .permission(detail), allowsSession: allowsSession, until: deadline) {
+            switch await showOnScreen(title, .permission(detail), params, allowsSession: allowsSession, until: deadline) {
             case .allow: return "accept"
             case .allowForSession where allowsSession: return "acceptForSession"
             case .deny: return "decline"
@@ -497,7 +546,7 @@ final class CodexBridge {
         let title = "\(projectName(params)) · Codex의 질문"
         let wait = wait()
         let deadline = ContinuousClock.now + wait
-        let response = await context.requestAttention(AttentionRequest(
+        let response = await ask(AttentionRequest(
             title: title,
             message: "",
             accent: Self.accent,
@@ -506,9 +555,8 @@ final class CodexBridge {
                 + [AttentionButton(id: Self.sendAnswersButtonID, title: "보내기", role: .primary)],
             choices: questions.map { AttentionChoices(id: $0.id, prompt: $0.prompt, options: $0.options) },
             textField: single && questions[0].takesText ? AttentionTextField(placeholder: "직접 입력해서 답해요") : nil,
-            releaseTitle: ClaudeBridge.releaseTitle,
             timeout: wait
-        ))
+        ), params)
         guard case .answered(let reply) = response else { return nil }
         var picked: [Int: [String]] = [:]
         for (index, question) in questions.enumerated() {
@@ -519,15 +567,47 @@ final class CodexBridge {
             return answers
         }
         guard !single else { return nil }
-        let result = await showOnScreen(title, .questions(questions.map(\.question), picked: picked), until: deadline)
+        let result = await showOnScreen(title, .questions(questions.map(\.question), picked: picked), params, until: deadline)
         guard case .answers(let screenPicked, let screenTyped) = result else { return nil }
         return CodexQuestion.answers(questions, picked: screenPicked, typed: screenTyped)
     }
 
-    private func showOnScreen(_ title: String, _ content: ScreenItem.Content, allowsSession: Bool = false, until deadline: ContinuousClock.Instant) async -> ScreenResponse {
+    /// Asks in the notch, offering to hand the request back to where the thread runs.
+    private func ask(_ request: AttentionRequest, _ params: JSONValue) async -> AttentionResponse {
+        var request = request
+        request.releaseTitle = releaseTitle(params)
+        let response = await context.requestAttention(request)
+        if response == .released { handBack(params) }
+        return response
+    }
+
+    private func showOnScreen(_ title: String, _ content: ScreenItem.Content, _ params: JSONValue, allowsSession: Bool = false, until deadline: ContinuousClock.Instant) async -> ScreenResponse {
         guard deadline > .now else { return .timedOut }
         context.expand()
-        return await screen.show(title: title, content: content, accent: Self.accent, allowsSession: allowsSession, until: deadline)
+        let response = await screen.show(
+            title: title, content: content, accent: Self.accent, allowsSession: allowsSession,
+            releaseTitle: releaseTitle(params), until: deadline
+        )
+        if response == .released { handBack(params) }
+        return response
+    }
+
+    /// Where a request is handed back to: the Codex app for a desktop thread, otherwise the terminal.
+    private func releaseTitle(_ params: JSONValue) -> String {
+        desktopThread(params) == nil ? ClaudeBridge.releaseTitle : Self.desktopReleaseTitle
+    }
+
+    /// Where to look at a request the notch cannot allow: the Codex app for a desktop thread, otherwise
+    /// the terminal, as `releaseTitle` hands it back.
+    static func checkThere(desktop: Bool) -> String {
+        desktop ? "Codex 앱에서 확인해 주세요." : "터미널에서 확인해 주세요."
+    }
+
+    /// A request handed back stays unanswered; a desktop thread's brings the Codex app forward and folds
+    /// the notch, the jump its alerts make. A TUI's terminal is not brought forward.
+    private func handBack(_ params: JSONValue) {
+        guard let thread = desktopThread(params) else { return }
+        jump(to: thread, saved: CodexRollouts.desktopApp)
     }
 
     // MARK: Notices and the terminal
@@ -537,16 +617,29 @@ final class CodexBridge {
     /// may work in the same folder by now. Only here: the lookup walks the running processes.
     private func join(_ thread: String, _ state: AgentSessionState) {
         joined.insert(thread)
-        if terminals[thread] == nil, let found = terminal(threads[thread]) {
+        closedThreads.remove(thread)
+        if desktopThreads.contains(thread) {
+            terminals[thread] = CodexRollouts.desktopApp
+        } else if terminals[thread] == nil, let found = terminal(threads[thread]) {
             terminals[thread] = found
         }
         track(thread, state)
+    }
+
+    /// Remembers a thread the desktop app started, from the thread's `source`.
+    private func note(_ thread: String, source: JSONValue?) {
+        if source?.string == Self.desktopSource {
+            desktopThreads.insert(thread)
+        } else if source != nil {
+            desktopThreads.remove(thread)
+        }
     }
 
     /// Moves the thread's row on the Agents screen; a row that left the list comes back with the
     /// terminal the thread joined in.
     private func track(_ thread: String, _ state: AgentSessionState) {
         let folder = threads[thread].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0).lastPathComponent } ?? "Codex"
+        listed.insert(thread)
         screen.sessions.update(AgentSession.Key(agent: .codex, id: thread), folder: folder, state: state, terminal: terminals[thread])
     }
 
@@ -561,7 +654,7 @@ final class CodexBridge {
             message: message,
             accent: Self.accent,
             sourceIcon: AgentKind.codex.alertIcon(logos),
-            buttons: [AttentionButton(id: Self.jumpButtonID, title: found == nil ? "노치 열기" : "터미널로 이동", role: .primary)],
+            buttons: [AttentionButton(id: Self.jumpButtonID, title: Self.jumpTitle(found), role: .primary)],
             timeout: ClaudeBridge.noticeTimeout
         )
         let task = Task { [context] in
@@ -587,8 +680,22 @@ final class CodexBridge {
         context.expand()
     }
 
+    /// Where an alert's button takes the user: the Codex app, a terminal or, without either, the notch.
+    static func jumpTitle(_ target: TerminalLocation?) -> String {
+        guard let target else { return "노치 열기" }
+        return target == CodexRollouts.desktopApp ? "Codex 앱으로 이동" : "터미널로 이동"
+    }
+
+    /// The request's thread when the Codex desktop app started it.
+    private func desktopThread(_ params: JSONValue) -> String? {
+        params["threadId"]?.string.flatMap { desktopThreads.contains($0) ? $0 : nil }
+    }
+
     private func icon(_ params: JSONValue) -> Image? {
-        terminal(folder(params)).flatMap(ClaudeBridge.appIcon)
+        if desktopThread(params) != nil {
+            return ClaudeBridge.appIcon(CodexRollouts.desktopApp)
+        }
+        return terminal(folder(params)).flatMap(ClaudeBridge.appIcon)
     }
 
     private func threadFolder(_ params: JSONValue) -> String? {
@@ -611,8 +718,9 @@ final class CodexBridge {
 
     /// The command with everything else that changes what it may do. The notch offers 허용 only for a
     /// short command that asks for nothing more; a command run outside the thread's folder shows its
-    /// folder there too, and goes to the full detail when both do not fit.
-    static func commandDetail(_ params: JSONValue, threadFolder: String?) -> OperationDetail {
+    /// folder there too, and goes to the full detail when both do not fit. A `desktop` thread's unknown
+    /// command is checked in the Codex app.
+    static func commandDetail(_ params: JSONValue, threadFolder: String?, desktop: Bool) -> OperationDetail {
         var sections: [OperationDetail.Section] = []
         let command = params["command"]?.string
         let cwd = params["cwd"]?.string
@@ -629,7 +737,7 @@ final class CodexBridge {
             extra = true
         }
         guard let command else {
-            return OperationDetail(tool: "명령", sections: [], notchText: nil, headline: "실행할 명령을 알 수 없어서 노치에서는 허용할 수 없어요. 터미널에서 확인해 주세요.")
+            return OperationDetail(tool: "명령", sections: [], notchText: nil, headline: "실행할 명령을 알 수 없어서 노치에서는 허용할 수 없어요. \(checkThere(desktop: desktop))")
         }
         let elsewhere = cwd.flatMap { $0 == threadFolder ? nil : $0 }
         let text = command + (elsewhere.map { "\n폴더: \($0)" } ?? "")
@@ -724,5 +832,36 @@ struct CodexQuestion: Equatable {
             }
         }
         return .object(answers)
+    }
+}
+
+/// Ids in the order they came, at most `capacity` of them: past it the oldest is forgotten, one at a time.
+struct RecentIDs {
+    let capacity: Int
+    private var order: [String] = []
+    private var members: Set<String> = []
+
+    init(capacity: Int) {
+        self.capacity = capacity
+    }
+
+    func contains(_ id: String) -> Bool {
+        members.contains(id)
+    }
+
+    /// False when `id` is remembered already; otherwise remembers it, forgetting the oldest past `capacity`.
+    @discardableResult
+    mutating func insert(_ id: String) -> Bool {
+        guard members.insert(id).inserted else { return false }
+        order.append(id)
+        if order.count > capacity {
+            members.remove(order.removeFirst())
+        }
+        return true
+    }
+
+    mutating func remove(_ id: String) {
+        guard members.remove(id) != nil else { return }
+        order.removeAll { $0 == id }
     }
 }
