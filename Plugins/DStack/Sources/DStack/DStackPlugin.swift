@@ -5,7 +5,8 @@ import SwiftUI
 /// Shows how far the D-STACK runs of the user's projects have come: goal title and state, plans,
 /// tasks, requirements and milestones done, the plans in progress and the latest activity. Projects
 /// come from Claude Code's project folders and from folders added in settings. It only reads the
-/// stores' files and never runs the `dstack` CLI.
+/// stores' files and never runs the `dstack` CLI: no file in a D-STACK store or a project folder is
+/// written. Its own settings (the folders added and removed) live in the app's plugin storage.
 @MainActor
 public final class DStackPlugin: NotchPlugin {
     public static let manifest = PluginManifest(

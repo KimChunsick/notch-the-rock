@@ -45,9 +45,9 @@ enum StoreReading: Equatable, Sendable {
     case open(RunProgress)
     /// No pointer, an empty pointer (the run was closed) or a run that is not open.
     case noOpenRun
-    /// A store of another version (the version found, nil when unreadable) or a file this reader
-    /// does not understand.
-    case unsupported(String?)
+    /// A store whose files this reader does not understand, with a short reason such as
+    /// "plan.json 구조가 달라요".
+    case unsupported(String)
 }
 
 /// Reads one project's D-STACK store (`<project>/.dstack`). It only opens files for reading and
@@ -93,32 +93,47 @@ struct DStackStore: Sendable {
         }.joined(separator: "\n")
     }
 
+    /// The open run's progress, `.noOpenRun` for a store without one (no or an empty pointer, a run
+    /// that is not open) and `.unsupported` for files not in the shape dstack writes. A file a run
+    /// does not have yet (plan.json, cases.tsv, review/index.tsv) counts as empty.
     func read() -> StoreReading {
         let version = Self.text(store.appendingPathComponent("version"))?.trimmingCharacters(in: .whitespacesAndNewlines)
         // A folder without a store has no open run; settings tell it apart.
         if version == nil, pointer == nil { return .noOpenRun }
-        guard version == Self.supportedVersion else { return .unsupported(version) }
+        guard let version else { return .unsupported("version 파일이 없어요") }
+        guard version == Self.supportedVersion else { return .unsupported("지원하지 않는 버전이에요 (\(version))") }
+        guard let pointer else { return .noOpenRun }
+        guard Self.text(pointer) != nil else { return .unsupported("CURRENT 값이 이상해요") }
         guard let runID else { return .noOpenRun }
-        guard !runID.contains("/"), runID != ".", runID != ".." else { return .unsupported(version) }
+        guard !runID.contains("/"), runID != ".", runID != ".." else { return .unsupported("CURRENT 값이 이상해요") }
         let run = store.appendingPathComponent("runs").appendingPathComponent(runID)
-        let meta = Self.table(Self.text(run.appendingPathComponent("meta.tsv")) ?? "")
-            .reduce(into: [String: String]()) { $0[$1[0]] = $1.count > 1 ? $1[1] : "" }
-        guard meta["status"] == "open" else { return .noOpenRun }
+        guard let metaText = Self.text(run.appendingPathComponent("meta.tsv")) else { return .unsupported("meta.tsv가 없어요") }
+        let meta = Self.table(metaText).reduce(into: [String: String]()) { $0[$1[0]] = $1.count > 1 ? $1[1] : "" }
+        guard let status = meta["status"], !status.isEmpty else { return .unsupported("meta.tsv에 상태가 없어요") }
+        guard status == "open" else { return .noOpenRun }
 
         let request = Self.text(run.appendingPathComponent("request.md")) ?? ""
         let plan: PlanFile
-        if let data = try? Data(contentsOf: run.appendingPathComponent("plan.json")) {
-            guard let decoded = try? JSONDecoder().decode(PlanFile.self, from: data) else { return .unsupported(version) }
+        let planURL = run.appendingPathComponent("plan.json")
+        if FileManager.default.fileExists(atPath: planURL.path) {
+            guard let data = try? Data(contentsOf: planURL),
+                  let decoded = try? JSONDecoder().decode(PlanFile.self, from: data) else { return .unsupported("plan.json 구조가 달라요") }
             plan = decoded
         } else {
-            plan = PlanFile(milestones: nil, plans: nil)
+            plan = PlanFile(milestones: [], plans: [])
         }
-        let plans = plan.plans ?? []
+        // cases.tsv: R, case, kind, status, artifact, sha256, produced_by, recorded_at, note.
+        guard let cases = Self.rows(run.appendingPathComponent("cases.tsv"), header: ["R", "case"], columns: 8, key: /R\d+/) else {
+            return .unsupported("cases.tsv 줄 형식이 달라요")
+        }
+        // review/index.tsv: round, kind, target, file, sealed_at and counts, without a header.
+        guard let rounds = Self.rows(run.appendingPathComponent("review/index.tsv"), header: nil, columns: 5, key: /\d+/) else {
+            return .unsupported("review/index.tsv 줄 형식이 달라요")
+        }
+        let plans = plan.plans
         let tasks = plans.flatMap { plan in (plan.tasks ?? []).map { (plan, $0) } }
         let live = Self.liveRequirements(request)
-        let cases = Self.table(Self.text(run.appendingPathComponent("cases.tsv")) ?? "").filter { $0.first != "R" || $0.count < 2 || $0[1] != "case" }
-        let met = Set(cases.filter { $0.count > 3 && $0[3] == "met" }.map { $0[0] })
-        let rounds = Self.table(Self.text(run.appendingPathComponent("review/index.tsv")) ?? "")
+        let met = Set(cases.filter { $0[3] == "met" }.map { $0[0] })
 
         // Ties keep the earlier source: a commit says more than the evidence recorded with it.
         var candidates: [Activity] = []
@@ -127,11 +142,11 @@ struct DStackStore: Sendable {
             return Activity(date: date, text: "\(plan.id) 작업 \(task.id) 커밋")
         }
         candidates += rounds.compactMap { row in
-            guard row.count > 4, let date = Self.date(row[4]) else { return nil }
+            guard let date = Self.date(row[4]) else { return nil }
             return Activity(date: date, text: "\(row[2]) 리뷰 \(Int(row[0]).map(String.init) ?? row[0]) 봉인")
         }
         candidates += cases.compactMap { row in
-            guard row.count > 7, let date = Self.date(row[7]) else { return nil }
+            guard let date = Self.date(row[7]) else { return nil }
             return Activity(date: date, text: "\(row[0]) 증거 추가")
         }
         let latest = candidates.reduce(nil as Activity?) { newest, next in
@@ -139,7 +154,7 @@ struct DStackStore: Sendable {
             return next.date > newest.date ? next : newest
         }
 
-        let milestones = (plan.milestones ?? []).enumerated()
+        let milestones = plan.milestones.enumerated()
             .sorted { ($0.element.order ?? $0.offset, $0.offset) < ($1.element.order ?? $1.offset, $1.offset) }
             .map { _, milestone in
                 let own = plans.filter { $0.milestone == milestone.id }
@@ -193,8 +208,9 @@ struct DStackStore: Sendable {
             let commit: String?
             let done_at: String?
         }
-        let milestones: [Milestone]?
-        let plans: [Plan]?
+        // Both are required: a plan.json without them is not one dstack wrote.
+        let milestones: [Milestone]
+        let plans: [Plan]
     }
 
     private static func text(_ url: URL) -> String? {
@@ -203,6 +219,17 @@ struct DStackStore: Sendable {
 
     private static func table(_ text: String) -> [[String]] {
         text.split(separator: "\n").map { $0.split(separator: "\t", omittingEmptySubsequences: false).map(String.init) }
+    }
+
+    /// The rows of a tab-separated file, none when it is missing. Nil when it is unreadable or a
+    /// row has fewer than `columns` fields or a first field other than `key`; a first row starting
+    /// with `header` is skipped.
+    private static func rows(_ url: URL, header: [String]?, columns: Int, key: Regex<Substring>) -> [[String]]? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        guard let text = text(url) else { return nil }
+        var rows = table(text)
+        if let header, rows.first.map({ Array($0.prefix(header.count)) }) == header { rows.removeFirst() }
+        return rows.allSatisfy { $0.count >= columns && $0[0].wholeMatch(of: key) != nil } ? rows : nil
     }
 
     private static func date(_ text: String?) -> Date? {

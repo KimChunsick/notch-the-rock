@@ -78,9 +78,14 @@ struct ProjectFolders {
 
     /// The discovered folders, then the added ones, without the removed ones or duplicates.
     func resolve(discovered: [URL]) -> [URL] {
+        Self.resolve(discovered: discovered, added: added, removed: removed)
+    }
+
+    /// `resolve(discovered:)` for lists read earlier, so it can run off the main actor.
+    static func resolve(discovered: [URL], added: [String], removed: [String]) -> [URL] {
         let hidden = Set(removed)
         var seen = Set<String>()
-        return (discovered.map(Self.key) + added).compactMap { path in
+        return (discovered.map(key) + added).compactMap { path in
             guard !hidden.contains(path), seen.insert(path).inserted else { return nil }
             return URL(fileURLWithPath: path, isDirectory: true)
         }

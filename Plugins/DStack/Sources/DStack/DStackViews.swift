@@ -50,10 +50,13 @@ struct ProjectCard: View {
             case .open(let run):
                 header(run.startedAt.map { "진행 중 · \(DStackStore.relative($0, now: now)) 시작" } ?? "진행 중")
                 details(run)
-            case .unsupported(let version):
+            case .unsupported(let reason):
                 header(nil)
-                Text(version.map { "지원하지 않는 형식이에요 (버전 \($0))" } ?? "지원하지 않는 형식이에요")
-                    .font(.system(size: 12))
+                Text("형식을 읽지 못했어요")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(reason)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             case .noOpenRun:
                 header(nil)
                 Text("열린 실행이 없어요")
@@ -131,49 +134,107 @@ struct ProjectCard: View {
     }
 }
 
-/// The home tile for the most recently active open run. Wide: goal title, overall bar and the plans
-/// in progress. Small: a ring with the percentage and the project name.
+/// The home tile: the most recently active open run, else a store this plugin cannot read, else a
+/// note that there is none. Wide: goal title, the plans bar with done/total, a strip with a segment
+/// per milestone, task and requirement counts with the plans in progress, and the latest activity.
+/// Small: a ring with the percentage, the project name, the first plan in progress and the tasks.
 struct DStackTile: View {
+    static let shownPlans = 3
     let model: DStackModel
     let size: TileSize
 
     var body: some View {
-        let project = model.screenProjects.first { if case .open = $0.reading { true } else { false } }
-        let run: RunProgress? = if case .open(let run) = project?.reading { run } else { nil }
+        let project = model.tileProject
         Group {
-            switch size {
-            case .small:
-                VStack(spacing: 5) {
-                    ZStack {
-                        ProgressRing(fraction: run?.fraction ?? 0)
-                        Text(run.map { "\(Int(($0.fraction * 100).rounded()))%" } ?? "–")
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                    }
-                    .frame(width: 46, height: 46)
-                    Text(project?.name ?? "D-STACK")
-                        .font(.system(size: 10))
+            switch (project?.reading, size) {
+            case (.open(let run), .small):
+                VStack(spacing: 3) {
+                    ring(run.fraction, "\(Int((run.fraction * 100).rounded()))%")
+                    Text(project?.name ?? "")
+                        .font(.system(size: 9, weight: .medium))
+                        .lineLimit(1)
+                    Text(([run.inProgress.first?.id] + ["작업 \(run.tasksCommitted)/\(run.tasksTotal)"]).compactMap { $0 }.joined(separator: " · "))
+                        .font(.system(size: 9))
+                        .monospacedDigit()
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                        .frame(width: 70)
                 }
-            default:
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(run?.title ?? "열린 D-STACK 실행이 없어요")
-                        .font(.system(size: 12, weight: .semibold))
+                .frame(width: 70)
+            case (.open(let run), _):
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(run.title)
+                        .font(.system(size: 11, weight: .semibold))
                         .lineLimit(1)
                     HStack(spacing: 6) {
-                        ProgressBar(fraction: run?.fraction ?? 0)
+                        ProgressBar(fraction: run.fraction)
                             .frame(height: 5)
-                        Text(run.map { "\($0.plansDone)/\($0.plansTotal)" } ?? "–")
-                            .font(.system(size: 10, weight: .medium))
-                            .monospacedDigit()
+                        Text("계획 \(run.plansDone)/\(run.plansTotal)")
+                            .font(.system(size: 9, weight: .medium))
+                            .fixedSize()
                     }
-                    Text(plansLine(run) ?? project?.name ?? "설정에서 폴더를 더할 수 있어요")
-                        .font(.system(size: 10))
+                    MilestoneStrip(milestones: run.milestones)
+                        .frame(height: 3)
+                    HStack(spacing: 6) {
+                        Text("작업 \(run.tasksCommitted)/\(run.tasksTotal) · 요구사항 \(run.requirementsMet)/\(run.requirementsLive)")
+                            .foregroundStyle(.secondary)
+                            .fixedSize()
+                        Spacer(minLength: 0)
+                        Text(plans(run))
+                            .lineLimit(1)
+                    }
+                    .font(.system(size: 9))
+                    Text(run.latest.map { "\(DStackStore.relative($0.date, now: model.checkedAt)) · \($0.text)" } ?? " ")
+                        .font(.system(size: 9))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
+                .monospacedDigit()
+                .frame(width: 170, alignment: .leading)
+            case (.unsupported(let reason), .small):
+                VStack(spacing: 3) {
+                    Text("형식을 읽지 못했어요")
+                        .font(.system(size: 9, weight: .semibold))
+                    Text(reason)
+                        .font(.system(size: 8))
+                        .foregroundStyle(.secondary)
+                    Text(project?.name ?? "")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .frame(width: 70)
+            case (.unsupported(let reason), _):
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("형식을 읽지 못했어요")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text(reason)
+                        .font(.system(size: 10))
+                        .lineLimit(2)
+                    Text(project?.name ?? "")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                }
+                .lineLimit(1)
+                .frame(width: 170, alignment: .leading)
+            case (_, .small):
+                VStack(spacing: 5) {
+                    ring(0, "–")
+                    Text("D-STACK")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(width: 70)
+            default:
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("열린 D-STACK 실행이 없어요")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("설정에서 폴더를 더할 수 있어요")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                }
+                .lineLimit(1)
                 .frame(width: 170, alignment: .leading)
             }
         }
@@ -182,10 +243,32 @@ struct DStackTile: View {
         .onDisappear { model.disappeared() }
     }
 
-    private func plansLine(_ run: RunProgress?) -> String? {
-        guard let run, !run.inProgress.isEmpty else { return nil }
-        let more = run.inProgress.count - 3
-        return "진행 중 " + run.inProgress.prefix(3).map(\.id).joined(separator: " · ") + (more > 0 ? " +\(more)" : "")
+    private func ring(_ fraction: Double, _ label: String) -> some View {
+        ZStack {
+            ProgressRing(fraction: fraction)
+            Text(label)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+        }
+        .frame(width: 38, height: 38)
+    }
+
+    private func plans(_ run: RunProgress) -> String {
+        let more = run.inProgress.count - Self.shownPlans
+        return run.inProgress.prefix(Self.shownPlans).map(\.id).joined(separator: " ") + (more > 0 ? " +\(more)" : "")
+    }
+}
+
+/// One segment per milestone, each filled by its share of done plans.
+struct MilestoneStrip: View {
+    let milestones: [MilestoneProgress]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(milestones, id: \.id) { milestone in
+                ProgressBar(fraction: milestone.total == 0 ? 0 : Double(milestone.done) / Double(milestone.total))
+            }
+        }
     }
 }
 
@@ -211,13 +294,13 @@ struct ProgressRing: View {
     var body: some View {
         ZStack {
             Circle()
-                .stroke(.white.opacity(0.15), lineWidth: 5)
+                .stroke(.white.opacity(0.15), lineWidth: 4)
             Circle()
                 .trim(from: 0, to: min(max(fraction, 0), 1))
-                .stroke(.green, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                .stroke(.green, style: StrokeStyle(lineWidth: 4, lineCap: .round))
                 .rotationEffect(.degrees(-90))
         }
-        .padding(2.5)
+        .padding(2)
     }
 }
 
@@ -233,10 +316,10 @@ struct DStackSettingsView: View {
             Text("D-STACK 프로젝트")
             Text("Claude Code에서 연 프로젝트 가운데 D-STACK을 쓰는 곳은 저절로 찾아요. 다른 폴더는 직접 더하고, 보고 싶지 않은 프로젝트는 뺄 수 있어요. 뺀 폴더는 폴더 추가로 다시 넣어요.")
         }
-        .onAppear { model.refresh() }
+        .onAppear { Task { await model.refresh() } }
         ForEach(model.projects) { project in
             LabeledContent {
-                Button("빼기") { model.remove(project.url) }
+                Button("빼기") { Task { await model.remove(project.url) } }
             } label: {
                 Text(project.name)
                 Text("\((project.url.path as NSString).abbreviatingWithTildeInPath) · \(state(project))")
@@ -247,8 +330,8 @@ struct DStackSettingsView: View {
     private func state(_ project: DStackModel.Project) -> String {
         switch project.reading {
         case .open(let run): "열린 실행: \(run.title)"
-        case .unsupported: "지원하지 않는 형식이에요"
-        case .noOpenRun: DStackStore.hasStore(project.url) ? "열린 실행이 없어요" : "D-STACK 저장소가 없어요"
+        case .unsupported(let reason): "형식을 읽지 못했어요 · \(reason)"
+        case .noOpenRun: project.hasStore ? "열린 실행이 없어요" : "D-STACK 저장소가 없어요"
         }
     }
 
@@ -260,6 +343,6 @@ struct DStackSettingsView: View {
         panel.prompt = "추가"
         panel.message = "D-STACK을 쓰는 프로젝트 폴더를 골라 주세요."
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        model.add(url)
+        Task { await model.add(url) }
     }
 }

@@ -4,6 +4,7 @@ import Foundation
 import NotchKit
 import SwiftUI
 import Testing
+import Vision
 @testable import DStack
 
 /// A temporary directory removed when the test is done with it. Read-only copies are made writable
@@ -13,7 +14,7 @@ final class TempDir {
 
     init() throws {
         url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("P59-T144-\(UUID().uuidString)")
+            .appendingPathComponent("P59-T150-\(UUID().uuidString)")
             .resolvingSymlinksInPath()
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }
@@ -27,6 +28,19 @@ final class TempDir {
 
 func iso(_ text: String) -> Date {
     ISO8601DateFormatter().date(from: text)!
+}
+
+/// A clock a test moves by hand.
+final class Clock: @unchecked Sendable {
+    var date: Date
+    init(_ date: Date) { self.date = date }
+}
+
+/// Replaces the file at `path` under `project/.dstack` with `text`, or removes it when `text` is nil.
+func replace(_ path: String, in project: URL, with text: String?) throws {
+    let file = project.appendingPathComponent(".dstack/\(path)")
+    try? FileManager.default.removeItem(at: file)
+    if let text { try text.write(to: file, atomically: false, encoding: .utf8) }
 }
 
 /// Writes a trimmed store shaped like a real one under `project/.dstack`: two milestones, six plans
@@ -139,9 +153,10 @@ final class SilentHost: NotchHost {
 }
 
 /// A plugin reading `claudeProjects` and `fileSystemRoot` under a temporary directory, never the
-/// real ~/.claude, with settings in a defaults suite of its own.
+/// real ~/.claude, with settings in a defaults suite of its own. `now` is read on every use, so a
+/// `Clock`'s date moves the plugin's time.
 @MainActor
-func makePlugin(root: URL, now: Date, interval: Duration = .seconds(5)) throws -> (DStackPlugin, UserDefaults) {
+func makePlugin(root: URL, now: @escaping @autoclosure () -> Date, interval: Duration = .seconds(5)) throws -> (DStackPlugin, UserDefaults) {
     let id = DStackPlugin.manifest.id
     let suite = "dstack-tests.\(root.lastPathComponent)"
     let storage = try PluginStorage(
@@ -156,7 +171,7 @@ func makePlugin(root: URL, now: Date, interval: Duration = .seconds(5)) throws -
     )
     try FileManager.default.createDirectory(at: discovery.claudeProjects, withIntermediateDirectories: true)
     try FileManager.default.createDirectory(at: discovery.fileSystemRoot, withIntermediateDirectories: true)
-    return (DStackPlugin(context: context, discovery: discovery, now: { now }, interval: interval), storage.defaults)
+    return (DStackPlugin(context: context, discovery: discovery, now: now, interval: interval), storage.defaults)
 }
 
 /// Creates `relative` under the plugin's file system root and lists it in its Claude Code projects
@@ -223,4 +238,49 @@ func render(_ view: some View, named name: String) throws -> CGSize {
         try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name).png"))
     }
     return size
+}
+
+/// What a render of `view` on black at 4x shows: the text Vision reads in it, top to bottom without
+/// spaces or middle dots, how many separate bands of rows hold green (the plans bar, the milestone
+/// strip, the ring) and its size in points. Writes the render to `$DSTACK_CAPTURE_DIR/<name>.png`
+/// when that variable is set.
+@MainActor
+func look(_ view: some View, named name: String) throws -> (text: String, greenBands: Int, size: CGSize) {
+    let renderer = ImageRenderer(content: view.background(.black).environment(\.colorScheme, .dark))
+    renderer.scale = 4
+    let image = try #require(renderer.cgImage)
+    if let directory = ProcessInfo.processInfo.environment["DSTACK_CAPTURE_DIR"] {
+        let png = try #require(NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))
+        try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name).png"))
+    }
+
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.recognitionLanguages = ["ko-KR", "en-US"]
+    request.usesLanguageCorrection = false
+    try VNImageRequestHandler(cgImage: image).perform([request])
+    let text = (request.results ?? [])
+        .sorted { (-$0.boundingBox.midY, $0.boundingBox.minX) < (-$1.boundingBox.midY, $1.boundingBox.minX) }
+        .compactMap { $0.topCandidates(1).first?.string }
+        .joined()
+        .filter { !$0.isWhitespace && !"·•∙・".contains($0) }
+
+    let width = image.width, height = image.height
+    var pixels = [UInt8](repeating: 0, count: width * height * 4)
+    let context = try #require(CGContext(
+        data: &pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ))
+    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    var bands = 0, previous = false
+    for y in 0..<height {
+        let green = (0..<width).contains { x in
+            let i = (y * width + x) * 4
+            let (r, g, b) = (Int(pixels[i]), Int(pixels[i + 1]), Int(pixels[i + 2]))
+            return g >= 120 && g > r + 60 && g > b + 40
+        }
+        if green, !previous { bands += 1 }
+        previous = green
+    }
+    return (text, bands, CGSize(width: CGFloat(width) / 4, height: CGFloat(height) / 4))
 }
