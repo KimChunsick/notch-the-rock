@@ -30,7 +30,8 @@ import SwiftUI
 /// process runs under, traced through its ancestors, so another TUI in the same folder does not hide it;
 /// the folder's TUI is looked up only when the ancestors lead to no terminal. A terminal found through
 /// the ancestors stays while that process has the session; one found by the folder, or none, is looked
-/// up again every pass, and the process's own replaces it once found. A pass traces each process and
+/// up again every pass, and the process's own replaces it once found. An alert goes where its session
+/// goes when it is answered, not where it went when the alert was raised. A pass traces each process and
 /// lists the `codex` processes at most once, however many records it reads.
 @MainActor
 final class CodexRollouts {
@@ -383,6 +384,10 @@ final class CodexRollouts {
     }
 
     /// The bridge's alert for a finished turn; a desktop session's takes the user to the desktop app.
+    /// Answered, it goes where the session goes then (`targets`), the notch when that is nowhere: an alert
+    /// may wait while another is shown, and meanwhile the session's own terminal may replace the one its
+    /// folder gave, or another process may take the session. Only a session this watcher keeps no
+    /// destination for goes where it went when the alert was raised, which the button's title names.
     private func notify(_ meta: RolloutMeta) -> Task<Void, Never> {
         let session = meta.id
         notices[session]?.task.cancel()
@@ -404,7 +409,7 @@ final class CodexRollouts {
         let task = Task { [context] in
             let response = await context.requestAttention(request)
             if case .answered(let answer) = response, answer.buttonID == CodexBridge.jumpButtonID {
-                self.jump(to: target)
+                self.jump(to: self.targets[session].map(\.terminal) ?? target)
             }
             if self.notices[session]?.id == id {
                 self.notices[session] = nil

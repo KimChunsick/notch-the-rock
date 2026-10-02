@@ -608,6 +608,83 @@ final class FakeCodexProcesses {
         #expect(session(resumed)?.pid == second && session(resumed)?.terminal == ghostty)
     }
 
+    /// A finished turn's alert raised while the session went to the folder's terminal, the first TUI's,
+    /// waits unanswered; meanwhile the second's ancestors can be read and its row moves to Ghostty. The
+    /// alert answered then takes the user where the session goes now, Ghostty, and raises nothing more.
+    @Test func R40__a_waiting_alert_goes_where_the_session_goes_when_it_is_answered() async throws {
+        let first: pid_t = 5001, second: pid_t = 5002
+        let folder = "/Users/me/tide-pool"
+        let terminal = TerminalLocation(bundleID: "com.apple.Terminal", tty: "/dev/ttys001")
+        let ghostty = TerminalLocation(bundleID: "com.mitchellh.ghostty", tty: "/dev/ttys003")
+        let resumed = "019b0000-0000-7000-8000-00000000f013"
+        processes.cli = nil
+        ancestry.run(first, in: "/System/Applications/Utilities/Terminal.app", tty: "/dev/ttys001")
+        processes.others = [first, second]
+        processes.owners[resumed] = second
+        terminals.running = [CodexProcess(pid: first, cwd: folder), CodexProcess(pid: second, cwd: folder)]
+        await scan()
+        try tree.write(resumed, Self.cli(resumed, "tide-pool"))
+        await scan()
+        #expect(session(resumed)?.pid == second && session(resumed)?.terminal == terminal)
+
+        host.holds = true
+        try tree.append(resumed, RolloutTree.event("task_complete", turn: "t1") + "\n")
+        let alerts = await watcher.scan()
+        try await asked(1)
+        #expect(alerts.count == 1 && host.requests.first?.buttons.map(\.title) == ["터미널로 이동"])
+
+        // The second's ancestors can be read now; the alert still waits.
+        ancestry.run(second, in: "/Applications/Ghostty.app", tty: "/dev/ttys003")
+        await scan()
+        #expect(session(resumed)?.terminal == ghostty && activator.activated.isEmpty)
+
+        host.responses = [.answered(AttentionAnswer(buttonID: CodexBridge.jumpButtonID, choices: [:], text: nil))]
+        host.holds = false
+        for alert in alerts { await alert.value }
+        #expect(activator.activated == [ghostty])
+        #expect(host.collapses == 1 && host.expansions == 0 && host.requests.count == 1)
+    }
+
+    /// A finished turn's alert waits unanswered while the process that had the session exits and its row
+    /// leaves. Answered then, it takes the user to the terminal the session went to last.
+    @Test func R40__a_waiting_alert_of_a_session_gone_meanwhile_goes_where_it_went_last() async throws {
+        let holder: pid_t = 5001
+        let terminal = TerminalLocation(bundleID: "com.apple.Terminal", tty: "/dev/ttys001")
+        let resumed = "019b0000-0000-7000-8000-00000000f014"
+        processes.cli = nil
+        ancestry.run(holder, in: "/System/Applications/Utilities/Terminal.app", tty: "/dev/ttys001")
+        processes.others = [holder]
+        processes.owners[resumed] = holder
+        await scan()
+        try tree.write(resumed, Self.cli(resumed, "tide-pool"))
+        await scan()
+        #expect(session(resumed)?.terminal == terminal)
+
+        host.holds = true
+        try tree.append(resumed, RolloutTree.event("task_complete", turn: "t1") + "\n")
+        let alerts = await watcher.scan()
+        try await asked(1)
+
+        processes.others = []
+        ancestry.end(holder)
+        await scan()
+        #expect(session(resumed) == nil)
+
+        host.responses = [.answered(AttentionAnswer(buttonID: CodexBridge.jumpButtonID, choices: [:], text: nil))]
+        host.holds = false
+        for alert in alerts { await alert.value }
+        #expect(activator.activated == [terminal])
+        #expect(host.collapses == 1 && host.expansions == 0)
+    }
+
+    /// Waits until the host was asked `count` times.
+    func asked(_ count: Int) async throws {
+        for _ in 0..<200 where host.requests.count < count {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(host.requests.count == count)
+    }
+
     /// A pass that reads several records of a session whose terminal is not found looks for it once: the
     /// process's ancestors are traced once and the `codex` processes listed once. The next pass looks again,
     /// once.
