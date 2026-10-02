@@ -34,8 +34,10 @@ enum NotchState: Equatable {
 /// A plugin that collapses the notch after the user answered one of its requests (a jump to a
 /// terminal, however long it takes) folds it fully: the rest of the queue, including a notice that
 /// already shows, is held for `collapseHold` before the next request shows, with the same timing rules
-/// as behind a takeover. The answer allows one such collapse until another request is answered or
-/// times out, or the folded notch is opened again (the pointer, the hotkey, a link or a plugin).
+/// as behind a takeover. The answer allows one such collapse until another request is answered, or
+/// the folded notch is opened while no request shows (the pointer, the hotkey, a link or a plugin).
+/// A request timing out does not end it, nor does an opening under a shown request, such as a hover
+/// that began before the answer.
 ///
 /// The expanded notch shows the home (`screen`): plugin tiles and a strip of icons, see `HomeModel`. API for
 /// the keyboard and URL plans (P17, P18): `showHome()`, `open(pluginID:)`, `back()`, `escape()` and
@@ -139,7 +141,8 @@ final class NotchHostModel: NotchHost {
     /// Until when the queue stays hidden after a plugin collapsed the notch on its own answer.
     private var queueHeldUntil: ContinuousClock.Instant?
     /// The plugin whose request the user answered last, while its `collapse()` still belongs to that
-    /// answer: until it collapses, another request is answered or times out, or the notch opens.
+    /// answer: until it collapses, another request is answered, or the notch opens while no request
+    /// shows.
     @ObservationIgnored private var answeredPluginID: String?
     private var postCount = 0
     private var attentionCount = 0
@@ -273,11 +276,8 @@ final class NotchHostModel: NotchHost {
     func respond(_ response: AttentionResponse, to id: PendingAttention.ID) {
         guard let index = attentions.firstIndex(where: { $0.id == id }) else { return }
         let pending = attentions.remove(at: index)
-        if response == .timedOut {
-            answeredPluginID = nil
-        } else if response != .cancelled {
-            answeredPluginID = pending.pluginID
-        }
+        // A timeout or a cancellation is nobody's answer, so the last answer keeps its collapse.
+        if response != .timedOut && response != .cancelled { answeredPluginID = pending.pluginID }
         pending.continuation.resume(returning: response)
         startShownNotice()
         scheduleExpiry()
@@ -312,7 +312,9 @@ final class NotchHostModel: NotchHost {
 
     private func setExpanded(_ expanded: Bool) {
         guard pinnedExpansion == nil else { return }
-        if expanded && !isExpanded { answeredPluginID = nil }
+        // Opening the folded notch ends the last answer's collapse, unless a request covers it: then
+        // the user did not see it open (a hover that began before the answer comes after it).
+        if expanded && !isExpanded && state != .attention { answeredPluginID = nil }
         isExpanded = expanded
         if !expanded {
             screen = .home

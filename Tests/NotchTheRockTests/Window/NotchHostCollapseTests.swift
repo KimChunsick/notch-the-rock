@@ -169,7 +169,7 @@ struct NotchHostCollapseTests {
         #expect(await next.value == .dismissed)
     }
 
-    @Test func R51__another_alert_timing_out_ends_the_fold() async throws {
+    @Test func R51__alert_timing_out_during_the_jump_keeps_the_fold() async throws {
         let first = Task { await host.requestAttention(notice("세션 1 작업을 마쳤어요"), from: agents) }
         await drain()
         let short = AttentionRequest(title: "배터리가 부족해요", message: "", buttons: [], timeout: .seconds(1))
@@ -179,36 +179,76 @@ struct NotchHostCollapseTests {
         await drain()
 
         try await pressJump(on: first)
+        // The other alert times out while the terminal comes forward, and the next one shows.
         advance(by: .seconds(1))
         #expect(await other.value == .timedOut)
+        #expect(host.attention?.request.title == "세션 2 작업을 마쳤어요")
+        advance(by: .seconds(2))
         host.collapse(from: agents)
+        #expect(host.state == .collapsed)
+
+        advance(by: hold - .milliseconds(100))
+        #expect(host.state == .collapsed)
+        advance(by: .milliseconds(100))
         #expect(host.state == .attention)
         #expect(host.attention?.request.title == "세션 2 작업을 마쳤어요")
 
-        // Shown since the answer, it is gone five seconds later; the withdraw only ends what is left.
-        advance(by: .seconds(5))
-        host.withdraw(from: agents)
+        // Hidden after two of its five seconds, it shows for all five again.
+        advance(by: .milliseconds(4900))
+        #expect(host.state == .attention)
+        advance(by: .milliseconds(100))
         #expect(await next.value == .timedOut)
+        #expect(host.state == .collapsed)
     }
 
-    @Test func R51__user_opening_the_notch_ends_the_fold() async throws {
+    @Test func R51__hover_intent_from_before_the_answer_keeps_the_fold() async throws {
         let first = Task { await host.requestAttention(notice("세션 1 작업을 마쳤어요"), from: agents) }
         await drain()
-        let next = Task { await host.requestAttention(notice("세션 2 작업을 마쳤어요"), from: agents) }
+        let second = Task { await host.requestAttention(notice("세션 2 작업을 마쳤어요"), from: agents) }
+        await drain()
+        #expect(host.isExpanded == false)
+
+        // The pointer enters the folded notch's alert and presses the jump button within the open
+        // intent; the hover scheduled before the press comes after it, over the second alert.
+        try await pressJump(on: first)
+        host.setHovering(true)
+        #expect(host.state == .attention)
+        advance(by: .milliseconds(300))
+        host.collapse(from: agents)
+        #expect(host.state == .collapsed)
+
+        advance(by: hold - .milliseconds(100))
+        #expect(host.state == .collapsed)
+        advance(by: .milliseconds(100))
+        #expect(host.state == .attention)
+        #expect(host.attention?.request.title == "세션 2 작업을 마쳤어요")
+
+        advance(by: .milliseconds(4900))
+        #expect(host.state == .attention)
+        advance(by: .milliseconds(100))
+        #expect(await second.value == .timedOut)
+        #expect(host.state == .collapsed)
+    }
+
+    @Test func R51__user_opening_the_notch_with_no_alert_showing_ends_the_fold() async throws {
+        let first = Task { await host.requestAttention(notice("세션 1 작업을 마쳤어요"), from: agents) }
         await drain()
 
         try await pressJump(on: first)
-        // The user brings the pointer onto the folded notch before the plugin folds it.
+        #expect(host.state == .collapsed)
+        // The user opens the folded notch while the terminal comes forward; then an alert arrives.
         host.setHovering(true)
+        #expect(host.state == .expanded)
+        let next = Task { await host.requestAttention(notice("세션 2 작업을 마쳤어요"), from: agents) }
+        await drain()
         host.collapse(from: agents)
         #expect(host.isExpanded == false)
         #expect(host.state == .attention)
         #expect(host.attention?.request.title == "세션 2 작업을 마쳤어요")
 
-        // Shown since the answer, it is gone five seconds later; the withdraw only ends what is left.
         advance(by: .seconds(5))
-        host.withdraw(from: agents)
         #expect(await next.value == .timedOut)
+        #expect(host.state == .collapsed)
     }
 
     @Test func R45__five_second_alert_is_gone_five_seconds_after_it_appears() async throws {
