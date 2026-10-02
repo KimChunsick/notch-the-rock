@@ -23,6 +23,10 @@ final class CodexBridge {
     /// How many times a refused `thread/loaded/list` or `thread/resume` is sent before the bridge
     /// reports the sessions it could not follow.
     static let discoveryAttempts = 4
+    /// The `source` of a thread the Codex desktop app started (its rollouts say the same); the TUI's say `cli`.
+    static let desktopSource = "vscode"
+    /// How many finished turns and closed threads the bridge remembers.
+    static let remembered = 1024
     /// A neutral slate, so codex's requests never look like Claude Code's and borrow no brand colour.
     static let accent = Color(red: 0.44, green: 0.53, blue: 0.62)
     static let clientInfo: JSONValue = .object([
@@ -46,8 +50,11 @@ final class CodexBridge {
     /// Thread folders by thread id, kept across connections.
     private(set) var threads: [String: String] = [:]
     /// The terminal found when each thread joined, kept across connections like `threads`. Its own
-    /// TUI's terminal: a lookup by folder later may find another TUI in the same folder.
+    /// TUI's terminal: a lookup by folder later may find another TUI in the same folder. A desktop
+    /// thread's is the Codex app.
     private var terminals: [String: TerminalLocation] = [:]
+    /// Threads the Codex desktop app started, kept across connections like `threads`.
+    private var desktopThreads: Set<String> = []
     /// The threads that joined on this connection (started, or listed and resumed) and have not
     /// closed. The Agents screen's list may drop a silent thread's row; this does not, so the
     /// thread's end still alerts, once.
@@ -56,7 +63,10 @@ final class CodexBridge {
     /// rollout watcher's stay.
     private var listed: Set<String> = []
     /// Turns whose end alerted already, here or in the rollout watcher, as "thread/turn".
-    private var alertedTurns: Set<String> = []
+    private var alertedTurns = RecentIDs(capacity: remembered)
+    /// Threads that closed and did not join again, kept across connections: the rollout watcher never
+    /// brings them back from what it reads later.
+    private var closedThreads = RecentIDs(capacity: remembered)
 
     // One connection's state; `close()` clears it.
     private var send: (@MainActor (JSONValue) -> Void)?
@@ -177,8 +187,12 @@ final class CodexBridge {
     /// watcher, so a turn both see alerts once. A turn without an id always alerts.
     func claimTurnAlert(_ thread: String, turn: String?) -> Bool {
         guard let turn else { return true }
-        if alertedTurns.count >= 1024 { alertedTurns.removeAll() }
-        return alertedTurns.insert(thread + "/" + turn).inserted
+        return alertedTurns.insert(thread + "/" + turn)
+    }
+
+    /// Whether `thread` closed here and has not joined since.
+    func isClosed(_ thread: String) -> Bool {
+        closedThreads.contains(thread)
     }
 
     /// Closes the connection's state, then tells the link why it should drop the connection.
@@ -268,6 +282,7 @@ final class CodexBridge {
             if let cwd = result["thread"]?["cwd"]?.string ?? result["cwd"]?.string {
                 threads[thread] = cwd
             }
+            note(thread, source: result["thread"]?["source"])
             // A thread in the middle of a turn is working; any other loaded thread waits for the user.
             join(thread, result["thread"]?["status"]?["type"]?.string == "active" ? .working : .idle)
         }
@@ -313,6 +328,7 @@ final class CodexBridge {
         case "thread/started":
             guard let thread = params["thread"], let id = thread["id"]?.string else { return nil }
             if let cwd = thread["cwd"]?.string { threads[id] = cwd }
+            note(id, source: thread["source"])
             join(id, .idle)
             resume(id)
         case "item/started" where params["item"]?["type"]?.string == "fileChange":
@@ -343,6 +359,7 @@ final class CodexBridge {
             if let thread = params["threadId"]?.string { track(thread, .working) }
         case "thread/closed":
             guard let thread = params["threadId"]?.string else { return nil }
+            closedThreads.insert(thread)
             waits.removeAll { $0.thread == thread }
             screen.sessions.remove(AgentSession.Key(agent: .codex, id: thread))
             listed.remove(thread)
@@ -566,10 +583,22 @@ final class CodexBridge {
     /// may work in the same folder by now. Only here: the lookup walks the running processes.
     private func join(_ thread: String, _ state: AgentSessionState) {
         joined.insert(thread)
-        if terminals[thread] == nil, let found = terminal(threads[thread]) {
+        closedThreads.remove(thread)
+        if desktopThreads.contains(thread) {
+            terminals[thread] = CodexRollouts.desktopApp
+        } else if terminals[thread] == nil, let found = terminal(threads[thread]) {
             terminals[thread] = found
         }
         track(thread, state)
+    }
+
+    /// Remembers a thread the desktop app started, from the thread's `source`.
+    private func note(_ thread: String, source: JSONValue?) {
+        if source?.string == Self.desktopSource {
+            desktopThreads.insert(thread)
+        } else if source != nil {
+            desktopThreads.remove(thread)
+        }
     }
 
     /// Moves the thread's row on the Agents screen; a row that left the list comes back with the
@@ -591,7 +620,7 @@ final class CodexBridge {
             message: message,
             accent: Self.accent,
             sourceIcon: AgentKind.codex.alertIcon(logos),
-            buttons: [AttentionButton(id: Self.jumpButtonID, title: found == nil ? "노치 열기" : "터미널로 이동", role: .primary)],
+            buttons: [AttentionButton(id: Self.jumpButtonID, title: Self.jumpTitle(found), role: .primary)],
             timeout: ClaudeBridge.noticeTimeout
         )
         let task = Task { [context] in
@@ -617,8 +646,17 @@ final class CodexBridge {
         context.expand()
     }
 
+    /// Where an alert's button takes the user: the Codex app, a terminal or, without either, the notch.
+    static func jumpTitle(_ target: TerminalLocation?) -> String {
+        guard let target else { return "노치 열기" }
+        return target == CodexRollouts.desktopApp ? "Codex 앱으로 이동" : "터미널로 이동"
+    }
+
     private func icon(_ params: JSONValue) -> Image? {
-        terminal(folder(params)).flatMap(ClaudeBridge.appIcon)
+        if let thread = params["threadId"]?.string, desktopThreads.contains(thread) {
+            return ClaudeBridge.appIcon(CodexRollouts.desktopApp)
+        }
+        return terminal(folder(params)).flatMap(ClaudeBridge.appIcon)
     }
 
     private func threadFolder(_ params: JSONValue) -> String? {
@@ -754,5 +792,36 @@ struct CodexQuestion: Equatable {
             }
         }
         return .object(answers)
+    }
+}
+
+/// Ids in the order they came, at most `capacity` of them: past it the oldest is forgotten, one at a time.
+struct RecentIDs {
+    let capacity: Int
+    private var order: [String] = []
+    private var members: Set<String> = []
+
+    init(capacity: Int) {
+        self.capacity = capacity
+    }
+
+    func contains(_ id: String) -> Bool {
+        members.contains(id)
+    }
+
+    /// False when `id` is remembered already; otherwise remembers it, forgetting the oldest past `capacity`.
+    @discardableResult
+    mutating func insert(_ id: String) -> Bool {
+        guard members.insert(id).inserted else { return false }
+        order.append(id)
+        if order.count > capacity {
+            members.remove(order.removeFirst())
+        }
+        return true
+    }
+
+    mutating func remove(_ id: String) {
+        guard members.remove(id) != nil else { return }
+        order.removeAll { $0 == id }
     }
 }

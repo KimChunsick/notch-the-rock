@@ -28,13 +28,13 @@ enum Transcript {
     }
 
     @Test func R49__claude_transcript_tail_gives_the_used_share_of_the_models_window() {
-        // 1 000 + 2 000 + 81 000 of a 200k model; the synthetic message after it has no usage.
-        let standard = Transcript.data([Transcript.user, Transcript.assistant("claude-sonnet-4-5-20250929", input: 1000, creation: 2000, read: 81000), Transcript.synthetic])
+        // 1 000 + 2 000 + 81 000 of a model that never runs with 1M; the synthetic message after it has no usage.
+        let standard = Transcript.data([Transcript.user, Transcript.assistant("claude-opus-4-5-20251101", input: 1000, creation: 2000, read: 81000), Transcript.synthetic])
         #expect(ContextUsage.claude(tail: standard) == 42)
         // A model whose window is 1M by default.
         let long = Transcript.data([Transcript.assistant("claude-opus-4-8", input: 5000, creation: 10000, read: 105000)])
         #expect(ContextUsage.claude(tail: long) == 12)
-        // A 200k model past 200k runs with the 1M window; the latest message counts, not the first.
+        // A model that may run with 1M, past 200k, runs with it; the latest message counts, not the first.
         let past = Transcript.data([Transcript.assistant("claude-sonnet-4-5", input: 1, creation: 1, read: 1), Transcript.assistant("claude-sonnet-4-5", input: 0, creation: 0, read: 300000)])
         #expect(ContextUsage.claude(tail: past) == 30)
         // A tail cut mid-line, and no assistant message with usage: unknown.

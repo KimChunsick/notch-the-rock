@@ -14,19 +14,28 @@ struct RolloutTree {
         try FileManager.default.createDirectory(at: day, withIntermediateDirectories: true)
     }
 
-    var day: URL { root.appendingPathComponent("2026/10/02") }
+    /// Today's folder, as codex names it: the watcher's fast passes look in recent date folders only.
+    var day: URL { root.appendingPathComponent(Self.folder(Date())) }
 
-    func url(_ id: String) -> URL { day.appendingPathComponent("rollout-2026-10-02T09-00-00-\(id).jsonl") }
+    static func folder(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy/MM/dd"
+        return formatter.string(from: date)
+    }
 
-    func write(_ id: String, _ lines: [String], modified: Date? = nil) throws {
-        try Data(lines.map { $0 + "\n" }.joined().utf8).write(to: url(id))
+    func url(_ id: String, in folder: URL? = nil) -> URL { (folder ?? day).appendingPathComponent("rollout-2026-10-02T09-00-00-\(id).jsonl") }
+
+    func write(_ id: String, _ lines: [String], modified: Date? = nil, in folder: URL? = nil) throws {
+        if let folder { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
+        try Data(lines.map { $0 + "\n" }.joined().utf8).write(to: url(id, in: folder))
         if let modified {
-            try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: url(id).path)
+            try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: url(id, in: folder).path)
         }
     }
 
-    func append(_ id: String, _ text: String) throws {
-        let handle = try FileHandle(forWritingTo: url(id))
+    func append(_ id: String, _ text: String, in folder: URL? = nil) throws {
+        let handle = try FileHandle(forWritingTo: url(id, in: folder))
         try handle.seekToEnd()
         try handle.write(contentsOf: Data(text.utf8))
         try handle.close()
@@ -47,6 +56,7 @@ struct RolloutTree {
     let host = FakeHost()
     let activator = FakeActivator()
     let outbox = Outbox()
+    let clock = TestClock()
     let tree: RolloutTree
     let bridge: CodexBridge
     let watcher: CodexRollouts
@@ -57,7 +67,7 @@ struct RolloutTree {
         let terminals = ["/Users/me/notch-the-rock": ghostty, "/Users/me/rock-garden": ghostty]
         let lookup: @MainActor (String?) -> TerminalLocation? = { cwd in cwd.flatMap { terminals[$0] } }
         bridge = CodexBridge(context: context, activator: activator, terminal: lookup)
-        watcher = CodexRollouts(root: tree.root, context: context, bridge: bridge, activator: activator, terminal: lookup)
+        watcher = CodexRollouts(root: tree.root, context: context, bridge: bridge, activator: activator, terminal: lookup, now: { [clock] in clock.now })
         bridge.open { [outbox] in outbox.messages.append($0) }
     }
 
@@ -72,7 +82,7 @@ struct RolloutTree {
         for task in await watcher.scan() { await task.value }
     }
 
-    @Test func R52__a_desktop_session_lists_and_alerts_once_per_finished_turn() async throws {
+    @Test func R55__a_desktop_session_lists_and_alerts_once_per_finished_turn() async throws {
         await scan()
         try tree.write(Self.desktop, [RolloutTree.meta(Self.desktop, cwd: "/Users/me/tide-pool"), RolloutTree.event("task_started", turn: "t1")])
         await scan()
@@ -114,7 +124,7 @@ struct RolloutTree {
         #expect(CodexRollouts.desktopApp.bundleID == "com.openai.codex" && host.collapses == 1 && host.expansions == 0)
     }
 
-    @Test func R52__a_partial_line_waits_until_it_is_complete() async throws {
+    @Test func R55__a_partial_line_waits_until_it_is_complete() async throws {
         await scan()
         try tree.write(Self.desktop, [RolloutTree.meta(Self.desktop, cwd: "/Users/me/tide-pool"), RolloutTree.event("task_started", turn: "t1")])
         await scan()
@@ -128,7 +138,7 @@ struct RolloutTree {
         #expect(session(Self.desktop)?.state == .idle && host.requests.count == 1)
     }
 
-    @Test func R52__a_restart_indexes_the_history_without_alerts() async throws {
+    @Test func R55__a_restart_indexes_the_history_without_alerts() async throws {
         let hourAgo = Date(timeIntervalSinceNow: -3600).rounded
         let finished = "019b0000-0000-7000-8000-00000000d002"
         let old = "019b0000-0000-7000-8000-00000000d003"
@@ -149,7 +159,7 @@ struct RolloutTree {
         #expect(session(old)?.folder == "old-shell" && session(old)?.state == .idle)
     }
 
-    @Test func R52__a_thread_the_bridge_follows_alerts_once() async throws {
+    @Test func R55__a_thread_the_bridge_follows_alerts_once() async throws {
         await scan()
         bridge.receive(try codexFixture("initializeResponse"))
         bridge.receive(try codexFixture("loadedListPage1"))
@@ -178,7 +188,7 @@ struct RolloutTree {
         #expect(list.sessions.map(\.id.id) == [Self.desktop])
     }
 
-    @Test func R52__exec_and_subagent_sessions_are_ignored() async throws {
+    @Test func R55__exec_and_subagent_sessions_are_ignored() async throws {
         await scan()
         let exec = "019b0000-0000-7000-8000-00000000e001"
         let subagent = "019b0000-0000-7000-8000-00000000e002"
@@ -190,6 +200,12 @@ struct RolloutTree {
         await scan()
         #expect(list.sessions.isEmpty && host.requests.isEmpty)
     }
+}
+
+/// The watcher's clock: now, moved on by `offset`.
+final class TestClock {
+    var offset: TimeInterval = 0
+    var now: Date { Date().addingTimeInterval(offset) }
 }
 
 extension Date {
