@@ -3,8 +3,9 @@ import Foundation
 import NotchKit
 
 /// The history on disk: the list in one file and every image in a file of its own, each sealed
-/// with AES-GCM under the history key. Every file is mode 0600 and holds ciphertext only; the one
-/// exception is the empty `oldHistoryMarkerName` file a key replacement keeps while it runs.
+/// with AES-GCM under the history key. Every file is mode 0600 and holds ciphertext only; the
+/// exceptions are the key file `HistoryKey.fileName` beside them and the empty
+/// `oldHistoryMarkerName` file a new key keeps while it runs.
 ///
 /// Images are kept apart so that recording a text does not rewrite every image, and an image is
 /// written once when it is first copied. An image file is always written before any list names
@@ -106,33 +107,42 @@ struct ClipboardStore: Sendable {
 }
 
 extension ClipboardStore {
-    /// An empty file in the directory while the history there is sealed with an old key being
-    /// replaced: written before the new key is stored, removed once that history is deleted.
+    /// An empty file in the directory while the history there may be sealed with a key that is not
+    /// the one in the key file: written before a new key file is created, removed once that history
+    /// is deleted.
     static let oldHistoryMarkerName = "old-history-to-delete"
 
-    /// Loads the history key and returns the store in `directory` with it. A keychain call can wait
-    /// on the system, so run this off the main thread. When the key replaces an old one that cannot
-    /// be read without asking, the old history's files are deleted, so the new history starts empty
-    /// instead of unreadable.
+    /// What `open(in:)` returns: the store, the key it seals with, how that key was got, and
+    /// whether a history sealed with another key was deleted.
+    typealias Opened = (store: ClipboardStore, key: SymmetricKey, origin: HistoryKey.Origin, removedOldHistory: Bool)
+
+    /// Loads the history key from the key file in `directory`, creating one when there is none or
+    /// when the file there is not trusted, and returns the store in `directory` with it. It reads
+    /// and writes the disk, so run it off the main thread. A new key cannot open a history sealed
+    /// before it (the one from when the key was kept in the keychain, or one sealed with a
+    /// distrusted key file's key), so that history's files are deleted and the new history starts
+    /// empty instead of unreadable. The keychain is never read, written or deleted.
     ///
     /// The marker makes that deletion survive an interruption: any later call that finds it deletes
-    /// the files there when their list does not open with the key it got, and until the marker is
-    /// gone this throws, so no list is written under the new key beside them. A list that opens with
-    /// that key is that key's history, whatever left the marker (a new key that could not be
-    /// stored, then an old key that became readable and moved): it is kept, and only the marker goes.
-    static func open(in directory: URL, keychain: some HistoryKeychain) throws -> (store: ClipboardStore, key: SymmetricKey, origin: HistoryKey.Origin) {
+    /// the files there when their list does not open with the key in the key file, and until the
+    /// marker is gone this throws, so no list is written under the new key beside them. A list that
+    /// opens with that key is that key's history, whatever left the marker: it is kept, and only the
+    /// marker goes.
+    static func open(in directory: URL) throws -> Opened {
         let marker = directory.appendingPathComponent(oldHistoryMarkerName)
-        let (key, origin) = try HistoryKey.load(from: keychain) {
+        let (key, origin) = try HistoryKey.load(in: directory) {
             try Data().write(to: marker)
         }
         let store = ClipboardStore(directory: directory, key: key)
+        var removedOldHistory = false
         if try isPresent(marker) {
             if try !store.listOpensWithKey() {
                 try store.deleteAll()
+                removedOldHistory = true
             }
             try store.removeIfPresent(marker)
         }
-        return (store, key, origin)
+        return (store, key, origin, removedOldHistory)
     }
 
     /// Whether the stored list opens with this key, true when no list was written. Throws when the
@@ -160,79 +170,114 @@ extension ClipboardStore {
     }
 }
 
-/// The keychain calls the history key makes: `PluginStorage` in the app, a recording fake in tests.
-protocol HistoryKeychain: Sendable {
-    func keychainData(for account: String) throws(KeychainError) -> Data?
-    func setKeychainData(_ data: Data, for account: String, access: KeychainAccess) throws(KeychainError)
-    func deleteKeychainData(for account: String) throws(KeychainError)
-}
-
-extension PluginStorage: HistoryKeychain {}
-
-/// The 256-bit history key, kept in the Keychain under the plugin's service (this Mac only), as an
-/// item every application may read without a dialog. The app is signed without a team, so an item
-/// tied to its signature made macOS ask again after every build; the user chose weaker protection
-/// over that dialog (D-53).
+/// The 256-bit history key, kept in the file `fileName` in the plugin's own folder: a regular file
+/// of this user with mode 0600, so only this user's processes can read it, the history beside it
+/// staying encrypted. The key was kept in the keychain before; macOS refused it to every new build
+/// of the app, which is signed without a team, so the user chose the file (D-80).
 enum HistoryKey {
-    static let account = "history-key-2"
-    /// Where the key was kept before, readable by the build that stored it only.
-    static let legacyAccount = "history-key"
+    static let fileName = "history.key"
 
-    /// How `load(from:)` got the key.
+    /// How `load(in:willCreate:)` got the key.
     enum Origin: Equatable, Sendable {
-        /// It was under `account`.
+        /// It was in the key file.
         case stored
-        /// There was none, so a new one is stored now.
+        /// There was no key file, so a new key file holds a new key.
         case created
-        /// It was under `legacyAccount`, readable without asking, and is now under `account`.
-        case movedFromOldAccount
-        /// The key under `legacyAccount` cannot be read without asking, so a new one is stored
-        /// under `account` and the history sealed with the old one cannot be opened.
-        case replacedOldKeyThatNeedsAccess
+        /// What was at the key file's name was not a private regular file of this user holding a
+        /// key (another mode or owner, a symlink, a directory, another size), so a new key file
+        /// replaced it.
+        case replacedUntrustedFile
     }
 
-    /// The stored key's data does not hold a 256-bit key. It is left in place: replacing it would
-    /// make the existing history unreadable for good.
-    struct InvalidKeyError: Error, CustomStringConvertible {
-        let byteCount: Int
-        var description: String { "the history key in the keychain has \(byteCount) bytes instead of 32" }
+    /// What is at the key file's name.
+    private enum Entry {
+        case missing
+        case untrusted
+        case key(SymmetricKey)
     }
 
-    /// The key under `account`; else the key under `legacyAccount` moved there; else a new one. A
-    /// keychain failure on `account`, including one that needs access, is thrown instead of creating
-    /// a key, so a temporarily unreadable key is never replaced. Only an old key that needs access is
-    /// replaced: `willReplaceOldKey` runs, then the new key is stored, and the old item is then
-    /// deleted when that needs no dialog. A throw from `willReplaceOldKey` stores nothing.
-    static func load(from keychain: some HistoryKeychain, willReplaceOldKey: () throws -> Void) throws -> (key: SymmetricKey, origin: Origin) {
-        if let data = try keychain.keychainData(for: account) {
-            return (try key(from: data), .stored)
+    /// The key in the key file; else, after `willCreate` runs, a new key in a new key file that
+    /// replaces anything untrusted there. A throw from `willCreate` creates nothing. A key file that
+    /// cannot be read for another reason (an I/O error) is thrown, never replaced, so a key that is
+    /// only out of reach for now does not make its history unreadable.
+    static func load(in directory: URL, willCreate: () throws -> Void) throws -> (key: SymmetricKey, origin: Origin) {
+        let url = directory.appendingPathComponent(fileName)
+        let isUntrusted: Bool
+        switch try read(url) {
+        case .key(let key):
+            return (key, .stored)
+        case .missing:
+            isUntrusted = false
+        case .untrusted:
+            isUntrusted = true
         }
-        let legacy: Data?
-        do {
-            legacy = try keychain.keychainData(for: legacyAccount)
-        } catch where error.needsAccess {
-            try willReplaceOldKey()
-            let key = try create(in: keychain)
-            try? keychain.deleteKeychainData(for: legacyAccount)
-            return (key, .replacedOldKeyThatNeedsAccess)
+        try willCreate()
+        if isUntrusted {
+            // Removes the entry itself: a symlink goes, never what it points to.
+            try FileManager.default.removeItem(at: url)
         }
-        guard let legacy else {
-            return (try create(in: keychain), .created)
+        if let key = try create(at: url) {
+            return (key, isUntrusted ? .replacedUntrustedFile : .created)
         }
-        let key = try key(from: legacy)
-        try keychain.setKeychainData(legacy, for: account, access: .anyApplication)
-        try? keychain.deleteKeychainData(for: legacyAccount)
-        return (key, .movedFromOldAccount)
+        // Another opening created the key file first: its key is the history's.
+        guard case .key(let key) = try read(url) else {
+            throw CocoaError(.fileReadCorruptFile, userInfo: [NSFilePathErrorKey: url.path])
+        }
+        return (key, .stored)
     }
 
-    private static func key(from data: Data) throws -> SymmetricKey {
-        guard data.count == 32 else { throw InvalidKeyError(byteCount: data.count) }
-        return SymmetricKey(data: data)
+    /// The key in the file at `url` when that is a regular file of this user with mode 0600 holding
+    /// 32 bytes. `lstat` looks at the entry itself, so a symlink is untrusted wherever it points.
+    /// The file is then opened without following a link or waiting (a FIFO would block) and checked
+    /// again, so an entry swapped in between is not read either.
+    private static func read(_ url: URL) throws -> Entry {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else {
+            if errno == ENOENT { return .missing }
+            throw posixError(url)
+        }
+        guard isPrivateFile(info) else { return .untrusted }
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            if errno == ELOOP { return .untrusted }
+            throw posixError(url)
+        }
+        defer { close(descriptor) }
+        guard fstat(descriptor, &info) == 0 else { throw posixError(url) }
+        guard isPrivateFile(info), info.st_size == 32 else { return .untrusted }
+        var bytes = [UInt8](repeating: 0, count: 33)
+        let count = Darwin.read(descriptor, &bytes, bytes.count)
+        guard count >= 0 else { throw posixError(url) }
+        guard count == 32 else { return .untrusted }
+        return .key(SymmetricKey(data: Data(bytes[..<32])))
     }
 
-    private static func create(in keychain: some HistoryKeychain) throws -> SymmetricKey {
+    private static func isPrivateFile(_ info: stat) -> Bool {
+        info.st_mode & S_IFMT == S_IFREG && info.st_mode & 0o7777 == 0o600 && info.st_uid == geteuid()
+    }
+
+    /// Writes a new key to a new file beside `url`, created with mode 0600 so it is never readable by
+    /// others, then links it at `url`: the key file appears whole or not at all, and an existing one
+    /// is never overwritten. Returns nil when a key file appeared at `url` meanwhile.
+    private static func create(at url: URL) throws -> SymmetricKey? {
         let key = SymmetricKey(size: .bits256)
-        try keychain.setKeychainData(key.withUnsafeBytes { Data($0) }, for: account, access: .anyApplication)
+        let temporary = url.deletingLastPathComponent().appendingPathComponent(".\(fileName).\(UUID().uuidString)")
+        let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw posixError(temporary) }
+        defer { unlink(temporary.path) }
+        let written = key.withUnsafeBytes { Darwin.write(descriptor, $0.baseAddress, $0.count) }
+        let isWritten = written == 32 && fsync(descriptor) == 0
+        let failure = written == 32 || written < 0 ? errno : EIO
+        close(descriptor)
+        guard isWritten else { throw posixError(temporary, code: failure) }
+        guard link(temporary.path, url.path) == 0 else {
+            if errno == EEXIST { return nil }
+            throw posixError(url)
+        }
         return key
+    }
+
+    private static func posixError(_ url: URL, code: Int32 = errno) -> POSIXError {
+        POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO, userInfo: [NSFilePathErrorKey: url.path])
     }
 }
