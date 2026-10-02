@@ -153,6 +153,14 @@ public final class AgentsPlugin: NotchPlugin {
         }
     }
 
+    /// Wide: the open sessions, those waiting for the user first. Small: how many are open and wait.
+    /// Tapping it opens the screen.
+    public var tile: PluginTile? {
+        PluginTile(supportedSizes: [.wide, .small]) { [sessions = bridge.screen.sessions, logos] size in
+            AgentsTile(sessions: sessions, logos: logos, size: size)
+        }
+    }
+
     public var settingsView: AnyView? {
         AnyView(AgentsSettingsView(model: hooks, codex: codex, defaults: context.storage.defaults))
     }
