@@ -46,6 +46,8 @@ final class ClipboardHistory {
     @ObservationIgnored private let sources: SourceAppLookup
     /// Whether a store is being opened: set by `beginOpening()`, cleared by `open(_:)`.
     @ObservationIgnored private var isOpening = false
+    /// Whether `resetUnreadableStore()` is running.
+    @ObservationIgnored private var isResetting = false
     /// The entries copied while a store was being opened. One may have been written to the store
     /// opened before, which need not be the next one, so `open(_:)` keeps them whatever it finds.
     @ObservationIgnored private var copiedWhileOpening: Set<ClipItem.ID> = []
@@ -201,23 +203,31 @@ final class ClipboardHistory {
 
     /// Deletes the unreadable stored history, image files first and the list last, and saves the
     /// entries of this session in its place; an image whose file cannot be written stays in memory
-    /// only. When a deletion fails the list is still there, so the store stays unreadable.
-    func resetUnreadableStore() {
-        guard let store = unreadableStore else { return }
-        do {
-            try store.deleteAll()
-        } catch {
+    /// only. The store decides again under the opening lock, with the key in the key file
+    /// (`ClipboardStore.resetIfUnreadable()`): a history that can be read by then, saved by another
+    /// opening or reachable again, is not deleted but opened as `open(_:)` opens one, with this
+    /// session's entries and edits kept. That runs off the main actor, on the queue openings use,
+    /// so the main actor never waits for the lock; until it is done, copies, deletions and pin
+    /// changes are kept as while a store is being opened, and the store found is opened with
+    /// `open(_:)`. One reset runs at a time: a call while one runs does nothing. When the key file
+    /// cannot be read or created, the lock cannot be taken in time or a deletion fails, the list is
+    /// still there, so the store stays unreadable and the session in memory.
+    func resetUnreadableStore() async {
+        guard let unreadable = unreadableStore, !isResetting else { return }
+        isResetting = true
+        defer { isResetting = false }
+        beginOpening()
+        switch await ClipboardStore.onKeyQueue({ try unreadable.resetIfUnreadable() }) {
+        case .success(.readable(let store)):
+            open(store)
+        case .success(.deleted(let store)):
+            // The history the edits were kept for is gone; the entries saved in its place carry them.
+            edits = []
+            open(store)
+        case .failure(let error):
+            // The copies made meanwhile stay owed to the next opening, which ends the opening begun here.
             logError("could not delete the unreadable clipboard history: \(error)")
-            return
         }
-        unreadableStore = nil
-        // The history the edits were kept for is gone; the entries saved in its place carry them.
-        edits = []
-        attach(store, listedIDs: [])
-        for (id, png) in originals where writeImageFile(png, for: id) {
-            originals[id] = nil
-        }
-        save()
     }
 
     /// Returns once every change so far has been tried on disk, writing again a list whose write

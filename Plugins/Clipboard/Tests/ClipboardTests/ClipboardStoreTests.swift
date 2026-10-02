@@ -170,7 +170,7 @@ import Testing
 
 /// Resetting deletes the unreadable files and saves what this session captured in a new store.
 @MainActor
-@Test func R09__resetting_an_unreadable_store_writes_a_new_one() throws {
+@Test func R09__resetting_an_unreadable_store_writes_a_new_one() async throws {
     let directory = try makeDirectory()
     let old = makeHistory(directory: directory, key: makeKey())
     old.record(.text("unreadable later"))
@@ -186,15 +186,17 @@ import Testing
     history.record(try #require(ClipCapture(png: png)))
     history.setPinned(true, for: history.items[1].id)
 
-    history.resetUnreadableStore()
+    await history.resetUnreadableStore()
+    // The reset saved with the key in the key file, never with the key the session had.
+    let saved = try storedKey(in: directory)
     #expect(!history.isStoreUnreadable)
     history.flush()
     let names = try files(in: directory).map(\.lastPathComponent)
-    #expect(names.count == 2)  // the new list and the new image
+    #expect(names.count == 4)  // the new list, the new image, the key file the reset created and the lock file
     #expect(!names.contains("\(oldImage.id.uuidString).\(ClipboardStore.imageExtension)"))
 
     let errors = ErrorLog()
-    let reloaded = makeHistory(directory: directory, key: key, errors: errors)
+    let reloaded = makeHistory(directory: directory, key: saved, errors: errors)
     #expect(!reloaded.isStoreUnreadable)
     #expect(reloaded.items == history.items)
     #expect(errors.messages.isEmpty)
@@ -204,7 +206,7 @@ import Testing
     // Later changes are saved again.
     history.record(.link("https://example.com/after"))
     history.flush()
-    #expect(makeHistory(directory: directory, key: key).items == history.items)
+    #expect(makeHistory(directory: directory, key: saved).items == history.items)
 }
 
 /// A reset deletes the image files before the list. When it stops partway, here at an image file
@@ -212,7 +214,7 @@ import Testing
 /// this session and the next, and no image file comes back as an entry. Once every file can go,
 /// the reset finishes and saves this session.
 @MainActor
-@Test func R09__an_interrupted_reset_leaves_the_store_unreadable() throws {
+@Test func R09__an_interrupted_reset_leaves_the_store_unreadable() async throws {
     let directory = try makeDirectory()
     let old = makeHistory(directory: directory, key: makeKey())
     old.record(try #require(ClipCapture(png: samplePNG(seed: 20))))
@@ -231,7 +233,7 @@ import Testing
     history.open(ClipboardStore(directory: directory, key: key))
     history.record(.text("this session"))
     errors.messages = []
-    history.resetUnreadableStore()
+    await history.resetUnreadableStore()
     history.flush()
     #expect(history.isStoreUnreadable)
     #expect(errors.messages.count == 1)
@@ -243,11 +245,13 @@ import Testing
     #expect(FileManager.default.fileExists(atPath: locked.path))
 
     try FileManager.default.setAttributes([.immutable: false], ofItemAtPath: locked.path)
-    history.resetUnreadableStore()
+    await history.resetUnreadableStore()
+    // The reset saved with the key in the key file, never with the key the session had.
+    let saved = try storedKey(in: directory)
     #expect(!history.isStoreUnreadable)
     history.flush()
-    #expect(try files(in: directory).map(\.lastPathComponent) == [ClipboardStore.listFileName])
-    #expect(makeHistory(directory: directory, key: key).items.map(\.content) == [.text("this session")])
+    #expect(Set(try files(in: directory).map(\.lastPathComponent)) == [ClipboardStore.listFileName, ClipboardStore.openingLockName, HistoryKey.fileName])
+    #expect(makeHistory(directory: directory, key: saved).items.map(\.content) == [.text("this session")])
 }
 
 /// An image file that the list on disk does not name was never saved: opening the store deletes
@@ -433,7 +437,7 @@ import Testing
 /// the history, copyable from memory and counted as not saved, and the list on disk leaves it out.
 /// Reopening the store keeps it and writes its file and a list that names it.
 @MainActor
-@Test func R09__a_reset_keeps_an_image_it_could_not_save_in_memory_only() throws {
+@Test func R09__a_reset_keeps_an_image_it_could_not_save_in_memory_only() async throws {
     let directory = try makeDirectory()
     let old = makeHistory(directory: directory, key: makeKey())
     old.record(.text("unreadable later"))
@@ -453,7 +457,9 @@ import Testing
     errors.messages = []
 
     fault.failsImages = true
-    history.resetUnreadableStore()
+    await history.resetUnreadableStore()
+    // The reset saved with the key in the key file, never with the key the session had.
+    let saved = try storedKey(in: directory)
     history.flush()
     #expect(!history.isStoreUnreadable)
     #expect(history.items == captured)
@@ -463,18 +469,18 @@ import Testing
     defer { pasteboard.releaseGlobally() }
     #expect(history.copy(image, to: pasteboard))
     #expect(pasteboard.data(forType: .png) == png)
-    #expect(try ClipboardStore(directory: directory, key: key).loadList().map(\.content) == [.text("kept after the reset")])
+    #expect(try ClipboardStore(directory: directory, key: saved).loadList().map(\.content) == [.text("kept after the reset")])
 
     fault.failsImages = false
     history.record(.link("https://example.com"))
     history.flush()
     #expect(history.unsavedCount == 1)
     let beforeReopening = history.items
-    history.open(ClipboardStore(directory: directory, key: key))
+    history.open(ClipboardStore(directory: directory, key: saved))
     history.flush()
     #expect(history.items == beforeReopening)
     #expect(history.unsavedCount == 0)
-    #expect(makeHistory(directory: directory, key: key).items == beforeReopening)
+    #expect(makeHistory(directory: directory, key: saved).items == beforeReopening)
     #expect(history.imageData(for: image) == png)
 }
 

@@ -18,7 +18,7 @@ private final class SilentHost: NotchHost {
     func log(_ level: LogLevel, _ message: String, from pluginID: String) {}
 }
 
-/// The plugin is never activated here, so it reads no pasteboard and no keychain item.
+/// The plugin is never activated here, so it reads no pasteboard and no key file.
 @MainActor
 private func makePlugin() throws -> ClipboardPlugin {
     let id = ClipboardPlugin.manifest.id

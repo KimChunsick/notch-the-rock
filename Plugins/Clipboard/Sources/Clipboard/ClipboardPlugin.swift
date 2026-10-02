@@ -1,11 +1,10 @@
 import AppKit
-import CryptoKit
 import NotchKit
 import SwiftUI
 
-/// Keeps a history of copied text, images and links, encrypted on disk with a key kept in the
-/// Keychain, and shows it in the expanded notch with search and pins and the latest entries in a
-/// home tile. Content marked by password managers is never recorded.
+/// Keeps a history of copied text, images and links, encrypted on disk with a key kept in a file
+/// only this user can read, and shows it in the expanded notch with search and pins and the latest
+/// entries in a home tile. Content marked by password managers is never recorded.
 @MainActor
 public final class ClipboardPlugin: NotchPlugin {
     public static let manifest = PluginManifest(
@@ -16,28 +15,28 @@ public final class ClipboardPlugin: NotchPlugin {
         sdkVersion: NotchKitSDK.version
     )
 
-    /// Keychain calls can wait on the system, so the key is loaded here, never on the main thread,
-    /// one load at a time: a load started after a quick off and on sees the key the earlier one
-    /// stored.
-    private static let keyQueue = DispatchQueue(label: "com.notchtherock.clipboard.history-key")
-
     private let context: NotchContext
-    private let keychain: any HistoryKeychain
     private let pasteboard: NSPasteboard
+    private let openStore: @Sendable (URL) throws -> ClipboardStore.Opened
     let history: ClipboardHistory
     /// Opens the history; set while the plugin is active.
     private(set) var opening: Task<Void, Never>?
     private var monitor: PasteboardMonitor?
 
     public convenience init(context: NotchContext) {
-        self.init(context: context, keychain: context.storage, pasteboard: .general)
+        self.init(context: context, pasteboard: .general)
     }
 
-    /// Tests pass a fake keychain and a private pasteboard.
-    init(context: NotchContext, keychain: any HistoryKeychain, pasteboard: NSPasteboard) {
+    /// Tests pass a private pasteboard, and an opening that can wait or fail before it opens the
+    /// store in the given folder.
+    init(
+        context: NotchContext,
+        pasteboard: NSPasteboard,
+        openStore: @escaping @Sendable (URL) throws -> ClipboardStore.Opened = { try ClipboardStore.open(in: $0) }
+    ) {
         self.context = context
-        self.keychain = keychain
         self.pasteboard = pasteboard
+        self.openStore = openStore
         let log = context.log
         history = ClipboardHistory { log.error($0) }
     }
@@ -56,14 +55,12 @@ public final class ClipboardPlugin: NotchPlugin {
         // is reported again instead of missed; a repeat only moves its entry to the top.
         monitor.start()
         history.record(from: pasteboard)
-        let keychain = keychain
+        let openStore = openStore
         let directory = context.storage.directory
+        // Off the main thread, one opening or reset at a time: an opening started after a quick off
+        // and on sees the key file the earlier one created.
         opening = Task { [weak self] in
-            let opened = await withCheckedContinuation { continuation in
-                Self.keyQueue.async {
-                    continuation.resume(returning: Result { try ClipboardStore.open(in: directory, keychain: keychain) })
-                }
-            }
+            let opened = await ClipboardStore.onKeyQueue { try openStore(directory) }
             guard let self, !Task.isCancelled else { return }
             self.finishOpening(opened)
         }
@@ -103,19 +100,23 @@ public final class ClipboardPlugin: NotchPlugin {
             summary: "복사한 텍스트와 이미지, 링크를 기록해 두고 노치에서 찾아 다시 복사할 수 있어요. 비밀번호 관리자가 표시한 내용은 기록하지 않아요.",
             permissions: [
                 PluginPermission(.pasteboard, reason: "복사할 때마다 클립보드 내용을 읽어 기록에 더하고, 고른 기록을 클립보드에 다시 넣어요."),
-                PluginPermission(.keychain, reason: "디스크에 암호화해 저장하는 기록의 키를 키체인에 보관해요."),
+                PluginPermission(.files(path: "플러그인 전용 폴더"), reason: "암호화한 기록과 그 키를 본인만 읽을 수 있는 파일로 저장해요."),
             ]
         )
     }
 
-    /// Opens the history with the encrypted store, or without one when the Keychain cannot give a
-    /// key or an old history cannot be deleted yet: then the history, image originals included,
-    /// stays in memory and nothing is written to disk until an opening succeeds.
-    private func finishOpening(_ opened: Result<(store: ClipboardStore, key: SymmetricKey, origin: HistoryKey.Origin), any Error>) {
+    /// Opens the history with the encrypted store, or without one when the key file cannot be read
+    /// or created, an old history cannot be deleted yet or another opening keeps the opening lock
+    /// too long: then the history, image originals included, stays in memory and nothing is written
+    /// to disk until an opening succeeds.
+    private func finishOpening(_ opened: Result<ClipboardStore.Opened, any Error>) {
         switch opened {
         case .success(let opened):
-            if opened.origin == .replacedOldKeyThatNeedsAccess {
-                context.log.info("the old clipboard history key cannot be read without asking, so a new clipboard history started under a new key")
+            if opened.origin == .replacedUntrustedFile {
+                context.log.error("the clipboard history key file was not a private file of this user, so a new key file replaced it")
+            }
+            if opened.removedOldHistory {
+                context.log.info("the clipboard history on disk was sealed with a key that is not in the key file, so a new clipboard history started")
             }
             history.open(opened.store)
         case .failure(let error):

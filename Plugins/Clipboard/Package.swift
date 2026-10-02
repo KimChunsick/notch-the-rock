@@ -9,8 +9,8 @@ import PackageDescription
 //   swift test -Xswiftc -F -Xswiftc $CLT/Frameworks \
 //     -Xlinker -rpath -Xlinker $CLT/Frameworks -Xlinker -rpath -Xlinker $CLT/usr/lib
 //
-// The tests use private named pasteboards, never the general one, and an in-memory keychain, never
-// the user's.
+// The tests use private named pasteboards, never the general one, and temporary folders for the
+// history and its key file, never the plugin's real folder; nothing reads or writes the keychain.
 
 let package = Package(
     name: "Clipboard",
@@ -26,6 +26,9 @@ let package = Package(
     ],
     targets: [
         .target(name: "Clipboard", dependencies: [.product(name: "NotchKit", package: "NotchKit")]),
+        // A helper the tests run as another process, to save a history and exit. It has no product,
+        // so scripts/build-plugin.sh never builds or packages it.
+        .executableTarget(name: "ClipboardTestHelper", dependencies: ["Clipboard"], path: "Tests/ClipboardTestHelper"),
         .testTarget(
             name: "ClipboardTests",
             dependencies: ["Clipboard", .product(name: "NotchKit", package: "NotchKit")]

@@ -103,7 +103,7 @@ private final class InertBuiltIn: NotchPlugin {
         "Agents": (["otherAppSettings(Claude Code)", "files(~/.claude/projects/*)", "files($CODEX_HOME/sessions)", "helperProcesses", "automation(터미널)"], "choice approvalWaitSeconds"),
         "Battery": (["helperProcesses"], "none"),
         "Brightness": (["accessibility"], "none"),
-        "Clipboard": (["pasteboard", "keychain"], "none"),
+        "Clipboard": (["pasteboard", "files(플러그인 전용 폴더)"], "none"),
         "DStack": (["files(~/.claude/projects)", "files(프로젝트 폴더/.dstack)"], "none"),
         "Hello": ([], "toggle showsGreeting"),
         "NowPlaying": (["helperProcesses"], "none"),
