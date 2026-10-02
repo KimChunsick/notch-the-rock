@@ -3,8 +3,9 @@ import NotchKit
 import SwiftUI
 
 /// The onboarding's 코딩 에이전트 연결 step: a card for Claude Code and one for Codex. Each card's
-/// 연결 is the settings page's 연결 (`ClaudeHooksModel.install()`, `CodexModel.connect()`), and each
-/// card shows what the settings page shows, plus whether the tool is installed at all.
+/// 연결 is the settings page's 연결 (`ClaudeHooksModel.install()`, `CodexModel.connect()`, after 해제
+/// for a Codex connection that lost sessions), and each card shows what the settings page shows,
+/// plus whether the tool is installed at all.
 @MainActor
 enum AgentSetup {
     static let notInstalled = "설치되지 않았어요"
@@ -25,7 +26,7 @@ enum AgentSetup {
                 detail: "공유 app-server로 Codex 세션을 노치에 보여줘요",
                 icon: AgentKind.codex.alertIcon(logos),
                 state: { codexState(codex) },
-                perform: { codex.connect() }
+                perform: { connectCodex(codex) }
             ),
         ])
     }
@@ -41,15 +42,25 @@ enum AgentSetup {
         }
     }
 
-    /// Connected once the user connected Codex and the app-server answered; a connection that keeps
-    /// failing shows the settings page's reason.
+    /// Connected once the user connected Codex and the app-server answered. While the connection
+    /// tries again by itself the card works with the settings page's text and offers no button; a
+    /// connection that lost sessions is a failure with the settings page's explanation.
     static func codexState(_ codex: CodexModel) -> PluginSetupState {
         guard codex.executable != nil else { return .unavailable(reason: notInstalled) }
         guard codex.enabled else { return .notConnected }
         switch codex.state {
-        case .off, .connecting: return .working
-        case .connected, .incomplete: return .connected
-        case .retrying: return .failed(message: AgentsSettingsView.status(of: codex.state))
+        case .off, .connecting: return .working(message: nil)
+        case .connected: return .connected
+        case .retrying: return .working(message: AgentsSettingsView.status(of: codex.state))
+        case .incomplete: return .failed(message: AgentsSettingsView.status(of: codex.state))
         }
+    }
+
+    /// The settings page's 연결, after its 해제 when Codex is connected already: the card offers its
+    /// button then only for a connection that lost sessions, and connecting again while the link
+    /// runs does nothing.
+    static func connectCodex(_ codex: CodexModel) {
+        if codex.enabled { codex.disconnect() }
+        codex.connect()
     }
 }

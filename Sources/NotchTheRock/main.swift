@@ -94,8 +94,10 @@ MainActor.assumeIsolated {
     var onboarding: OnboardingWindowController?
     if onboardingRecord.showsAtLaunch(arguments: arguments) {
         // Plugins activate inside loadAll(), so the greeting takeover is already up here.
-        // The setup steps of the plugins enabled now; the onboarding keeps them until it ends.
-        onboarding = OnboardingWindowController(model: OnboardingModel(record: onboardingRecord, setups: catalog.setupSteps()))
+        // The setup steps of the enabled plugins, read again whenever a plugin turns on or off.
+        let model = OnboardingModel(record: onboardingRecord, setups: { catalog.setupSteps() })
+        catalog.onEnabledChange = { [weak model] in model?.refreshSetups() }
+        onboarding = OnboardingWindowController(model: model)
         onboarding?.show(after: { host.takeover != nil })
     } else {
         appLogger.notice("onboarding not shown (\(onboardingRecord.isCompleted ? "completed" : "--skip-onboarding", privacy: .public))")

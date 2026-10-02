@@ -7,8 +7,9 @@ public enum PluginSetupState: Hashable, Sendable {
     case unavailable(reason: String)
     /// Not set up yet: the host offers the button that calls `PluginSetupItem.perform()`.
     case notConnected
-    /// Setting up is under way: the host shows progress and no button.
-    case working
+    /// Setting up is under way: the host shows progress and no button, and `message`, when given,
+    /// in place of the item's detail line, for example while the plugin tries again by itself.
+    case working(message: String?)
     /// Set up: the host shows a check.
     case connected
     /// The last attempt failed: the host shows the message and offers the button again.
@@ -19,7 +20,7 @@ public enum PluginSetupState: Hashable, Sendable {
 ///
 /// The host reads `state` while it draws the item's card, so back it with `@Observable` state and the
 /// card follows every change. The host calls `perform()` only when the user presses the card's
-/// button, never by itself; start long work in a `Task` and report `.working` meanwhile. Added in
+/// button, never by itself; start long work in a `Task` and report `.working(message:)` meanwhile. Added in
 /// SDK 1.3.
 public struct PluginSetupItem: Identifiable {
     public let id: String

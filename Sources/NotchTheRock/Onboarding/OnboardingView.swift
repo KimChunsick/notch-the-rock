@@ -241,7 +241,7 @@ private struct SetupCards: View {
             ForEach(Array(step.setup.items.enumerated()), id: \.element.id) { index, item in
                 if index > 0 { CardDivider() }
                 OnboardingCardRow(icon: icon(item), title: item.title, detail: item.detail, card: OnboardingCard(setup: item.state)) {
-                    model.performSetup(item)
+                    model.performSetup(item, of: step.pluginID)
                 }
             }
         }
@@ -285,7 +285,8 @@ extension View {
     }
 }
 
-/// One card: icon, title, the detail line (or the failure) and what `card` puts at the end.
+/// One card: icon, title, the detail line (or what `card` shows in its place) and what `card` puts
+/// at the end.
 private struct OnboardingCardRow<Icon: View>: View {
     let icon: Icon
     let title: String
@@ -302,12 +303,18 @@ private struct OnboardingCardRow<Icon: View>: View {
                 Text(title)
                     .font(.system(size: 13.5, weight: .semibold))
                     .foregroundStyle(.white)
-                if let failure = card.failure {
-                    Text(failure)
+                switch card.detail {
+                case .failure(let text):
+                    Text(text)
                         .font(.system(size: 12))
                         .foregroundStyle(OnboardingPalette.failure)
                         .lineLimit(2)
-                } else {
+                case .progress(let text):
+                    Text(text)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .lineLimit(2)
+                case nil:
                     Text(detail)
                         .font(.system(size: 12))
                         .foregroundStyle(.white.opacity(0.55))

@@ -88,7 +88,7 @@ final class OnboardingModel {
             case .off: OnboardingCard(.action(action))
             case .on: OnboardingCard(.done(label))
             case .needsApproval: OnboardingCard(.attention(label, action: "설정 열기"))
-            case .failed(let reason): OnboardingCard(.action("다시 시도"), failure: reason)
+            case .failed(let reason): OnboardingCard(.action("다시 시도"), detail: .failure(reason))
             }
         }
     }
@@ -115,8 +115,9 @@ final class OnboardingModel {
         }
     }
 
-    /// Welcome, 권한, one step per enabled plugin that offers setup, 사용법 and the last step.
-    let steps: [Step]
+    /// Welcome, 권한, one step per enabled plugin that offers setup, 사용법 and the last step. The
+    /// setup steps follow plugins turned on and off while the onboarding is open (`refreshSetups()`).
+    private(set) var steps: [Step]
     private(set) var step: Step = .welcome
     private(set) var isAccessibilityTrusted = false
     private(set) var loginItemStatus: SystemPermissions.LoginItemStatus = .notRegistered
@@ -134,7 +135,8 @@ final class OnboardingModel {
     var loginItemState: PermissionState { .loginItem(loginItemStatus, failure: loginItemFailure) }
     var isLastStep: Bool { step == steps.last }
 
-    @ObservationIgnored private let setups: [PluginSetupStep]
+    private var setups: [PluginSetupStep]
+    @ObservationIgnored private let readSetups: @MainActor () -> [PluginSetupStep]
     @ObservationIgnored private let permissions: Permissions
     @ObservationIgnored private let record: OnboardingRecord
     @ObservationIgnored private let pollInterval: Duration
@@ -142,16 +144,20 @@ final class OnboardingModel {
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var autoAdvance: Task<Void, Never>?
 
-    /// `grantPause` is how long both checked cards stay on screen before the 권한 step moves on by itself.
+    /// `setups` reads the setup steps of the plugins enabled now, in load order: once here and again
+    /// in `refreshSetups()`. `grantPause` is how long both checked cards stay on screen before the
+    /// 권한 step moves on by itself.
     init(
         permissions: Permissions = .system,
         record: OnboardingRecord,
-        setups: [PluginSetupStep] = [],
+        setups: @escaping @MainActor () -> [PluginSetupStep] = { [] },
         pollInterval: Duration = .milliseconds(500),
         grantPause: Duration = .milliseconds(900)
     ) {
-        steps = [.welcome, .permissions] + setups.map { .setup($0.pluginID) } + [.usage, .done]
-        self.setups = setups
+        let current = setups()
+        steps = Self.steps(with: current)
+        self.setups = current
+        readSetups = setups
         self.permissions = permissions
         self.record = record
         self.pollInterval = pollInterval
@@ -210,11 +216,27 @@ final class OnboardingModel {
         setups.first { $0.pluginID == pluginID }
     }
 
-    /// The 연결 (or 다시 시도) button of a setup card: the only way an item is set up here. A card
-    /// that shows no button (working, connected, unavailable) ignores it.
-    func performSetup(_ item: PluginSetupItem) {
-        guard OnboardingCard(setup: item.state).status.offersAction else { return }
-        item.perform()
+    /// Reads the enabled plugins' setup steps again; the catalog calls it whenever a plugin turns on
+    /// or off. A plugin turned off loses its step, and when that step is on screen the onboarding
+    /// moves on to the step after it; a plugin turned on again gets its step back in load order.
+    func refreshSetups() {
+        let before = steps
+        setups = readSetups()
+        steps = Self.steps(with: setups)
+        guard !steps.contains(step), let index = before.firstIndex(of: step) else { return }
+        // 사용법 and the last step are always there, so a later step is left.
+        step = before[(index + 1)...].first { steps.contains($0) } ?? .done
+    }
+
+    /// The 연결 (or 다시 시도) button of a setup card: the only way an item is set up here. The steps
+    /// are read again first, so the item of a plugin turned off or no longer loaded is never
+    /// performed; a card that shows no button (working, connected, unavailable) ignores it too.
+    func performSetup(_ item: PluginSetupItem, of pluginID: String) {
+        refreshSetups()
+        guard let current = setup(for: pluginID)?.setup.items.first(where: { $0.id == item.id }),
+              OnboardingCard(setup: current.state).status.offersAction
+        else { return }
+        current.perform()
     }
 
     /// Ends the onboarding and marks it completed: 시작하기 and the user closing the window both
@@ -228,6 +250,10 @@ final class OnboardingModel {
         autoAdvance = nil
         record.markCompleted()
         onFinish?()
+    }
+
+    private static func steps(with setups: [PluginSetupStep]) -> [Step] {
+        [.welcome, .permissions] + setups.map { .setup($0.pluginID) } + [.usage, .done]
     }
 
     private func next() {
@@ -308,24 +334,32 @@ struct OnboardingCard: Equatable {
         }
     }
 
-    let status: Status
-    /// Shown in place of the detail line, in the failure colour.
-    let failure: String?
-
-    init(_ status: Status, failure: String? = nil) {
-        self.status = status
-        self.failure = failure
+    /// What the card shows in place of its detail line.
+    enum Detail: Equatable {
+        /// In the failure colour.
+        case failure(String)
+        /// What is under way, in the detail colour.
+        case progress(String)
     }
 
-    /// A plugin's setup item: 연결 until it is connected, the reason instead of the button when it
-    /// cannot be set up here, 다시 시도 under a failure.
+    let status: Status
+    let detail: Detail?
+
+    init(_ status: Status, detail: Detail? = nil) {
+        self.status = status
+        self.detail = detail
+    }
+
+    /// A plugin's setup item: 연결 until it is connected, progress with what is under way and no
+    /// button while it works, the reason instead of the button when it cannot be set up here, 다시
+    /// 시도 under a failure.
     init(setup state: PluginSetupState) {
         switch state {
         case .notConnected: self.init(.action("연결"))
-        case .working: self.init(.progress("연결 중"))
+        case .working(let message): self.init(.progress("연결 중"), detail: message.map(Detail.progress))
         case .connected: self.init(.done("연결됨"))
         case .unavailable(let reason): self.init(.note(reason))
-        case .failed(let message): self.init(.action("다시 시도"), failure: message)
+        case .failed(let message): self.init(.action("다시 시도"), detail: .failure(message))
         @unknown default: self.init(.note("설정에서 확인해 주세요"))
         }
     }

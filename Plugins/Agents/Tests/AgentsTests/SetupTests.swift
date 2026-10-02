@@ -81,11 +81,44 @@ import Testing
         #expect(AgentSetup.codexState(codex) == .notConnected)
         codex.connect()
         #expect(started == 1)
-        #expect(AgentSetup.codexState(codex) == .working)
+        #expect(AgentSetup.codexState(codex) == .working(message: nil))
         codex.state = .connected(.spawned)
         #expect(AgentSetup.codexState(codex) == .connected)
         codex.state = .retrying("app-server가 응답하지 않아요.")
-        #expect(AgentSetup.codexState(codex) == .failed(message: AgentsSettingsView.status(of: codex.state)))
+        #expect(AgentSetup.codexState(codex) == .working(message: AgentsSettingsView.status(of: codex.state)))
+    }
+
+    /// A connection that lost sessions shows the settings page's explanation as a failure, and its
+    /// button reconnects as the settings page's 해제 then 연결 do. While the connection tries again by
+    /// itself the card shows the settings page's text and works, with no button to press.
+    @Test func R43__codex_incomplete_reconnects_and_retrying_works_without_a_button() throws {
+        let directory = try makeDirectory()
+        let hooks = ClaudeHooksModel(installer: HookInstaller(
+            settingsURL: directory.appendingPathComponent("settings.json"),
+            recordURL: directory.appendingPathComponent("record.json"),
+            entries: HookEntry.claude(helper: directory.appendingPathComponent("notch-hook"))
+        ))
+        var started = 0
+        var stopped = 0
+        let codex = CodexModel(
+            defaults: UserDefaults(suiteName: isolatedDefaultsSuite(in: directory))!,
+            executable: directory.appendingPathComponent("codex"),
+            start: { started += 1 },
+            stop: { stopped += 1 }
+        )
+        let item = try #require(AgentSetup.make(hooks: hooks, claudeInstalled: false, codex: codex, logos: FakeLogos())).items[1]
+        item.perform()
+        #expect(started == 1 && stopped == 0, "연결")
+
+        codex.state = .retrying("app-server가 응답하지 않아요.")
+        #expect(item.state == .working(message: "연결하지 못해서 잠시 뒤 다시 시도해요. app-server가 응답하지 않아요."))
+
+        codex.state = .incomplete(.spawned, "세션 목록을 읽지 못했어요.")
+        #expect(item.state == .failed(message: AgentsSettingsView.status(of: codex.state)))
+        #expect(AgentsSettingsView.status(of: codex.state).contains("해제한 뒤 다시 연결하면"))
+        item.perform()
+        #expect(stopped == 1 && started == 2, "해제, then 연결")
+        #expect(codex.enabled)
     }
 
     @Test func R43__claude_is_looked_for_on_path_and_where_the_installers_put_it() {

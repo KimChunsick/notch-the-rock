@@ -397,7 +397,9 @@ VStack(alignment: .leading, spacing: 8) {
 
 플러그인이 `setup`을 돌려주면 처음 실행 안내 창의 권한 단계와 사용법 단계 사이에 플러그인의 단계가
 하나 생겨요. 켜져 있는 플러그인만 단계가 생기고, 항목이 없는 `PluginSetup(title:message:items:)`은
-`nil`이 돼서 단계가 나오지 않아요. 1.3보다 낮은 SDK로 빌드한 플러그인은 `nil`로 읽혀요.
+`nil`이 돼서 단계가 나오지 않아요. 안내 창이 열려 있는 동안 플러그인을 끄면 그 단계가 빠지고(보고 있던
+단계라면 다음 단계로 넘어가요), 다시 켜면 원래 자리에 돌아와요. 앱은 버튼을 누를 때마다 플러그인이 아직
+켜져 있는지 다시 확인한 뒤에만 `perform()`을 불러요. 1.3보다 낮은 SDK로 빌드한 플러그인은 `nil`로 읽혀요.
 
 ```swift
 public var setup: PluginSetup? {
@@ -414,14 +416,15 @@ public var setup: PluginSetup? {
 | `PluginSetupState` | 카드 |
 |---|---|
 | `.notConnected` | `연결` 버튼 |
-| `.working` | 진행 표시, 버튼 없음 |
+| `.working(message:)` | 진행 표시, 버튼 없음. `message`가 있으면 설명 대신 보여줘요 |
 | `.connected` | 체크 표시와 `연결됨` |
 | `.unavailable(reason:)` | 버튼 대신 `reason` |
 | `.failed(message:)` | 설명 대신 빨간 `message`와 `다시 시도` 버튼 |
 
 `perform()`은 사용자가 버튼을 누를 때만 한 번 불려요. Enter와 Esc는 다음 단계로 넘어갈 뿐 아무것도
-연결하지 않아요. 오래 걸리는 일은 `Task`로 시작하고, 그동안 `state`를 `.working`으로 돌려줘요. 사용자가
-이 단계를 건너뛸 수 있으니 같은 일을 설정 화면에서도 할 수 있게 해 주세요.
+연결하지 않아요. 오래 걸리는 일은 `Task`로 시작하고, 그동안 `state`를 `.working(message: nil)`로
+돌려줘요. 스스로 다시 시도하는 중이면 그 사실을 `message`에 적어 줘요. 사용자가 이 단계를 건너뛸 수
+있으니 같은 일을 설정 화면에서도 할 수 있게 해 주세요.
 
 ## 7. 진입 함수
 

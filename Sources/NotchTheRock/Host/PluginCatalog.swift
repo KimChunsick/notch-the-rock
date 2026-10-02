@@ -93,6 +93,9 @@ final class PluginCatalog {
     static let changedReason = "허락한 뒤로 번들 내용이 바뀌었어요. 다시 허락해야 불러와요."
 
     private(set) var records: [PluginRecord] = []
+    /// Called after a plugin turns on or off, also when one loads after launch; the open onboarding
+    /// follows the enabled plugins' setup steps with it.
+    @ObservationIgnored var onEnabledChange: (@MainActor () -> Void)?
 
     /// A loaded plugin with what the home shows of it: the manifest's name and symbol, and the tab
     /// and tile read once when it loaded.
@@ -369,6 +372,7 @@ final class PluginCatalog {
         updateHome()
         entry.plugin.activate()
         logger.notice("activated \(entry.pluginID, privacy: .public)")
+        onEnabledChange?()
     }
 
     private func deactivate(_ id: String) {
@@ -379,6 +383,7 @@ final class PluginCatalog {
         entry.plugin.deactivate()
         host.withdraw(from: entry.pluginID)
         logger.notice("deactivated \(entry.pluginID, privacy: .public)")
+        onEnabledChange?()
     }
 
     /// Hands the host every running, enabled plugin in load order; each one is in the home, as a

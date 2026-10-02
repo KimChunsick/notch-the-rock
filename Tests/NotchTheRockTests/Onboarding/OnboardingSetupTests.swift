@@ -47,17 +47,36 @@ private final class SetupPlugin: NotchPlugin {
     private let suiteName = "OnboardingSetupTests.\(UUID().uuidString)"
     private static let pluginID = "com.example.agents"
 
+    private static let permissions = OnboardingModel.Permissions(
+        isAccessibilityTrusted: { false }, requestAccessibility: {}, openAccessibilitySettings: {},
+        loginItemStatus: { .notRegistered }, setLaunchAtLogin: { _ in }, openLoginItemsSettings: {}
+    )
+
     private func model(_ tools: [FakeTool], defaults: UserDefaults) -> OnboardingModel {
         let setup = PluginSetup(title: "코딩 에이전트 연결", message: "작업이 끝나면 노치가 알려 줘요.", items: tools.map(\.item))
         return OnboardingModel(
-            permissions: OnboardingModel.Permissions(
-                isAccessibilityTrusted: { false }, requestAccessibility: {}, openAccessibilitySettings: {},
-                loginItemStatus: { .notRegistered }, setLaunchAtLogin: { _ in }, openLoginItemsSettings: {}
-            ),
+            permissions: Self.permissions,
             record: OnboardingRecord(defaults: defaults),
-            setups: setup.map { [OnboardingModel.PluginSetupStep(pluginID: Self.pluginID, symbol: "terminal.fill", setup: $0)] } ?? [],
+            setups: { setup.map { [OnboardingModel.PluginSetupStep(pluginID: Self.pluginID, symbol: "terminal.fill", setup: $0)] } ?? [] },
             pollInterval: .seconds(60)
         )
+    }
+
+    /// Built-in plugins named `names` (loaded in that order), each offering `tools`, and the
+    /// onboarding wired to their catalog as main.swift wires it.
+    private func followingCatalog(_ names: [String], tools: [FakeTool], fixture: PluginFixture) throws -> (model: OnboardingModel, catalog: PluginCatalog, plugins: [(bundle: String, id: String)]) {
+        let plugins = try names.map { name in
+            let id = fixture.newIdentifier()
+            return (bundle: try fixture.makeBundle(in: fixture.locations.builtIn!, name: name, identifier: id).path, id: id)
+        }
+        let catalog = fixture.catalog(open: { info in
+            (PluginManifest(id: info.identifier, name: "Setup", version: "1.0.0", symbol: "terminal.fill", sdkVersion: NotchKitSDK.version), SetupPlugin.self)
+        })
+        SetupPlugin.tools = tools
+        catalog.loadAll()
+        let model = OnboardingModel(permissions: Self.permissions, record: OnboardingRecord(defaults: fixture.defaults), setups: { catalog.setupSteps() }, pollInterval: .seconds(60))
+        catalog.onEnabledChange = { [weak model] in model?.refreshSetups() }
+        return (model, catalog, plugins)
     }
 
     private func withDefaults(_ body: (UserDefaults) throws -> Void) rethrows {
@@ -87,10 +106,10 @@ private final class SetupPlugin: NotchPlugin {
             let tools = [FakeTool("claude-code", title: "Claude Code"), FakeTool("codex", title: "Codex")]
             let model = model(tools, defaults: defaults)
             let items = model.setup(for: Self.pluginID)!.setup.items
-            model.performSetup(items[0])
+            model.performSetup(items[0], of: Self.pluginID)
             #expect(tools.map(\.performed) == [1, 0])
             #expect(OnboardingCard(setup: items[0].state) == OnboardingCard(.done("연결됨")))
-            model.performSetup(items[0])
+            model.performSetup(items[0], of: Self.pluginID)
             #expect(tools[0].performed == 1, "a connected card has no button to press")
         }
     }
@@ -101,17 +120,74 @@ private final class SetupPlugin: NotchPlugin {
             let model = model(tools, defaults: defaults)
             let item = model.setup(for: Self.pluginID)!.setup.items[0]
             #expect(OnboardingCard(setup: item.state) == OnboardingCard(.note("설치되지 않았어요")))
-            model.performSetup(item)
+            model.performSetup(item, of: Self.pluginID)
             #expect(tools[0].performed == 0)
         }
     }
 
-    /// Working shows progress and no button; a failure shows the message and offers the button again.
+    /// Working shows progress and no button, with what is under way in place of the detail; a failure
+    /// shows the message and offers the button again.
     @Test func R43__working_and_failed_cards() {
-        #expect(OnboardingCard(setup: .working) == OnboardingCard(.progress("연결 중")))
-        #expect(OnboardingCard(setup: .failed(message: "settings.json을 읽지 못했어요")) == OnboardingCard(.action("다시 시도"), failure: "settings.json을 읽지 못했어요"))
+        #expect(OnboardingCard(setup: .working(message: nil)) == OnboardingCard(.progress("연결 중")))
+        let retrying = OnboardingCard(setup: .working(message: "연결하지 못해서 잠시 뒤 다시 시도해요."))
+        #expect(retrying == OnboardingCard(.progress("연결 중"), detail: .progress("연결하지 못해서 잠시 뒤 다시 시도해요.")))
+        #expect(!retrying.status.offersAction, "no button while it tries again by itself")
+        #expect(OnboardingCard(setup: .failed(message: "settings.json을 읽지 못했어요")) == OnboardingCard(.action("다시 시도"), detail: .failure("settings.json을 읽지 못했어요")))
         #expect(OnboardingCard(setup: .failed(message: "실패")).status.offersAction)
-        #expect(!OnboardingCard(setup: .working).status.offersAction)
+        #expect(!OnboardingCard(setup: .working(message: nil)).status.offersAction)
+    }
+
+    @Test func R43__turning_the_plugin_off_on_its_step_removes_the_step_and_moves_on() throws {
+        let fixture = try PluginFixture()
+        defer { fixture.cleanUp() }
+        let tools = [FakeTool("claude-code", title: "Claude Code"), FakeTool("codex", title: "Codex")]
+        let (model, catalog, plugins) = try followingCatalog(["Agents"], tools: tools, fixture: fixture)
+        let id = plugins[0].id
+        model.advance()
+        model.advance()
+        #expect(model.step == .setup(id))
+        catalog.setEnabled(false, for: plugins[0].bundle)
+        #expect(model.steps == [.welcome, .permissions, .usage, .done])
+        #expect(model.step == .usage, "the step on screen went away, so the onboarding moved on")
+        #expect(model.setup(for: id) == nil)
+        #expect(tools.map(\.performed) == [0, 0])
+    }
+
+    @Test func R43__turning_a_plugin_off_on_another_step_shrinks_the_dots_and_on_again_brings_its_step_back_in_place() throws {
+        let fixture = try PluginFixture()
+        defer { fixture.cleanUp() }
+        let (model, catalog, plugins) = try followingCatalog(["Agents", "Clock"], tools: [FakeTool("codex", title: "Codex")], fixture: fixture)
+        let (agents, clock) = (plugins[0], plugins[1])
+        model.advance()
+        #expect(model.steps == [.welcome, .permissions, .setup(agents.id), .setup(clock.id), .usage, .done])
+        catalog.setEnabled(false, for: agents.bundle)
+        #expect(model.steps == [.welcome, .permissions, .setup(clock.id), .usage, .done], "one dot fewer")
+        #expect(model.step == .permissions)
+        catalog.setEnabled(true, for: agents.bundle)
+        #expect(model.steps == [.welcome, .permissions, .setup(agents.id), .setup(clock.id), .usage, .done], "back in load order")
+        #expect(model.step == .permissions)
+        model.advance()
+        #expect(model.step == .setup(agents.id))
+        #expect(model.setup(for: agents.id)?.setup.items.map(\.id) == ["codex"])
+    }
+
+    /// The button checks the catalog again before it performs, even when the onboarding has not heard
+    /// that the plugin was turned off.
+    @Test func R43__an_item_of_a_plugin_turned_off_is_never_performed() throws {
+        let fixture = try PluginFixture()
+        defer { fixture.cleanUp() }
+        let tools = [FakeTool("codex", title: "Codex")]
+        let (model, catalog, plugins) = try followingCatalog(["Agents"], tools: tools, fixture: fixture)
+        let id = plugins[0].id
+        let item = try #require(model.setup(for: id)?.setup.items.first)
+        catalog.onEnabledChange = nil
+        catalog.setEnabled(false, for: plugins[0].bundle)
+        model.performSetup(item, of: id)
+        #expect(tools[0].performed == 0)
+        #expect(!model.steps.contains(.setup(id)))
+        catalog.setEnabled(true, for: plugins[0].bundle)
+        model.performSetup(item, of: id)
+        #expect(tools[0].performed == 1, "on again, the same card connects")
     }
 
     @Test func R43__enter_and_esc_go_past_the_step_without_connecting_anything() {
@@ -135,7 +211,7 @@ private final class SetupPlugin: NotchPlugin {
         #expect(State.off.card(action: "권한 열기") == OnboardingCard(.action("권한 열기")))
         #expect(State.on.card(action: "켜기") == OnboardingCard(.done("켜짐")))
         #expect(State.needsApproval.card(action: "켜기") == OnboardingCard(.attention("허용 필요", action: "설정 열기")))
-        #expect(State.failed("오류").card(action: "켜기") == OnboardingCard(.action("다시 시도"), failure: "오류"))
+        #expect(State.failed("오류").card(action: "켜기") == OnboardingCard(.action("다시 시도"), detail: .failure("오류")))
     }
 
     @Test func R43__only_enabled_plugins_with_items_offer_a_step() throws {
@@ -183,7 +259,7 @@ private final class SetupPlugin: NotchPlugin {
             try render(OnboardingView(model: unavailable), to: folder.appendingPathComponent("R43-render-onboarding-agents-unavailable-T138.png"))
             let tools = [FakeTool("claude-code", title: "Claude Code"), FakeTool("codex", title: "Codex", state: .failed(message: "app-server에 연결하지 못했어요."))]
             let connected = setupStep(tools)
-            connected.performSetup(connected.setup(for: Self.pluginID)!.setup.items[0])
+            connected.performSetup(connected.setup(for: Self.pluginID)!.setup.items[0], of: Self.pluginID)
             try render(OnboardingView(model: connected), to: folder.appendingPathComponent("R43-render-onboarding-agents-connected-T138.png"))
         }
     }
