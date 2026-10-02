@@ -126,20 +126,22 @@ private struct SettingControl: View {
     }
 }
 
-/// How a number item shows its value next to its stepper: with as many decimals as its step has, so
-/// two values the stepper reaches never read the same, then its unit.
+/// How a number item shows its value next to its stepper: with as many decimals as its step or the
+/// value itself has, whichever is more, so two values the stepper reaches never read the same and a
+/// value off the step grid keeps its fraction, then its unit.
 enum NumberSettingText {
-    /// A step with more decimals, or endless ones such as 1/3, shows this many.
+    /// A step or value with more decimals, or endless ones such as 1/3, shows this many.
     static let maxFractionDigits = 6
 
     static func text(_ value: Double, step: Double, unit: String?, locale: Locale = .autoupdatingCurrent) -> String {
-        value.formatted(.number.precision(.fractionLength(fractionDigits(of: step))).locale(locale)) + (unit ?? "")
+        let digits = max(fractionDigits(of: step), fractionDigits(of: value))
+        return value.formatted(.number.precision(.fractionLength(digits)).locale(locale)) + (unit ?? "")
     }
 
-    /// The decimal places of `step`: the fewest that make it a whole number, within the error of a
+    /// The decimal places of `number`: the fewest that make it a whole number, within the error of a
     /// binary `Double` such as 0.1.
-    static func fractionDigits(of step: Double) -> Int {
-        var scaled = abs(step)
+    static func fractionDigits(of number: Double) -> Int {
+        var scaled = abs(number)
         for digits in 0..<maxFractionDigits {
             if abs(scaled - scaled.rounded()) <= 1e-9 * max(1, scaled) { return digits }
             scaled *= 10

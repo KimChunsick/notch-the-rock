@@ -185,6 +185,7 @@ private final class LegacyPlugin: NotchPlugin {
         #expect(NumberSettingText.text(2, step: 0.5, unit: nil, locale: posix) == "2.0")
         #expect(NumberSettingText.text(0.3, step: 0.1, unit: "%", locale: posix) == "0.3%")
         #expect(NumberSettingText.text(1.0 / 3, step: 1.0 / 3, unit: nil, locale: posix) == "0.333333", "a step with endless decimals stops at the cap")
+        #expect(NumberSettingText.text(1.25, step: 1, unit: nil, locale: posix) == "1.25", "a value off the step grid keeps its own fraction")
     }
 
     // MARK: Renders
