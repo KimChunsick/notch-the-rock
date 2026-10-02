@@ -95,7 +95,7 @@ public final class AgentsPlugin: NotchPlugin {
         )
         let rollouts = CodexRollouts(
             root: codexEndpoint.home.appendingPathComponent("sessions"), context: context, bridge: codexBridge,
-            activator: activator, terminal: codexTerminal, logos: logos
+            activator: activator, logos: logos
         )
         // The rollouts follow the same switch as the bridge.
         let codex = CodexModel(
