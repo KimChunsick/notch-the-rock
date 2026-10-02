@@ -230,14 +230,52 @@ struct NotchHostCollapseTests {
         #expect(host.state == .collapsed)
     }
 
+    @Test func R51__hover_intent_from_before_the_answer_keeps_the_fold_with_no_alert_showing() async throws {
+        let first = Task { await host.requestAttention(notice("세션 1 작업을 마쳤어요"), from: agents) }
+        await drain()
+        #expect(host.isExpanded == false)
+
+        // The pointer enters the folded notch's only alert and presses the jump button within the
+        // open intent; the hover comes after the answer, with nothing on screen, and opens the notch.
+        let entered = clock.now
+        advance(by: .milliseconds(80))
+        try await pressJump(on: first)
+        advance(by: .milliseconds(40))
+        host.setHovering(true, intentBegan: entered)
+        #expect(host.state == .expanded)
+        // An alert arrives before the terminal comes forward.
+        let next = Task { await host.requestAttention(notice("세션 2 작업을 마쳤어요"), from: agents) }
+        await drain()
+        advance(by: .milliseconds(300))
+        host.collapse(from: agents)
+        #expect(host.state == .collapsed)
+
+        advance(by: hold - .milliseconds(100))
+        #expect(host.state == .collapsed)
+        advance(by: .milliseconds(100))
+        #expect(host.state == .attention)
+        #expect(host.attention?.request.title == "세션 2 작업을 마쳤어요")
+
+        // Hidden after a moment, it shows for its full five seconds.
+        advance(by: .milliseconds(4900))
+        #expect(host.state == .attention)
+        advance(by: .milliseconds(100))
+        #expect(await next.value == .timedOut)
+        #expect(host.state == .collapsed)
+    }
+
     @Test func R51__user_opening_the_notch_with_no_alert_showing_ends_the_fold() async throws {
         let first = Task { await host.requestAttention(notice("세션 1 작업을 마쳤어요"), from: agents) }
         await drain()
 
         try await pressJump(on: first)
         #expect(host.state == .collapsed)
-        // The user opens the folded notch while the terminal comes forward; then an alert arrives.
-        host.setHovering(true)
+        // The user enters the folded notch after the answer, while the terminal comes forward, and
+        // it opens; then an alert arrives.
+        advance(by: .milliseconds(100))
+        let entered = clock.now
+        advance(by: .milliseconds(120))
+        host.setHovering(true, intentBegan: entered)
         #expect(host.state == .expanded)
         let next = Task { await host.requestAttention(notice("세션 2 작업을 마쳤어요"), from: agents) }
         await drain()

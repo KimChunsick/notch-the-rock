@@ -36,8 +36,9 @@ enum NotchState: Equatable {
 /// already shows, is held for `collapseHold` before the next request shows, with the same timing rules
 /// as behind a takeover. The answer allows one such collapse until another request is answered, or
 /// the folded notch is opened while no request shows (the pointer, the hotkey, a link or a plugin).
-/// A request timing out does not end it, nor does an opening under a shown request, such as a hover
-/// that began before the answer.
+/// A request timing out does not end it, nor does an opening under a shown request, nor a hover
+/// whose open intent began (the pointer entered) before the answer, even if nothing shows when it
+/// opens the notch.
 ///
 /// The expanded notch shows the home (`screen`): plugin tiles and a strip of icons, see `HomeModel`. API for
 /// the keyboard and URL plans (P17, P18): `showHome()`, `open(pluginID:)`, `back()`, `escape()` and
@@ -140,14 +141,15 @@ final class NotchHostModel: NotchHost {
     private var attentions: [PendingAttention] = []
     /// Until when the queue stays hidden after a plugin collapsed the notch on its own answer.
     private var queueHeldUntil: ContinuousClock.Instant?
-    /// The plugin whose request the user answered last, while its `collapse()` still belongs to that
-    /// answer: until it collapses, another request is answered, or the notch opens while no request
-    /// shows.
-    @ObservationIgnored private var answeredPluginID: String?
+    /// The plugin whose request the user answered last and when, while its `collapse()` still belongs
+    /// to that answer: until it collapses, another request is answered, or the notch opens while no
+    /// request shows, other than by a hover whose intent began before the answer.
+    @ObservationIgnored private var lastAnswer: (pluginID: String, at: ContinuousClock.Instant)?
     private var postCount = 0
     private var attentionCount = 0
 
-    @ObservationIgnored private let now: @MainActor () -> ContinuousClock.Instant
+    /// The host's clock: deadlines, answers and the window's hover intents are timed on it.
+    @ObservationIgnored let now: @MainActor () -> ContinuousClock.Instant
     @ObservationIgnored private let pinnedExpansion: Bool?
     @ObservationIgnored private var expiryTask: Task<Void, Never>?
     @ObservationIgnored private let logger = Logger(subsystem: "com.notchtherock.NotchTheRock", category: "plugin")
@@ -186,10 +188,12 @@ final class NotchHostModel: NotchHost {
 
     /// Hovering starts or ends. Ending collapses the notch however it was opened; the window reports
     /// a pointer leaving through `pointerLeft()`, which keeps a held notch open.
-    func setHovering(_ hovering: Bool) {
+    /// - Parameter intentBegan: when the pointer entered the notch for this hover, on `now`; a hover
+    ///   that began before the last answer does not end its collapse.
+    func setHovering(_ hovering: Bool, intentBegan: ContinuousClock.Instant? = nil) {
         isHovering = hovering
         if hovering { isHeldOpen = false }
-        setExpanded(hovering)
+        setExpanded(hovering, intentBegan: intentBegan)
     }
 
     /// The pointer left the notch after hovering it. A held notch stays open: the pointer has not
@@ -277,7 +281,7 @@ final class NotchHostModel: NotchHost {
         guard let index = attentions.firstIndex(where: { $0.id == id }) else { return }
         let pending = attentions.remove(at: index)
         // A timeout or a cancellation is nobody's answer, so the last answer keeps its collapse.
-        if response != .timedOut && response != .cancelled { answeredPluginID = pending.pluginID }
+        if response != .timedOut && response != .cancelled { lastAnswer = (pending.pluginID, now()) }
         pending.continuation.resume(returning: response)
         startShownNotice()
         scheduleExpiry()
@@ -310,11 +314,15 @@ final class NotchHostModel: NotchHost {
         }
     }
 
-    private func setExpanded(_ expanded: Bool) {
+    private func setExpanded(_ expanded: Bool, intentBegan: ContinuousClock.Instant? = nil) {
         guard pinnedExpansion == nil else { return }
-        // Opening the folded notch ends the last answer's collapse, unless a request covers it: then
-        // the user did not see it open (a hover that began before the answer comes after it).
-        if expanded && !isExpanded && state != .attention { answeredPluginID = nil }
+        // Opening the folded notch ends the last answer's collapse, unless the user did not open it
+        // after the answer: a request covers it, or the hover intent began before the answer and
+        // only fires after it. An opening with no intent time (a plugin, a link, a key) ends it.
+        if expanded && !isExpanded && state != .attention, let lastAnswer,
+           intentBegan.map({ $0 > lastAnswer.at }) ?? true {
+            self.lastAnswer = nil
+        }
         isExpanded = expanded
         if !expanded {
             screen = .home
@@ -412,8 +420,8 @@ final class NotchHostModel: NotchHost {
     /// when it shows again; nothing leaves the queue.
     func collapse(from pluginID: String) {
         setExpanded(false)
-        guard answeredPluginID == pluginID else { return }
-        answeredPluginID = nil
+        guard lastAnswer?.pluginID == pluginID else { return }
+        lastAnswer = nil
         queueHeldUntil = now() + Self.collapseHold
         startShownNotice()
         scheduleExpiry()
