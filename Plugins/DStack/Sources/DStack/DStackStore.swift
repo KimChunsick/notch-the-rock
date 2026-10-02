@@ -6,6 +6,9 @@ struct MilestoneProgress: Equatable, Sendable {
     let slug: String
     let done: Int
     let total: Int
+
+    /// Whether every plan of the milestone is done; one without plans is not finished.
+    var isFinished: Bool { total > 0 && done == total }
 }
 
 /// A plan by id and slug, e.g. `P3 widget`.
@@ -38,6 +41,13 @@ struct RunProgress: Equatable, Sendable {
 
     /// Done plans over all plans, as `dstack status` counts them; 0 without plans.
     var fraction: Double { plansTotal == 0 ? 0 : Double(plansDone) / Double(plansTotal) }
+
+    /// Whether every plan is done; a run without plans yet is not finished. The screen and the
+    /// tiles leave a finished run out like a closed one.
+    var isFinished: Bool { plansTotal > 0 && plansDone == plansTotal }
+
+    /// The milestones with plans left, in order: the screen and the tiles leave finished ones out.
+    var remainingMilestones: [MilestoneProgress] { milestones.filter { !$0.isFinished } }
 }
 
 /// What a project's store holds, as far as this plugin can tell.

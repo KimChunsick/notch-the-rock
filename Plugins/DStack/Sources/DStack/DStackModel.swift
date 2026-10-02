@@ -48,18 +48,32 @@ final class DStackModel {
         checkedAt = now()
     }
 
-    /// Projects with an open run or a store this plugin cannot read, the most recently active first.
+    /// Projects with an open run that still has plans left or a store this plugin cannot read, the
+    /// most recently active first. An open run whose plans are all done is left out like a closed
+    /// one; settings still list it.
     var screenProjects: [Project] {
         projects
-            .filter { $0.reading != .noOpenRun }
+            .filter {
+                switch $0.reading {
+                case .open(let run): !run.isFinished
+                case .unsupported: true
+                case .noOpenRun: false
+                }
+            }
             .sorted { ($0.latest ?? .distantPast, $1.name) > ($1.latest ?? .distantPast, $0.name) }
     }
 
-    /// The project the tiles show: the most recently active open run, else a store this plugin
-    /// cannot read, so a tile never says there is no run when there is one it cannot read.
+    /// The project the tiles show: the most recently active open run with plans left, else a store
+    /// this plugin cannot read, so a tile never says there is no run when there is one it cannot read.
     var tileProject: Project? {
         let shown = screenProjects
         return shown.first { if case .open = $0.reading { true } else { false } } ?? shown.first
+    }
+
+    /// Whether some open run is left out because its plans are all done, so a tile without a project
+    /// says finished runs are left out instead of suggesting another folder.
+    var hasFinishedRun: Bool {
+        projects.contains { if case .open(let run) = $0.reading { run.isFinished } else { false } }
     }
 
     /// Scans off the main actor and publishes the result, unless a later refresh already did.
