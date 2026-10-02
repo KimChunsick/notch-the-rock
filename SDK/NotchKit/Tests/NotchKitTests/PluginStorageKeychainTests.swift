@@ -124,7 +124,7 @@ private func finished<T: Sendable>(within timeout: TimeInterval = 10, _ body: @e
     }
 
     @Test func R09__sdk_is_1_2_after_the_keychain_access_api() {
-        #expect(NotchKitSDK.version == SDKVersion(major: 1, minor: 2))
+        #expect(NotchKitSDK.version.supports(SDKVersion(major: 1, minor: 2)))
         #expect(NotchKitSDK.version.supports(SDKVersion(major: 1, minor: 1)))
     }
 }

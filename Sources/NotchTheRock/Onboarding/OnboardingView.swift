@@ -1,4 +1,5 @@
 import AppKit
+import NotchKit
 import SwiftUI
 
 /// The onboarding panel: a glowing mark, a large title with one short line, the step's content, and
@@ -52,17 +53,14 @@ struct OnboardingView: View {
 
     private var footer: some View {
         HStack(spacing: 12) {
-            StepDots(
-                current: OnboardingModel.Step.allCases.firstIndex(of: model.step) ?? 0,
-                count: OnboardingModel.Step.allCases.count
-            )
+            StepDots(current: model.steps.firstIndex(of: model.step) ?? 0, count: model.steps.count)
             Spacer()
-            if model.step == .permissions {
+            if showsLater {
                 Button { model.advance() } label: { KeyHintLabel(title: "나중에", key: "esc", onLight: false) }
                     .buttonStyle(QuietButtonStyle())
                     .keyboardShortcut(.cancelAction)
             } else {
-                // Esc does what 나중에 does on every step; only the 권한 step shows the button.
+                // Esc does what 나중에 does on every step; only the steps with cards show the button.
                 Button("나중에") { model.advance() }
                     .keyboardShortcut(.cancelAction)
                     .opacity(0)
@@ -76,6 +74,13 @@ struct OnboardingView: View {
             .keyboardShortcut(.defaultAction)
         }
         .frame(height: 36)
+    }
+
+    private var showsLater: Bool {
+        switch model.step {
+        case .permissions, .setup: true
+        case .welcome, .usage, .done: false
+        }
     }
 }
 
@@ -118,6 +123,10 @@ private struct OnboardingPage: View {
             switch step {
             case .permissions:
                 PermissionCards(model: model).padding(.top, 22)
+            case .setup(let pluginID):
+                if let setup = model.setup(for: pluginID) {
+                    SetupCards(model: model, step: setup).padding(.top, 22)
+                }
             case .usage:
                 UsageTiles().padding(.top, 22)
             case .welcome, .done:
@@ -132,6 +141,7 @@ private struct OnboardingPage: View {
         switch step {
         case .welcome: "노치에 일을 맡겨요"
         case .permissions: "두 가지만 켜 주세요"
+        case .setup(let pluginID): model.setup(for: pluginID)?.setup.title ?? ""
         case .usage: "이렇게 써요"
         case .done: "준비가 끝났어요"
         }
@@ -141,6 +151,7 @@ private struct OnboardingPage: View {
         switch step {
         case .welcome: "배터리 같은 소식을 노치에서 바로 확인해요."
         case .permissions: "나중에 설정에서 켜도 괜찮아요."
+        case .setup(let pluginID): model.setup(for: pluginID)?.setup.message ?? ""
         case .usage: "노치 하나로 다 할 수 있어요."
         case .done: "건너뛴 항목은 설정에서 다시 켤 수 있어요."
         }
@@ -200,51 +211,99 @@ private struct PermissionCards: View {
     let model: OnboardingModel
 
     var body: some View {
-        let card = RoundedRectangle(cornerRadius: 12, style: .continuous)
         VStack(spacing: 0) {
-            PermissionRow(symbol: "accessibility", title: "손쉬운 사용", detail: "볼륨·밝기 키를 노치에 보여줘요", state: model.accessibilityState) {
-                PermissionAction(title: "권한 열기") { model.requestAccessibility() }
+            OnboardingCardRow(icon: SymbolIcon(name: "accessibility"), title: "손쉬운 사용", detail: "볼륨·밝기 키를 노치에 보여줘요",
+                              card: model.accessibilityState.card(action: "권한 열기")) {
+                model.requestAccessibility()
             }
-            Rectangle()
-                .fill(Color.white.opacity(0.08))
-                .frame(height: 1)
-                .padding(.leading, 58)
-            PermissionRow(symbol: "power", title: "로그인 시 자동 실행", detail: "Mac에 로그인하면 바로 켜져요", state: model.loginItemState) {
-                switch model.loginItemState {
-                case .needsApproval:
-                    PermissionAction(title: "설정 열기") { model.openLoginItemsSettings() }
-                case .failed:
-                    PermissionAction(title: "다시 시도") { model.enableLaunchAtLogin() }
-                case .off, .on:
-                    PermissionAction(title: "켜기") { model.enableLaunchAtLogin() }
+            CardDivider()
+            OnboardingCardRow(icon: SymbolIcon(name: "power"), title: "로그인 시 자동 실행", detail: "Mac에 로그인하면 바로 켜져요",
+                              card: model.loginItemState.card(action: "켜기")) {
+                if model.loginItemState == .needsApproval {
+                    model.openLoginItemsSettings()
+                } else {
+                    model.enableLaunchAtLogin()
                 }
             }
         }
-        .background(card.fill(Color.white.opacity(0.06)))
-        .overlay(card.strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+        .onboardingCardGroup()
     }
 }
 
-private struct PermissionRow<Action: View>: View {
-    let symbol: String
+/// A plugin's setup items, drawn as the permission cards are. Each card reads its item's state while
+/// it draws, so it follows the plugin; only its button sets the item up.
+private struct SetupCards: View {
+    let model: OnboardingModel
+    let step: OnboardingModel.PluginSetupStep
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(step.setup.items.enumerated()), id: \.element.id) { index, item in
+                if index > 0 { CardDivider() }
+                OnboardingCardRow(icon: icon(item), title: item.title, detail: item.detail, card: OnboardingCard(setup: item.state)) {
+                    model.performSetup(item)
+                }
+            }
+        }
+        .onboardingCardGroup()
+    }
+
+    @ViewBuilder private func icon(_ item: PluginSetupItem) -> some View {
+        if let image = item.icon {
+            image.resizable().scaledToFit().foregroundStyle(.white).frame(width: 17, height: 17)
+        } else {
+            SymbolIcon(name: step.symbol)
+        }
+    }
+}
+
+private struct SymbolIcon: View {
+    let name: String
+
+    var body: some View {
+        Image(systemName: name)
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(.white)
+    }
+}
+
+private struct CardDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.08))
+            .frame(height: 1)
+            .padding(.leading, 58)
+    }
+}
+
+extension View {
+    /// The rounded panel the permission and setup cards sit in.
+    fileprivate func onboardingCardGroup() -> some View {
+        let card = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        return background(card.fill(Color.white.opacity(0.06)))
+            .overlay(card.strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+    }
+}
+
+/// One card: icon, title, the detail line (or the failure) and what `card` puts at the end.
+private struct OnboardingCardRow<Icon: View>: View {
+    let icon: Icon
     let title: String
     let detail: String
-    let state: OnboardingModel.PermissionState
-    @ViewBuilder let action: () -> Action
+    let card: OnboardingCard
+    let action: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: symbol)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white)
+            icon
                 .frame(width: 32, height: 32)
                 .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(0.1)))
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.system(size: 13.5, weight: .semibold))
                     .foregroundStyle(.white)
-                if case .failed(let reason) = state {
-                    Text(reason)
+                if let failure = card.failure {
+                    Text(failure)
                         .font(.system(size: 12))
                         .foregroundStyle(OnboardingPalette.failure)
                         .lineLimit(2)
@@ -263,28 +322,42 @@ private struct PermissionRow<Action: View>: View {
     }
 
     @ViewBuilder private var trailing: some View {
-        switch state {
-        case .on:
+        switch card.status {
+        case .done(let label):
             HStack(spacing: 6) {
                 AnimatedCheck()
-                Text(state.label)
+                Text(label)
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(OnboardingPalette.on)
             }
-        case .needsApproval:
+        case .attention(let label, let title):
             HStack(spacing: 10) {
-                Text(state.label)
+                Text(label)
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(OnboardingPalette.attention)
-                action()
+                CardAction(title: title, action: action)
             }
-        case .off, .failed:
-            action()
+        case .action(let title):
+            CardAction(title: title, action: action)
+        case .progress(let label):
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(label)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+        case .note(let text):
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.55))
+                .multilineTextAlignment(.trailing)
+                .lineLimit(2)
+                .frame(maxWidth: 180, alignment: .trailing)
         }
     }
 }
 
-private struct PermissionAction: View {
+private struct CardAction: View {
     let title: String
     let action: () -> Void
 

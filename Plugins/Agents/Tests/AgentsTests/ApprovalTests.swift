@@ -49,6 +49,7 @@ final class LivePlugin {
             context: context,
             socketPath: paths.socket,
             settingsURL: directory.appendingPathComponent("settings.json"),
+            claudeExecutable: nil,
             activator: FakeActivator(),
             codexEndpoint: CodexEndpoint(home: directory),
             codexExecutable: nil,

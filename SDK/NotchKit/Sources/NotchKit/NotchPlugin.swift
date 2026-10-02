@@ -49,12 +49,16 @@ public protocol NotchPlugin: AnyObject {
     /// The plugin's tile in the home grid, or nil for none. Added in SDK 1.1; a plugin built
     /// against 1.0 reads nil.
     var tile: PluginTile? { get }
+    /// The plugin's step in the first-launch onboarding, or nil for none. Added in SDK 1.3; a plugin
+    /// built against an earlier SDK reads nil.
+    var setup: PluginSetup? { get }
 }
 
 extension NotchPlugin {
     public var expandedTab: PluginTab? { nil }
     public var settingsView: AnyView? { nil }
     public var tile: PluginTile? { nil }
+    public var setup: PluginSetup? { nil }
 }
 
 /// A plugin's screen in the expanded notch, opened from the plugin's tile or, without a tile, from

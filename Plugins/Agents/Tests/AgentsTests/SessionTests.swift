@@ -528,6 +528,7 @@ func share(of rect: CGRect, in view: NSView, where matches: (UInt8, UInt8, UInt8
             context: try makeContext(host: host, directory: directory),
             socketPath: paths.socket,
             settingsURL: directory.appendingPathComponent("settings.json"),
+            claudeExecutable: nil,
             activator: activator,
             codexEndpoint: CodexEndpoint(home: directory),
             codexExecutable: nil,

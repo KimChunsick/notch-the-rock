@@ -63,7 +63,7 @@ Clock.notchplugin/Contents/
 |---|---|
 | `CFBundleIdentifier` | `PluginManifest.id` |
 | `CFBundleExecutable` | 패키지 이름 |
-| `NotchKitSDKVersion` | 플러그인을 빌드한 SDK 버전(예: `1.2`) |
+| `NotchKitSDKVersion` | 플러그인을 빌드한 SDK 버전(예: `1.3`) |
 | `NotchPluginEntry` | 진입 함수 이름, `notchkit_plugin_entry` |
 
 NotchKit은 앱 안에 한 벌만 있어요. 플러그인 실행 파일은 NotchKit을 `@rpath/libNotchKit.dylib`로만
@@ -206,6 +206,7 @@ public final class ClockPlugin: NotchPlugin {
         PluginTile(supportedSizes: [.small]) { _ in Text("12:00").padding(8) }
     }
     public var settingsView: AnyView? { nil }       // 선택: 설정 화면의 페이지
+    public var setup: PluginSetup? { nil }          // 선택: 처음 실행 안내의 설정 단계 (SDK 1.3)
 }
 ```
 
@@ -391,6 +392,36 @@ VStack(alignment: .leading, spacing: 8) {
         .frame(minWidth: 200, idealWidth: 200, maxWidth: .infinity)
 }
 ```
+
+### 처음 실행 안내의 설정 단계 (SDK 1.3)
+
+플러그인이 `setup`을 돌려주면 처음 실행 안내 창의 권한 단계와 사용법 단계 사이에 플러그인의 단계가
+하나 생겨요. 켜져 있는 플러그인만 단계가 생기고, 항목이 없는 `PluginSetup(title:message:items:)`은
+`nil`이 돼서 단계가 나오지 않아요. 1.3보다 낮은 SDK로 빌드한 플러그인은 `nil`로 읽혀요.
+
+```swift
+public var setup: PluginSetup? {
+    PluginSetup(title: "Clock 연결", message: "나중에 설정에서 연결해도 괜찮아요.", items: [
+        PluginSetupItem(id: "calendar", title: "캘린더", detail: "일정을 노치에 보여줘요",
+                        state: { self.model.calendarState }, perform: { self.model.connectCalendar() }),
+    ])
+}
+```
+
+항목마다 권한 카드와 같은 모양의 카드가 그려지고, 카드는 `state`를 따라 바뀌어요. 앱은 카드를 그리면서
+`state`를 읽으니 `@Observable` 모델의 값을 돌려주면 바뀐 상태가 바로 보여요.
+
+| `PluginSetupState` | 카드 |
+|---|---|
+| `.notConnected` | `연결` 버튼 |
+| `.working` | 진행 표시, 버튼 없음 |
+| `.connected` | 체크 표시와 `연결됨` |
+| `.unavailable(reason:)` | 버튼 대신 `reason` |
+| `.failed(message:)` | 설명 대신 빨간 `message`와 `다시 시도` 버튼 |
+
+`perform()`은 사용자가 버튼을 누를 때만 한 번 불려요. Enter와 Esc는 다음 단계로 넘어갈 뿐 아무것도
+연결하지 않아요. 오래 걸리는 일은 `Task`로 시작하고, 그동안 `state`를 `.working`으로 돌려줘요. 사용자가
+이 단계를 건너뛸 수 있으니 같은 일을 설정 화면에서도 할 수 있게 해 주세요.
 
 ## 7. 진입 함수
 

@@ -131,6 +131,7 @@ struct SDKCompatibilityTests {
         #expect(status == 0)
         #expect(output.contains("sdk: 1.0 (bundle 1.0, host \(NotchKitSDK.version))"))
         #expect(output.contains("tile: none"))
+        #expect(output.contains("setup: none"), "built before SDK 1.3: no onboarding step")
         #expect(output.contains("OK:"))
     }
 

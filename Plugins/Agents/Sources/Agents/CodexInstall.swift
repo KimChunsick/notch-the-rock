@@ -25,21 +25,6 @@ struct CodexInstall: Equatable {
         return String(output[range].dropFirst("codex-cli ".count))
     }
 
-    /// The first executable among `candidates`. Only looks at the files: the version is read later,
-    /// off the main actor, when the settings page shows it.
-    static func find(candidates: [String]) -> URL? {
-        candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }).map { URL(fileURLWithPath: $0) }
-    }
-
-    /// `PATH`, then where Homebrew and the standalone installer put codex (an app opened from the
-    /// Finder gets a short `PATH`).
-    static func candidates(environment: [String: String] = ProcessInfo.processInfo.environment, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [String] {
-        let folders = (environment["PATH"] ?? "").split(separator: ":").map(String.init)
-            + ["/opt/homebrew/bin", "/usr/local/bin", home.appendingPathComponent(".local/bin").path]
-        var seen: Set<String> = []
-        return folders.filter { !$0.isEmpty && seen.insert($0).inserted }.map { $0 + "/codex" }
-    }
-
     /// What `<executable> --version` reports, or nil when it fails or does not finish within
     /// `timeout`; then codex is killed. Never blocks the caller's thread.
     static func readVersion(_ executable: URL, timeout: Duration = .seconds(3)) async -> String? {

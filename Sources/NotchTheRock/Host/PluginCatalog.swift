@@ -237,6 +237,14 @@ final class PluginCatalog {
         return running.plugin.settingsView
     }
 
+    /// The onboarding steps of the running, enabled plugins that offer setup, in load order.
+    func setupSteps() -> [OnboardingModel.PluginSetupStep] {
+        loadOrder.compactMap { id in
+            guard let entry = running[id], entry.isEnabled, let setup = entry.plugin.setup else { return nil }
+            return OnboardingModel.PluginSetupStep(pluginID: entry.pluginID, symbol: entry.manifest.symbol, setup: setup)
+        }
+    }
+
     /// Deactivates every running plugin; the app is quitting.
     func deactivateAll() {
         for id in loadOrder where running[id]?.isEnabled == true {
