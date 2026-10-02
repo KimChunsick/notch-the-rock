@@ -68,8 +68,14 @@ func renderedPixels(_ view: some View) throws -> (pixels: [UInt8], width: Int, h
     window.setContentSize(size)
     hosting.layoutSubtreeIfNeeded()
     RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-    let rep = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
-    hosting.cacheDisplay(in: hosting.bounds, to: rep)
+    return try withExtendedLifetime(window) { try renderedPixels(of: hosting) }
+}
+
+/// What `view` draws now, at its window's backing scale: premultiplied RGBA rows from the top.
+@MainActor
+func renderedPixels(of view: NSView) throws -> (pixels: [UInt8], width: Int, height: Int, scale: CGFloat) {
+    let rep = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+    view.cacheDisplay(in: view.bounds, to: rep)
     let image = try #require(rep.cgImage)
     let width = image.width, height = image.height
     var pixels = [UInt8](repeating: 0, count: width * height * 4)
@@ -78,7 +84,7 @@ func renderedPixels(_ view: some View) throws -> (pixels: [UInt8], width: Int, h
         space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
     ))
     context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-    return (pixels, width, height, window.backingScaleFactor)
+    return (pixels, width, height, view.window?.backingScaleFactor ?? 1)
 }
 
 /// How far the outermost ink of `view` (any channel at least 14 over black, as the end-to-end

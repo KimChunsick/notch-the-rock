@@ -285,13 +285,20 @@ private actor HeldSampler {
 
 @MainActor
 private func captureRender(_ view: some View, named name: String) throws {
-    guard let directory = ProcessInfo.processInfo.environment["BATTERY_CAPTURE_DIR"] else { return }
+    guard ProcessInfo.processInfo.environment["BATTERY_CAPTURE_DIR"] != nil else { return }
     let hosting = NSHostingView(rootView: view.padding(16).background(.black).environment(\.colorScheme, .dark))
     hosting.appearance = NSAppearance(named: .darkAqua)
     hosting.frame = CGRect(origin: .zero, size: hosting.fittingSize)
     hosting.layoutSubtreeIfNeeded()
-    let rep = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
-    hosting.cacheDisplay(in: hosting.bounds, to: rep)
+    try captureRender(of: hosting, named: name)
+}
+
+/// What `view` draws now, as `<name>.png` in `BATTERY_CAPTURE_DIR` when that is set.
+@MainActor
+private func captureRender(of view: NSView, named name: String) throws {
+    guard let directory = ProcessInfo.processInfo.environment["BATTERY_CAPTURE_DIR"] else { return }
+    let rep = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+    view.cacheDisplay(in: view.bounds, to: rep)
     let png = try #require(rep.representation(using: .png, properties: [:]))
     try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name).png"))
 }
@@ -748,33 +755,6 @@ private func screenSize(_ apps: [AppEnergy], _ peripherals: [PeripheralBattery])
 /// size. The hover is injected as the view's hovered item, the state the item's `.onHover` sets.
 @MainActor
 @Test func R42__hovering_an_icon_shows_its_name_in_a_bubble_inside_the_screen() throws {
-    let margin: CGFloat = 40
-    func bubble(_ apps: [AppEnergy], _ peripherals: [PeripheralBattery], hovering item: BatteryView.Hovered) throws -> (bounds: CGRect, screen: CGSize) {
-        let model = BatteryModel(sampler: nil)
-        model.status = onBattery
-        model.detail = BatteryDetail(apps: apps, peripherals: peripherals)
-        let plain = try renderedPixels(BatteryView(model: model).padding(margin))
-        let shown = try renderedPixels(BatteryView(model: model, hovered: item).padding(margin))
-        try #require(plain.width == shown.width && plain.height == shown.height, "R42 \(item): the bubble changed the screen's size")
-        var minX = plain.width, maxX = -1, minY = plain.height, maxY = -1
-        for y in 0..<plain.height {
-            for x in 0..<plain.width {
-                let i = (y * plain.width + x) * 4
-                if (0..<3).contains(where: { abs(Int(plain.pixels[i + $0]) - Int(shown.pixels[i + $0])) > 24 }) {
-                    minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
-                }
-            }
-        }
-        try #require(maxX >= 0, "R42 \(item): no bubble")
-        let scale = plain.scale
-        let bounds = CGRect(x: CGFloat(minX) / scale - margin, y: CGFloat(minY) / scale - margin,
-                            width: CGFloat(maxX - minX + 1) / scale, height: CGFloat(maxY - minY + 1) / scale)
-        let screen = CGSize(width: CGFloat(plain.width) / scale - 2 * margin, height: CGFloat(plain.height) / scale - 2 * margin)
-        print("R42 bubble for \(item): \(bounds) in a \(screen) screen")
-        #expect(bounds.minX >= -0.5 && bounds.maxX <= screen.width + 0.5 && bounds.minY >= -0.5 && bounds.maxY <= screen.height + 0.5,
-                "R42 \(item): the bubble \(bounds) leaves the \(screen) screen")
-        return (bounds, screen)
-    }
     let long = " with a name much wider than the whole battery screen, so its bubble ends in an ellipsis"
     var longApps = injectedApps
     longApps[0].name += long
@@ -792,4 +772,182 @@ private func screenSize(_ apps: [AppEnergy], _ peripherals: [PeripheralBattery])
     model.status = onBattery
     model.detail = BatteryDetail(apps: injectedApps, peripherals: twoPeripherals)
     try captureRender(BatteryView(model: model, hovered: .app(injectedApps[1].bundlePath)), named: "R42-render-hover")
+}
+
+/// Where the bubble for `item` shows, from the pixels that change when it is hovered, in a screen drawn
+/// with a margin around it so that a bubble leaving the screen would show too; it must stay inside.
+@MainActor
+private func bubble(_ apps: [AppEnergy], _ peripherals: [PeripheralBattery], hovering item: BatteryView.Hovered) throws -> (bounds: CGRect, screen: CGSize) {
+    let margin: CGFloat = 40
+    let model = BatteryModel(sampler: nil)
+    model.status = onBattery
+    model.detail = BatteryDetail(apps: apps, peripherals: peripherals)
+    let plain = try renderedPixels(BatteryView(model: model).padding(margin))
+    let shown = try renderedPixels(BatteryView(model: model, hovered: item).padding(margin))
+    try #require(plain.width == shown.width && plain.height == shown.height, "R42 \(item): the bubble changed the screen's size")
+    var minX = plain.width, maxX = -1, minY = plain.height, maxY = -1
+    for y in 0..<plain.height {
+        for x in 0..<plain.width {
+            let i = (y * plain.width + x) * 4
+            if (0..<3).contains(where: { abs(Int(plain.pixels[i + $0]) - Int(shown.pixels[i + $0])) > 24 }) {
+                minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+    }
+    try #require(maxX >= 0, "R42 \(item): no bubble")
+    let scale = plain.scale
+    let bounds = CGRect(x: CGFloat(minX) / scale - margin, y: CGFloat(minY) / scale - margin,
+                        width: CGFloat(maxX - minX + 1) / scale, height: CGFloat(maxY - minY + 1) / scale)
+    let screen = CGSize(width: CGFloat(plain.width) / scale - 2 * margin, height: CGFloat(plain.height) / scale - 2 * margin)
+    print("R42 bubble for \(item): \(bounds) in a \(screen) screen")
+    #expect(bounds.minX >= -0.5 && bounds.maxX <= screen.width + 0.5 && bounds.minY >= -0.5 && bounds.maxY <= screen.height + 0.5,
+            "R42 \(item): the bubble \(bounds) leaves the \(screen) screen")
+    return (bounds, screen)
+}
+
+// MARK: - More than the host's width
+
+/// The widest content the host shows (the home grid's width); a wider screen is offered this width.
+private let hostMaxWidth: CGFloat = 390
+
+private let manyApps = injectedApps + [
+    AppEnergy(bundlePath: "/System/Applications/Notes.app", name: "메모", power: 2.4),
+    AppEnergy(bundlePath: "/System/Applications/Mail.app", name: "Mail", power: 1.8),
+]
+
+/// The three injected devices and five made-up ones, two of them with several batteries.
+private let eightPeripherals = injectedPeripherals + [
+    PeripheralBattery(id: "00112233aa04", name: "Test Buds", kind: .airPods,
+                      levels: [.init(part: .left, percentage: 100), .init(part: .right, percentage: 95), .init(part: .case, percentage: 40)]),
+    PeripheralBattery(id: "00112233aa05", name: "Test Trackpad", kind: .trackpad, levels: [.init(part: .main, percentage: 88)]),
+    PeripheralBattery(id: "00112233aa06", name: "Test Headphones", kind: .headphones, levels: [.init(part: .main, percentage: 100)]),
+    PeripheralBattery(id: "00112233aa07", name: "Test Pods", kind: .airPodsPro, levels: [.init(part: .left, percentage: 12), .init(part: .case, percentage: 64)]),
+    PeripheralBattery(id: "00112233aa08", name: "Test Remote", kind: .other, levels: [.init(part: .main, percentage: 31)]),
+]
+
+/// Every scroll view in `view` and below it.
+@MainActor
+private func scrollViews(in view: NSView) -> [NSScrollView] {
+    ((view as? NSScrollView).map { [$0] } ?? []) + view.subviews.flatMap { scrollViews(in: $0) }
+}
+
+/// The brightest channel of `image` inside `rect` (points from the top left).
+private func brightest(_ image: (pixels: [UInt8], width: Int, height: Int, scale: CGFloat), in rect: CGRect) -> UInt8 {
+    var value: UInt8 = 0
+    for y in max(Int(rect.minY * image.scale), 0)..<min(Int(rect.maxY * image.scale), image.height) {
+        for x in max(Int(rect.minX * image.scale), 0)..<min(Int(rect.maxX * image.scale), image.width) {
+            let i = (y * image.width + x) * 4
+            value = max(value, image.pixels[i], image.pixels[i + 1], image.pixels[i + 2])
+        }
+    }
+    return value
+}
+
+/// Five apps and eight peripherals are wider than the host lets a screen be. Offered the host's largest
+/// width, as the host offers it, the screen keeps the height of one row and its battery row stays put;
+/// the lower row scrolls sideways with every icon and chip at its own width, each edge that cuts the row
+/// faded out, and scrolling reaches the last chip. The scroll view is the one the trackpad and the
+/// mouse wheel move; the test moves it as they do, through its clip view.
+@MainActor
+@Test func R42__a_row_wider_than_the_host_allows_scrolls_to_its_last_chip() throws {
+    let view = screen(apps: manyApps, peripherals: eightPeripherals)
+    let own = NSHostingView(rootView: view).fittingSize
+    let oneRow = screenSize(injectedApps, twoPeripherals)
+    let heroHeight = screenSize([], []).height
+    print("R42 5 apps + 8 peripherals: own size \(own), offered \(hostMaxWidth) pt")
+    try #require(own.width > hostMaxWidth + 40, "the fixture fits the host: \(own)")
+
+    let hosting = NSHostingView(rootView: view.frame(width: hostMaxWidth).background(.black).environment(\.colorScheme, .dark))
+    let window = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
+    window.appearance = NSAppearance(named: .darkAqua)
+    window.contentView = hosting
+    window.setContentSize(hosting.fittingSize)
+    func settle() {
+        hosting.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        hosting.layoutSubtreeIfNeeded()
+    }
+    settle()
+    let size = hosting.bounds.size
+    #expect(abs(size.width - hostMaxWidth) <= 0.5 && abs(size.height - oneRow.height) <= 0.5,
+            "R42: offered \(hostMaxWidth) pt the screen is \(size), not \(hostMaxWidth) wide and \(oneRow.height) pt tall like one row")
+
+    let scrollView = try #require(scrollViews(in: hosting).first, "R42: nothing in the lower row scrolls")
+    let clip = scrollView.contentView
+    let content = clip.documentRect
+    print("R42 lower row: content \(content.width) pt in a \(clip.bounds.width) pt viewport (screen's own width \(own.width) pt)")
+    // Laid out at its own width (fittingSize rounds to whole points): no icon or chip gives up any of
+    // its width, or of its reading, to fit.
+    #expect(abs(content.width - own.width) <= 1, "R42: the row's content is \(content.width) pt, not its own \(own.width) pt")
+    #expect(!scrollView.hasHorizontalScroller, "R42: the row shows a scroll bar")
+    #expect(clip.bounds.width <= hostMaxWidth + 0.5 && content.width > clip.bounds.width + 40,
+            "R42: the row's \(content.width) pt content does not overflow a \(clip.bounds.width) pt viewport")
+
+    let rowBand = CGRect(x: 0, y: heroHeight + 6, width: size.width, height: size.height - heroHeight - 6)
+    let maxOffset = content.width - clip.bounds.width
+    var heroAtRest: ArraySlice<UInt8>?
+    var last: (pixels: [UInt8], width: Int, height: Int, scale: CGFloat)?
+    for offset in [0, 0.25, 0.5, 0.75, 1].map({ maxOffset * $0 }) {
+        clip.scroll(to: NSPoint(x: content.minX + offset, y: clip.bounds.minY))
+        scrollView.reflectScrolledClipView(clip)
+        settle()
+        let image = try renderedPixels(of: hosting)
+        let visible = clip.documentVisibleRect
+        let leading = brightest(image, in: CGRect(x: 0, y: rowBand.minY, width: 1, height: rowBand.height))
+        let trailing = brightest(image, in: CGRect(x: size.width - 1, y: rowBand.minY, width: 1, height: rowBand.height))
+        print("R42 row scrolled to \(visible.minX - content.minX) of \(maxOffset) pt: brightest at the leading edge \(leading), at the trailing edge \(trailing)")
+        #expect(abs(visible.minX - content.minX - offset) <= 0.5, "R42: the row did not scroll to \(offset) pt")
+        if offset > 0 { #expect(leading < 14, "R42: the row's cut leading edge is not faded at \(offset) pt") }
+        if offset < maxOffset { #expect(trailing < 14, "R42: the row's cut trailing edge is not faded at \(offset) pt") }
+        let hero = image.pixels[0..<(Int(heroHeight * image.scale) * image.width * 4)]
+        if let heroAtRest { #expect(hero == heroAtRest, "R42: the battery row moved with the scroll at \(offset) pt") } else { heroAtRest = hero }
+        if offset == 0 { try captureRender(of: hosting, named: "R42-render-overflow") }
+        last = image
+    }
+    // At the end the last chip shows whole up to the trailing edge, which no longer fades.
+    let end = try #require(last)
+    #expect(abs(clip.documentVisibleRect.maxX - content.maxX) <= 0.5, "R42: scrolling does not reach the end of the row")
+    #expect(brightest(end, in: CGRect(x: size.width - 2, y: rowBand.minY, width: 2, height: rowBand.height)) >= 14,
+            "R42: the last chip does not reach the trailing edge at the end of the row")
+    try captureRender(of: hosting, named: "R42-render-overflow-end")
+}
+
+/// A peripheral's bubble shows its name and each reading with its part, only the parts it reports:
+/// AirPods with only the left bud, only the right bud or only the case at 80% have the same chip but
+/// different bubbles. An app's bubble shows its name alone.
+@MainActor
+@Test func R42__a_peripherals_bubble_names_the_part_of_each_reading() throws {
+    func airPods(_ parts: [(PeripheralBattery.Level.Part, Int)]) -> PeripheralBattery {
+        PeripheralBattery(id: "001122334455", name: "AirPods Pro", kind: .airPodsPro, levels: parts.map { .init(part: $0.0, percentage: $0.1) })
+    }
+    let partial = [airPods([(.left, 80)]), airPods([(.right, 80)]), airPods([(.case, 80)])]
+    #expect(partial.map(\.levelsText) == ["왼쪽 80%", "오른쪽 80%", "케이스 80%"])
+    func render(_ device: PeripheralBattery, hovered: Bool) throws -> [UInt8] {
+        let model = BatteryModel(sampler: nil)
+        model.status = onBattery
+        model.detail = BatteryDetail(apps: injectedApps, peripherals: [device])
+        return try renderedPixels(BatteryView(model: model, hovered: hovered ? .peripheral(device.id) : nil)).pixels
+    }
+    let chips = try partial.map { try render($0, hovered: false) }
+    let bubbles = try partial.map { try render($0, hovered: true) }
+    #expect(chips[0] == chips[1] && chips[1] == chips[2], "the fixture's chips differ")
+    #expect(bubbles[0] != bubbles[1] && bubbles[1] != bubbles[2] && bubbles[0] != bubbles[2],
+            "R42: the bubble does not tell the left bud, the right bud and the case apart")
+
+    // The bubble is the name with the readings after it for a peripheral, the name alone for an app.
+    let leftAndCase = airPods([(.left, 80), (.case, 50)])
+    for device in partial + [leftAndCase] {
+        let shown = try bubble(injectedApps, [device], hovering: .peripheral(device.id)).bounds
+        let expected = NSHostingView(rootView: NameBubble(name: device.name, detail: device.levelsText)).fittingSize
+        #expect(abs(shown.width - expected.width) <= 1.5,
+                "R42: the bubble for \(device.levelsText) is \(shown.width) pt wide, not the \(expected.width) pt of its name and readings")
+    }
+    let app = try bubble(injectedApps, [], hovering: .app(injectedApps[0].bundlePath)).bounds
+    let nameOnly = NSHostingView(rootView: NameBubble(name: injectedApps[0].name)).fittingSize
+    #expect(abs(app.width - nameOnly.width) <= 1.5, "R42: the app's bubble is \(app.width) pt wide, not the \(nameOnly.width) pt of its name")
+
+    let model = BatteryModel(sampler: nil)
+    model.status = onBattery
+    model.detail = BatteryDetail(apps: injectedApps, peripherals: [leftAndCase])
+    try captureRender(BatteryView(model: model, hovered: .peripheral(leftAndCase.id)), named: "R42-render-bubble-parts")
 }
