@@ -109,8 +109,9 @@ final class FakeCodexProcesses {
         let lookup: @MainActor (String?) -> TerminalLocation? = { cwd in cwd.flatMap { terminals.byFolder[$0] } }
         bridge = CodexBridge(context: context, activator: activator, terminal: lookup)
         watcher = CodexRollouts(
-            root: tree.root, context: context, bridge: bridge, activator: activator, terminal: lookup,
-            processTerminal: { [ancestry] in ancestry.terminal(of: $0) }, now: { [clock] in clock.now }, processes: processes.snapshot
+            root: tree.root, context: context, bridge: bridge, activator: activator,
+            processTerminal: { [ancestry] in terminals.terminal(of: $0) ?? ancestry.terminal(of: $0) },
+            codexProcesses: terminals.processes, now: { [clock] in clock.now }, processes: processes.snapshot
         )
         bridge.screen.sessions.isAlive = processes.isAlive
         bridge.open { [outbox] in outbox.messages.append($0) }
@@ -566,6 +567,75 @@ final class FakeCodexProcesses {
         #expect(host.requests.count == 1 && activator.activated == [ghostty])
     }
 
+    /// Two TUIs work in one folder, the first in Terminal, and the second resumes a session while its
+    /// ancestors cannot be read: the session goes to the folder's one terminal found, the first one's. Once
+    /// the second's ancestors can be read, the next pass moves its row and its next alert to Ghostty, and
+    /// they stay there while the second has it, whatever its ancestors read later.
+    @Test func R33__a_session_sent_by_its_folder_moves_to_its_process_terminal_once_found() async throws {
+        let first: pid_t = 5001, second: pid_t = 5002
+        let folder = "/Users/me/tide-pool"
+        let terminal = TerminalLocation(bundleID: "com.apple.Terminal", tty: "/dev/ttys001")
+        let ghostty = TerminalLocation(bundleID: "com.mitchellh.ghostty", tty: "/dev/ttys003")
+        let jump = AttentionResponse.answered(AttentionAnswer(buttonID: CodexBridge.jumpButtonID, choices: [:], text: nil))
+        let resumed = "019b0000-0000-7000-8000-00000000f010"
+        let next = "019b0000-0000-7000-8000-00000000f011"
+        processes.cli = nil
+        ancestry.run(first, in: "/System/Applications/Utilities/Terminal.app", tty: "/dev/ttys001")
+        processes.others = [first, second]
+        processes.owners[resumed] = second
+        processes.owners[next] = first
+        terminals.running = [CodexProcess(pid: first, cwd: folder), CodexProcess(pid: second, cwd: folder)]
+        await scan()
+        try tree.write(resumed, Self.cli(resumed, "tide-pool"))
+        try tree.write(next, Self.cli(next, "tide-pool"))
+        await scan()
+        #expect(session(resumed)?.pid == second && session(resumed)?.terminal == terminal)
+        #expect(session(next)?.pid == first && session(next)?.terminal == terminal)
+
+        // The second's ancestors can be read now; nothing else changed.
+        ancestry.run(second, in: "/Applications/Ghostty.app", tty: "/dev/ttys003")
+        await scan()
+        #expect(session(resumed)?.pid == second && session(resumed)?.terminal == ghostty)
+        #expect(session(next)?.terminal == terminal)
+        host.responses = [jump]
+        try tree.append(resumed, RolloutTree.event("task_complete", turn: "t1") + "\n")
+        await scan()
+        #expect(host.requests.count == 1 && activator.activated == [ghostty])
+
+        // Found through its ancestors, the terminal stays while the second has the session.
+        ancestry.end(second)
+        await scan()
+        #expect(session(resumed)?.pid == second && session(resumed)?.terminal == ghostty)
+    }
+
+    /// A pass that reads several records of a session whose terminal is not found looks for it once: the
+    /// process's ancestors are traced once and the `codex` processes listed once. The next pass looks again,
+    /// once.
+    @Test func R33__a_pass_looks_for_a_missing_terminal_once() async throws {
+        let holder: pid_t = 5001
+        let resumed = "019b0000-0000-7000-8000-00000000f012"
+        processes.cli = nil
+        processes.others = [holder]
+        processes.owners[resumed] = holder
+        terminals.running = [CodexProcess(pid: holder, cwd: "/Users/me/tide-pool")]
+        await scan()
+        ancestry.traced = []
+        terminals.listings = 0
+        try tree.write(resumed, Self.cli(resumed, "tide-pool") + [
+            RolloutTree.event("task_complete", turn: "t1"), RolloutTree.event("task_started", turn: "t2"), RolloutTree.event("turn_aborted", turn: "t2"),
+        ])
+        await scan()
+        #expect(session(resumed)?.pid == holder && session(resumed)?.terminal == nil)
+        #expect(ancestry.traced == [holder] && terminals.listings == 1)
+
+        ancestry.traced = []
+        terminals.listings = 0
+        try tree.append(resumed, [RolloutTree.event("task_started", turn: "t3"), RolloutTree.event("task_complete", turn: "t3")].map { $0 + "\n" }.joined())
+        await scan()
+        #expect(session(resumed)?.state == .idle && session(resumed)?.terminal == nil)
+        #expect(ancestry.traced == [holder] && terminals.listings == 1)
+    }
+
     /// What a lookup by folder finds when the `codex` TUIs `pids` work in `folder`: their one terminal, or
     /// nothing when they run in different ones.
     func byFolder(_ folder: String, _ pids: [pid_t]) -> TerminalLocation? {
@@ -590,20 +660,42 @@ final class FakeCodexProcesses {
     }
 }
 
-/// The terminal each folder's TUI runs in; a test moves a folder to another terminal.
+/// The terminal each folder's TUI runs in; a test moves a folder to another terminal. The watcher sees
+/// one made-up `codex` TUI working in each folder, whose terminal is the folder's, and the `running`
+/// processes, traced through their ancestors.
 @MainActor
 final class FakeTerminals {
+    /// The made-up TUIs' first pid; they are numbered in folder order.
+    static let firstTUI: pid_t = 9000
     var byFolder: [String: TerminalLocation]
+    var running: [CodexProcess] = []
+    /// How many times the watcher listed the `codex` processes.
+    var listings = 0
 
     init(_ byFolder: [String: TerminalLocation]) {
         self.byFolder = byFolder
     }
+
+    func processes() -> [CodexProcess] {
+        listings += 1
+        return folders.enumerated().map { CodexProcess(pid: Self.firstTUI + pid_t($0.offset), cwd: $0.element) } + running
+    }
+
+    /// The terminal of a made-up TUI; nil for any other process.
+    func terminal(of pid: pid_t) -> TerminalLocation? {
+        let index = Int(pid) - Int(Self.firstTUI)
+        return folders.indices.contains(index) ? byFolder[folders[index]] : nil
+    }
+
+    private var folders: [String] { byFolder.keys.sorted() }
 }
 
 /// Each process's ancestors as the terminal search sees them; a test starts and ends processes.
 @MainActor
 final class FakeAncestry {
     var entries: [pid_t: ProcessEntry] = [:]
+    /// The processes traced, in order.
+    var traced: [pid_t] = []
 
     /// `codex` (`pid`) → its shell (`pid` + 100) → the terminal app at `app` (`pid` + 200), on `tty`.
     func run(_ pid: pid_t, in app: String, tty: String) {
@@ -617,7 +709,8 @@ final class FakeAncestry {
     }
 
     func terminal(of pid: pid_t) -> TerminalLocation? {
-        TerminalFinder(table: FakeProcessTable(entries: entries), bundleIdentifier: { TerminalFinderTests.apps[$0] }).find(startingAt: pid)
+        traced.append(pid)
+        return TerminalFinder(table: FakeProcessTable(entries: entries), bundleIdentifier: { TerminalFinderTests.apps[$0] }).find(startingAt: pid)
     }
 }
 
