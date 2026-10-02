@@ -23,7 +23,10 @@ import SwiftUI
 /// is read of it later; a rollout that ended comes back only with a new turn. A session is listed only
 /// while a process has its rollout open (`CodexProcesses`), the desktop app's threads too: every pass
 /// gives each row the process that has its file open now, takes away the rows none has open and lists
-/// again the sessions a process has open but the list dropped, whether or not their files changed.
+/// again the sessions a process has open but the list dropped, whether or not their files changed. What
+/// each session's records tell is kept whether or not it is listed, a process has its file open or the
+/// bridge follows it, so a session listed again shows its turn as it is; a session given to another
+/// process takes that process's terminal, for its row and its alerts.
 @MainActor
 final class CodexRollouts {
     static let interval: Duration = .seconds(2)
@@ -47,11 +50,14 @@ final class CodexRollouts {
     private var running: CodexProcesses?
 
     private var files: [String: Watched] = [:]
-    /// Where each session's row and alerts take the user, by session id; nil when nothing was found.
+    /// What each session's records told last, by session id, whether or not it is listed, a process has
+    /// its rollout open or the bridge follows it: a session the list takes again shows it.
+    private var told: [String: Told] = [:]
+    /// Where each session's row and alerts take the user, by session id: looked up for the process its
+    /// row was given last; nil when nothing was found.
     private var targets: [String: TerminalLocation?] = [:]
-    /// The sessions this watcher put on the list, each with its row as last seen: one the list dropped
-    /// comes back as it was once a process has its rollout open.
-    private var listed: [String: AgentSession] = [:]
+    /// The sessions this watcher put on the list.
+    private var listed: Set<String> = []
     /// Sessions whose rollout ended (`shutdown_complete`): only a new turn brings one back.
     private var ended = RecentIDs(capacity: CodexBridge.remembered)
     private var indexed = false
@@ -71,6 +77,13 @@ final class CodexRollouts {
         var queued: [(record: RolloutRecord, at: Date?)] = []
         /// When the file was last seen written.
         var modified: Date
+    }
+
+    /// A session as its records tell it: its state, when that last changed and its context use.
+    private struct Told {
+        var state: AgentSessionState
+        var changed: Date
+        var contextPercent: Int?
     }
 
     init(
@@ -115,10 +128,11 @@ final class CodexRollouts {
         discovered = nil
         files.removeAll()
         ended = RecentIDs(capacity: CodexBridge.remembered)
-        for session in listed.keys where !bridge.owns(session) {
+        for session in listed where !bridge.owns(session) {
             list.remove(AgentSession.Key(agent: .codex, id: session))
         }
         listed.removeAll()
+        told.removeAll()
         targets.removeAll()
         for notice in notices.values {
             notice.task.cancel()
@@ -162,7 +176,8 @@ final class CodexRollouts {
                 if case .meta(let meta) = record {
                     guard watched.meta == nil else { continue }
                     watched.meta = meta
-                    show(meta, nil, at: date, in: watched.file)
+                    remember(record, meta, at: date)
+                    show(meta, in: watched.file)
                     // What waited for the session, each as it was read: history stays silent.
                     for (queued, at) in watched.queued {
                         if let alert = apply(queued, meta, silent: at != nil, at: at, in: watched.file) { alerts.append(alert) }
@@ -189,41 +204,31 @@ final class CodexRollouts {
     /// this pass or the list's liveness check, and whether or not the files changed. A row moves to the
     /// process that has its file open (a session resumed in another process), and leaves at once when
     /// none has it (a TUI that moved on to a new session, a desktop thread the app unloaded), even while
-    /// the process that had it runs on. A session a process has open without a row is listed again: as
-    /// its row was when this watcher last saw it (the liveness check dropped it before a pass saw its new
-    /// process), or else waiting since its file was last written, with no alert either way. A session the
-    /// bridge follows or closed is the bridge's; one that ended comes back only with a new turn.
+    /// the process that had it runs on. A session a process has open without a row is listed again as its
+    /// records tell it (the liveness check dropped it before a pass saw its new process, or the bridge let
+    /// it go), with no alert. A session the bridge follows or closed is the bridge's; one that ended comes
+    /// back only with a new turn.
     private func reconcile() {
         let candidates = files.values.filter { $0.meta.map { follows($0) && !ended.contains($0.id) } ?? false }
-        let rows = listed.keys.filter { !bridge.owns($0) && !bridge.isClosed($0) }
+        let rows = listed.filter { !bridge.owns($0) && !bridge.isClosed($0) }
         guard !candidates.isEmpty || !rows.isEmpty else { return }
         if running == nil { running = processes() }
-        var holders: [String: (pid: pid_t, watched: Watched)] = [:]
+        var holders: [String: (pid: pid_t, meta: RolloutMeta)] = [:]
         for watched in candidates {
-            guard let session = watched.meta?.id, holders[session] == nil, let pid = running?.holder(of: watched.file) else { continue }
-            holders[session] = (pid, watched)
+            guard let meta = watched.meta, holders[meta.id] == nil, let pid = running?.holder(of: watched.file) else { continue }
+            holders[meta.id] = (pid, meta)
         }
         for session in rows where holders[session] == nil {
-            let key = AgentSession.Key(agent: .codex, id: session)
-            guard let row = list[key] else { continue }
-            listed[session] = row
-            list.remove(key)
+            list.remove(AgentSession.Key(agent: .codex, id: session))
+            listed.remove(session)
         }
-        for (session, holder) in holders {
-            let key = AgentSession.Key(agent: .codex, id: session)
-            if list[key] != nil {
-                list.setProcess(key, holder.pid)
-            } else if let row = listed[session] {
-                list.update(key, folder: row.folder, state: row.state, terminal: row.terminal, pid: holder.pid, changed: row.changed)
-                list.setContext(key, row.contextPercent)
-            } else if let meta = holder.watched.meta {
-                show(meta, nil, at: holder.watched.modified, in: holder.watched.file)
-            }
-            listed[session] = list[key]
+        for holder in holders.values {
+            hold(holder.meta, by: holder.pid)
         }
     }
 
     private func apply(_ record: RolloutRecord, _ meta: RolloutMeta, silent: Bool, at date: Date?, in file: RolloutFile) -> Task<Void, Never>? {
+        remember(record, meta, at: date)
         guard follows(meta) else { return nil }
         if ended.contains(meta.id) {
             // Resumed: a new turn brings an ended session back. Nothing else does.
@@ -233,42 +238,76 @@ final class CodexRollouts {
         switch record {
         case .meta:
             return nil
-        case .started:
-            show(meta, .working, at: date, in: file)
-        case .aborted:
-            show(meta, .idle, at: date, in: file)
+        case .started, .aborted:
+            show(meta, in: file)
         case .completed(let turn):
             // The row is idle either way; only the alert is once per turn, here or in the bridge.
-            show(meta, .idle, at: date, in: file)
+            show(meta, in: file)
             guard !silent, bridge.claimTurnAlert(meta.id, turn: turn) else { return nil }
             return notify(meta)
         case .ended:
             ended.insert(meta.id)
             list.remove(AgentSession.Key(agent: .codex, id: meta.id))
-            listed[meta.id] = nil
+            listed.remove(meta.id)
         case .context(let percent):
             list.setContext(AgentSession.Key(agent: .codex, id: meta.id), percent)
         }
         return nil
     }
 
-    /// Moves the session's row; a session seen for the first time gets its jump target here. A session
-    /// joins the list only while a process has `file` open, and its row keeps that process, so it leaves
-    /// once the process is gone even without a `shutdown_complete`.
-    private func show(_ meta: RolloutMeta, _ state: AgentSessionState?, at date: Date?, in file: RolloutFile) {
-        guard follows(meta), !ended.contains(meta.id) else { return }
+    /// Keeps what `record` tells of `meta`'s session, read at `date` (nil: now), whether or not it is
+    /// listed, a process has its rollout open or the bridge follows it. A session first told of is idle.
+    private func remember(_ record: RolloutRecord, _ meta: RolloutMeta, at date: Date?) {
+        guard !meta.ignored else { return }
+        let state: AgentSessionState?
+        switch record {
+        case .meta: state = nil
+        case .started: state = .working
+        case .completed, .aborted: state = .idle
+        case .ended: return
+        case .context(let percent):
+            told[meta.id]?.contextPercent = percent
+            return
+        }
+        let previous = told[meta.id]
+        // The list's clock, as the row would take the event without a date.
+        told[meta.id] = Told(state: state ?? previous?.state ?? .idle, changed: date ?? list.now(), contextPercent: previous?.contextPercent)
+    }
+
+    /// Brings the session's row to what its records tell and gives it the process that has `file` open,
+    /// if one has. A session joins the list only while a process has `file` open, and its row keeps that
+    /// process, so it leaves once the process is gone even without a `shutdown_complete`.
+    private func show(_ meta: RolloutMeta, in file: RolloutFile) {
+        guard follows(meta), !ended.contains(meta.id), let told = told[meta.id] else { return }
         let key = AgentSession.Key(agent: .codex, id: meta.id)
-        var pid: pid_t?
-        if list[key] == nil {
-            if running == nil { running = processes() }
-            guard let process = running?.holder(of: file) else { return }
-            pid = process
+        if list[key] != nil {
+            list.update(key, folder: meta.folder, state: told.state, changed: told.changed)
         }
-        if targets[meta.id] == nil {
-            targets[meta.id] = .some(meta.desktop ? Self.desktopApp : terminal(meta.cwd))
+        if running == nil { running = processes() }
+        if let pid = running?.holder(of: file) { hold(meta, by: pid) }
+    }
+
+    /// Gives `meta`'s session to `pid`, the process that has its rollout open now: lists it as its records
+    /// tell it when it is not listed, or moves its row when another process had it. Either way its row and
+    /// its alerts take the user to that process's terminal from then on, looked up as for a new session.
+    private func hold(_ meta: RolloutMeta, by pid: pid_t) {
+        let key = AgentSession.Key(agent: .codex, id: meta.id)
+        if let row = list[key] {
+            guard row.pid != pid else { return }
+            list.setProcess(key, pid, terminal: retarget(meta))
+            return
         }
-        list.update(key, folder: meta.folder, state: state, terminal: targets[meta.id] ?? nil, pid: pid, changed: date)
-        listed[meta.id] = list[key]
+        let told = told[meta.id]
+        list.update(key, folder: meta.folder, state: told?.state, terminal: retarget(meta), pid: pid, changed: told?.changed)
+        list.setContext(key, told?.contextPercent)
+        listed.insert(meta.id)
+    }
+
+    /// Looks up again where the session's row and alerts take the user, for the process that has it now.
+    private func retarget(_ meta: RolloutMeta) -> TerminalLocation? {
+        let target = meta.desktop ? Self.desktopApp : terminal(meta.cwd)
+        targets[meta.id] = .some(target)
+        return target
     }
 
     /// A session this watcher keeps: not an exec run or subagent, not followed by the bridge and not

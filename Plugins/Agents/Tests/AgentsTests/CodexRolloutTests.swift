@@ -93,6 +93,8 @@ final class FakeCodexProcesses {
     let clock = TestClock()
     let tree: RolloutTree
     let processes: FakeCodexProcesses
+    /// The terminal of the TUI working in each folder, as the bridge and the watcher look it up.
+    let terminals: FakeTerminals
     let bridge: CodexBridge
     let watcher: CodexRollouts
 
@@ -100,8 +102,9 @@ final class FakeCodexProcesses {
         tree = try RolloutTree()
         processes = FakeCodexProcesses(tree: tree)
         let context = try makeContext(host: host, directory: try makeDirectory())
-        let terminals = ["/Users/me/notch-the-rock": ghostty, "/Users/me/rock-garden": ghostty]
-        let lookup: @MainActor (String?) -> TerminalLocation? = { cwd in cwd.flatMap { terminals[$0] } }
+        let terminals = FakeTerminals(["/Users/me/notch-the-rock": ghostty, "/Users/me/rock-garden": ghostty])
+        self.terminals = terminals
+        let lookup: @MainActor (String?) -> TerminalLocation? = { cwd in cwd.flatMap { terminals.byFolder[$0] } }
         bridge = CodexBridge(context: context, activator: activator, terminal: lookup)
         watcher = CodexRollouts(
             root: tree.root, context: context, bridge: bridge, activator: activator, terminal: lookup,
@@ -374,8 +377,7 @@ final class FakeCodexProcesses {
     }
 
     /// A session no process has open is not listed however many passes look at it; once a process opens
-    /// it without writing to it, it lists as waiting since its file was last written, whatever turn its
-    /// records left open, and without an alert.
+    /// it without writing to it, it lists as its records tell (here a turn they left open), without an alert.
     @Test func R33__a_rollout_nobody_has_open_is_listed_only_once_a_process_opens_it() async throws {
         let unheld = "019b0000-0000-7000-8000-00000000f009"
         let written = Date(timeIntervalSinceNow: -600).rounded
@@ -391,8 +393,102 @@ final class FakeCodexProcesses {
         processes.closed = []
         await scan()
         let row = try #require(session(unheld))
-        #expect(row.pid == 4001 && row.state == .idle && row.changed == written && row.folder == "tide-pool")
+        #expect(row.pid == 4001 && row.state == .working && row.changed > written && row.folder == "tide-pool")
         #expect(host.requests.isEmpty)
+    }
+
+    /// A turn that ends while no process has the session's rollout open, after the list dropped its row,
+    /// is what the next process to open the file finds: the session comes back waiting, not working.
+    @Test func R33__a_turn_that_ends_while_nobody_has_the_rollout_open_lists_again_idle() async throws {
+        let first: pid_t = 5001, second: pid_t = 5002
+        let resumed = "019b0000-0000-7000-8000-00000000f00a"
+        processes.cli = nil
+        processes.others = [first]
+        processes.owners[resumed] = first
+        await scan()
+        try tree.write(resumed, Self.cli(resumed, "rock-garden"))
+        await scan()
+        #expect(session(resumed)?.state == .working)
+
+        // The first process ends the turn and exits; the liveness check runs before the pass that reads the end.
+        try tree.append(resumed, RolloutTree.event("task_complete", turn: "t1") + "\n")
+        processes.others = []
+        list.prune()
+        await scan()
+        #expect(list.sessions.isEmpty)
+        let alerts = host.requests.count
+
+        // A second process opens the file without writing to it.
+        processes.others = [second]
+        processes.owners[resumed] = second
+        for _ in 0..<3 {
+            await scan()
+            let row = try #require(session(resumed))
+            #expect(row.pid == second && row.state == .idle)
+            list.prune()
+        }
+        #expect(host.requests.count == alerts)
+    }
+
+    /// What the rollout of a thread the bridge follows tells is kept: once the bridge's connection goes
+    /// away while a process still has the rollout open, the watcher lists the thread with its turn as it is.
+    @Test func R33__a_thread_the_bridge_let_go_lists_as_its_rollout_tells() async throws {
+        await scan()
+        bridge.receive(try codexFixture("initializeResponse"))
+        bridge.receive(try codexFixture("loadedListPage1"))
+        bridge.receive(try codexFixture("resumeResponse"))
+        let followed = CodexBridgeTests.thread1
+        try tree.write(followed, [RolloutTree.meta(followed, cwd: "/Users/me/notch-the-rock", originator: "codex_cli_rs", source: #""cli""#), RolloutTree.event("task_started", turn: "t1")])
+        await scan()
+        #expect(bridge.owns(followed))
+
+        bridge.close()
+        await scan()
+        let row = try #require(session(followed))
+        #expect(row.pid == 4001 && row.state == .working && row.folder == "notch-the-rock")
+        #expect(host.requests.isEmpty)
+    }
+
+    /// A session another process takes over goes with it to that process's terminal: its row and its next
+    /// alert, whether the row moved before the liveness check or the session was listed again after it.
+    @Test func R33__a_session_another_process_takes_over_goes_to_that_process_terminal() async throws {
+        let first: pid_t = 5001, second: pid_t = 5002, third: pid_t = 5003
+        let terminal = TerminalLocation(bundleID: "com.apple.Terminal", tty: "/dev/ttys001")
+        let vscode = TerminalLocation(bundleID: "com.microsoft.VSCode", tty: "/dev/ttys002")
+        let jump = AttentionResponse.answered(AttentionAnswer(buttonID: CodexBridge.jumpButtonID, choices: [:], text: nil))
+        let resumed = "019b0000-0000-7000-8000-00000000f00b"
+        processes.cli = nil
+        processes.others = [first]
+        processes.owners[resumed] = first
+        terminals.byFolder["/Users/me/tide-pool"] = terminal
+        await scan()
+        try tree.write(resumed, Self.cli(resumed, "tide-pool"))
+        await scan()
+        #expect(session(resumed)?.terminal == terminal)
+
+        // A second process in another terminal resumes it before the list checks the first.
+        processes.others = [second]
+        processes.owners[resumed] = second
+        terminals.byFolder["/Users/me/tide-pool"] = ghostty
+        await scan()
+        #expect(session(resumed)?.pid == second && session(resumed)?.terminal == ghostty)
+        host.responses = [jump]
+        try tree.append(resumed, RolloutTree.event("task_complete", turn: "t1") + "\n")
+        await scan()
+        #expect(host.requests.count == 1 && activator.activated == [ghostty])
+
+        // A third one, in yet another terminal, opens it after the list dropped it.
+        processes.others = [third]
+        processes.owners[resumed] = third
+        terminals.byFolder["/Users/me/tide-pool"] = vscode
+        list.prune()
+        #expect(list.sessions.isEmpty)
+        await scan()
+        #expect(session(resumed)?.pid == third && session(resumed)?.terminal == vscode)
+        host.responses = [jump]
+        try tree.append(resumed, [RolloutTree.event("task_started", turn: "t2"), RolloutTree.event("task_complete", turn: "t2")].map { $0 + "\n" }.joined())
+        await scan()
+        #expect(host.requests.count == 2 && activator.activated == [ghostty, vscode])
     }
 
     static func cli(_ id: String, _ folder: String) -> [String] {
@@ -410,6 +506,16 @@ final class FakeCodexProcesses {
         ])
         await scan()
         #expect(list.sessions.isEmpty && host.requests.isEmpty)
+    }
+}
+
+/// The terminal each folder's TUI runs in; a test moves a folder to another terminal.
+@MainActor
+final class FakeTerminals {
+    var byFolder: [String: TerminalLocation]
+
+    init(_ byFolder: [String: TerminalLocation]) {
+        self.byFolder = byFolder
     }
 }
 
