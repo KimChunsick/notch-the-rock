@@ -70,6 +70,12 @@ final class DStackModel {
         return shown.first { if case .open = $0.reading { true } else { false } } ?? shown.first
     }
 
+    /// Whether some open run is left out because its plans are all done, so a tile without a project
+    /// says finished runs are left out instead of suggesting another folder.
+    var hasFinishedRun: Bool {
+        projects.contains { if case .open(let run) = $0.reading { run.isFinished } else { false } }
+    }
+
     /// Scans off the main actor and publishes the result, unless a later refresh already did.
     /// `retry` tries every Claude Code project that has not decoded to a store again and rereads
     /// every store that could not be read; otherwise that happens at most once a minute.

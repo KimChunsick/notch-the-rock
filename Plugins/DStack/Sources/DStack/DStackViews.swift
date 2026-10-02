@@ -137,7 +137,8 @@ struct ProjectCard: View {
 }
 
 /// The home tile: the most recently active open run with plans left, else a store this plugin cannot
-/// read, else a note that there is none. Wide: goal title, the plans bar with done/total, a strip
+/// read, else a note that there is no run to show (finished runs are left out, or another folder can
+/// be added). Wide: goal title, the plans bar with done/total, a strip
 /// with a labeled segment per milestone with plans left, task and requirement counts with the plans
 /// in progress, and the latest activity.
 /// Small: a ring with the percentage, the project name, the first plan in progress and the tasks.
@@ -232,9 +233,9 @@ struct DStackTile: View {
                 .frame(width: 70)
             default:
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("열린 D-STACK 실행이 없어요")
+                    Text("보여 줄 D-STACK 실행이 없어요")
                         .font(.system(size: 11, weight: .semibold))
-                    Text("설정에서 폴더를 더할 수 있어요")
+                    Text(model.hasFinishedRun ? "계획을 모두 끝낸 실행은 빼요" : "설정에서 폴더를 더할 수 있어요")
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
                 }

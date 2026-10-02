@@ -360,7 +360,7 @@ import Testing
 
     await plugin.model.refresh()
     let emptyWide = try look(tile.content(.wide), named: "R53-render-wide-empty-T151")
-    #expect(emptyWide.text.contains("열린D-STACK실행이없어요"), "\(emptyWide.text)")
+    #expect(emptyWide.text.contains("보여줄D-STACK실행이없어요") && emptyWide.text.contains("설정에서폴더를더할수있어요"), "\(emptyWide.text)")
     #expect(emptyWide.greenBands == 0 && fits(.wide, emptyWide.size), "\(emptyWide)")
     let emptySmall = try look(tile.content(.small), named: "R53-render-small-empty-T151")
     #expect(emptySmall.text.contains("D-STACK"), "\(emptySmall.text)")
@@ -602,8 +602,8 @@ import Testing
     #expect(plugin.model.screenProjects.map(\.name) == ["active-app", "new-app"])
 }
 
-/// With every run closed or finished, the screen says there is no run to show and the tile that
-/// there is no open run, without drawing any progress.
+/// With every run closed or finished, the screen and the tile say there is no run to show, without
+/// drawing any progress.
 @MainActor
 @Test func R58__with_every_run_closed_or_finished_the_screen_shows_none() async throws {
     let temp = try TempDir()
@@ -621,5 +621,23 @@ import Testing
     let screen = try look(try #require(plugin.expandedTab).content, named: "R58-render-empty-T176")
     #expect(screen.text.contains("보여줄D-STACK실행이없어요") && screen.greenBands == 0, "\(screen)")
     let wide = try look(try #require(plugin.tile).content(.wide), named: "R58-render-wide-empty-T176")
-    #expect(wide.text.contains("열린D-STACK실행이없어요") && wide.greenBands == 0, "\(wide)")
+    #expect(wide.text.contains("보여줄D-STACK실행이없어요") && wide.greenBands == 0, "\(wide)")
+}
+
+/// With only finished open runs, the wide tile says there is no run to show and that finished runs
+/// are left out, not that there is no open run or that a folder could be added, and fits the tile.
+@MainActor
+@Test func R58__a_tile_with_only_finished_runs_says_they_are_left_out() async throws {
+    let temp = try TempDir()
+    let (plugin, _) = try makePlugin(root: temp.url, now: iso("2026-10-02T09:53:20Z"))
+    let finished = temp.url.appendingPathComponent("fs/finished-app")
+    try writeStore(at: finished)
+    try finishPlans(in: finished)
+    await plugin.model.add(finished)
+    #expect(plugin.model.projects.count == 1 && plugin.model.tileProject == nil)
+
+    let wide = try look(try #require(plugin.tile).content(.wide), named: "R58-render-T178")
+    #expect(wide.text.contains("보여줄D-STACK실행이없어요") && wide.text.contains("계획을모두끝낸실행은빼요"), "\(wide.text)")
+    #expect(!wide.text.contains("열린") && !wide.text.contains("폴더"), "\(wide.text)")
+    #expect(wide.greenBands == 0 && wide.size.width <= 190 && wide.size.height <= 90, "\(wide)")
 }
