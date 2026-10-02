@@ -89,6 +89,7 @@ import Testing
     let broken: [(path: String, text: String?, reason: String)] = [
         ("local/CURRENT", "20261001T000000Z_gone\n", "meta.tsv가 없어요"),
         ("\(run)/meta.tsv", nil, "meta.tsv가 없어요"),
+        ("\(run)/request.md", nil, "request.md가 없어요"),
         ("\(run)/meta.tsv", "id\tx\nslug\tsample-app\n", "meta.tsv에 상태가 없어요"),
         ("\(run)/meta.tsv", "status\t\n", "meta.tsv에 상태가 없어요"),
         ("\(run)/plan.json", "{}", "plan.json 구조가 달라요"),
@@ -437,6 +438,27 @@ import Testing
         try await Task.sleep(for: .milliseconds(20))
     }
     #expect(isOpen(), "not read again on activation: \(model.projects.map(\.reading))")
+    plugin.deactivate()
+
+    // An unreadable request.md is not an open run titled by its slug with no requirements, and
+    // once it is readable again the next activation reads the real title and counts.
+    try access("request.md", 0o000, touch: iso("2026-10-02T10:10:00Z"))
+    await model.refresh()
+    #expect(model.projects.map(\.reading) == [.unsupported("request.md가 없어요")])
+    try access("request.md", 0o644)
+    await model.refresh()
+    #expect(!isOpen(), "an unreadable store was read again within a minute")
+    plugin.activate()
+    for _ in 0..<100 where !isOpen() {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    guard case .open(let progress) = model.projects.first?.reading else {
+        Issue.record("request.md not read again on activation: \(model.projects.map(\.reading))")
+        plugin.deactivate()
+        return
+    }
+    #expect(progress.title == "샘플 목표")
+    #expect(progress.requirementsMet == 2 && progress.requirementsLive == 3)
     plugin.deactivate()
 }
 

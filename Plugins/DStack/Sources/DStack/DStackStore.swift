@@ -94,8 +94,9 @@ struct DStackStore: Sendable {
     }
 
     /// The open run's progress, `.noOpenRun` for a store without one (no or an empty pointer, a run
-    /// that is not open) and `.unsupported` for files not in the shape dstack writes. A file a run
-    /// does not have yet (plan.json, cases.tsv, review/index.tsv) counts as empty.
+    /// that is not open) and `.unsupported` for files it cannot read or not in the shape dstack
+    /// writes. A file a run does not have yet (plan.json, cases.tsv, review/index.tsv) counts as
+    /// empty.
     func read() -> StoreReading {
         let version = Self.text(store.appendingPathComponent("version"))?.trimmingCharacters(in: .whitespacesAndNewlines)
         // A folder without a store has no open run; settings tell it apart.
@@ -112,7 +113,9 @@ struct DStackStore: Sendable {
         guard let status = meta["status"], !status.isEmpty else { return .unsupported("meta.tsv에 상태가 없어요") }
         guard status == "open" else { return .noOpenRun }
 
-        let request = Self.text(run.appendingPathComponent("request.md")) ?? ""
+        // Every run has a request; one that is missing or unreadable is not a run without
+        // requirements.
+        guard let request = Self.text(run.appendingPathComponent("request.md")) else { return .unsupported("request.md가 없어요") }
         let plan: PlanFile
         let planURL = run.appendingPathComponent("plan.json")
         if FileManager.default.fileExists(atPath: planURL.path) {
