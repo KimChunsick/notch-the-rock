@@ -30,6 +30,8 @@ private final class DeclaringPlugin: NotchPlugin {
     /// Each delivered key with the value read right after it.
     var observed: [String: String] = [:]
     private var watching: Task<Void, Never>?
+    /// The test waiting in `observe(_:within:)`, resumed once that many keys arrived.
+    private var waiter: (count: Int, arrived: CheckedContinuation<Void, Never>)?
 
     init(context: NotchContext) {
         self.context = context
@@ -55,6 +57,24 @@ private final class DeclaringPlugin: NotchPlugin {
         case Self.choice.key: settings.string(Self.choice)
         default: settings.string(Self.text)
         }
+        if let waiter, observed.count >= waiter.count { resumeWaiter() }
+    }
+
+    /// Returns as soon as `count` keys have arrived through the settings stream, or after `limit`.
+    /// Delivery takes a main-actor turn per key, so a busy main actor delays it but never drops it.
+    func observe(_ count: Int, within limit: Duration) async {
+        guard observed.count < count else { return }
+        let timeout = Task { [weak self] in
+            try? await Task.sleep(for: limit)
+            self?.resumeWaiter()
+        }
+        await withCheckedContinuation { waiter = (count, $0) }
+        timeout.cancel()
+    }
+
+    private func resumeWaiter() {
+        waiter?.arrived.resume()
+        waiter = nil
     }
 
     var pluginDescription: PluginDescription? { Self.description }
@@ -136,10 +156,7 @@ private final class LegacyPlugin: NotchPlugin {
         #expect(suite.object(forKey: "label") as? String == "거실")
 
         let plugin = try #require(DeclaringPlugin.instances[pluginID])
-        let deadline = ContinuousClock.now + .seconds(5)
-        while plugin.observed.count < 4, ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(20))
-        }
+        await plugin.observe(4, within: .seconds(30))
         #expect(plugin.observed == ["showsSeconds": "false", "style": "analog", "interval": "12.0", "label": "거실"])
     }
 
