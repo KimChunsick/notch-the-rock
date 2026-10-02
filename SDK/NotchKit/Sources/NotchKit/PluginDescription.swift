@@ -42,6 +42,8 @@ public struct PluginPermission: Hashable, Sendable {
         case helperProcesses
         /// Changing `app`'s own settings, for example a tool's configuration file.
         case otherAppSettings(app: String)
+        /// Reading what other apps copy, or putting something on the pasteboard.
+        case pasteboard
     }
 
     public let kind: Kind

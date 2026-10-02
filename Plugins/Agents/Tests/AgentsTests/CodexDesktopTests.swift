@@ -79,7 +79,7 @@ import Testing
             recordURL: directory.appendingPathComponent("record.json"),
             entries: HookEntry.claude(helper: directory.appendingPathComponent("notch-hook"))
         ))
-        try capture(Form { AgentsSettingsView(model: hooks, codex: codex, defaults: defaults) }.formStyle(.grouped).frame(width: 520), named: "R56-render-settings-T160")
+        try capture(Form { AgentsSettingsView(model: hooks, codex: codex) }.formStyle(.grouped).frame(width: 520), named: "R56-render-settings-T160")
     }
 
     /// A desktop thread listed and resumed, and a terminal's thread.

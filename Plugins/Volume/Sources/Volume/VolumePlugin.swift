@@ -100,6 +100,15 @@ public final class VolumePlugin: NotchPlugin {
         }
     }
 
+    public var pluginDescription: PluginDescription? {
+        PluginDescription(
+            summary: "볼륨·음소거 키를 누르면 시스템 대신 노치에 볼륨을 보여 주고, 펼친 화면에서 볼륨을 조절할 수 있어요.",
+            permissions: [
+                PluginPermission(.accessibility, reason: "볼륨·음소거 키를 가로채서 시스템 대신 노치에서 처리하려고 써요. 이 플러그인을 끄면 키가 다시 시스템으로 가요."),
+            ]
+        )
+    }
+
     public var settingsView: AnyView? {
         AnyView(VolumeSettingsView(isTrusted: context.permissions.isAccessibilityTrusted) { [context] in
             context.permissions.requestAccessibility()

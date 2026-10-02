@@ -136,16 +136,16 @@ func withContext(_ body: (NotchContext, RecordingHost) throws -> Void) throws {
     @Test func R04__greeting_toggle_off_suppresses_takeover() throws {
         try withContext { context, host in
             let plugin = HelloPlugin(context: context)
-            let preferences = HelloPreferences(defaults: context.storage.defaults)
-            #expect(preferences.showsGreeting == true)
-            #expect(plugin.settingsView != nil)
+            let toggle = HelloPreferences.showsGreeting
+            #expect(context.settings.bool(toggle) == true)
+            #expect(plugin.pluginDescription?.settings == [toggle])
 
-            preferences.showsGreeting = false
-            #expect(context.storage.defaults.object(forKey: HelloPreferences.showsGreetingKey) as? Bool == false)
+            context.settings.set(false, for: toggle)
+            #expect(context.storage.defaults.object(forKey: "showsGreeting") as? Bool == false)
             plugin.activate()
             #expect(host.takeovers.isEmpty)
 
-            preferences.showsGreeting = true
+            context.settings.set(true, for: toggle)
             plugin.activate()
             #expect(host.takeovers.count == 1)
         }

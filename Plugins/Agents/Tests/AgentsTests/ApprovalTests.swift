@@ -420,6 +420,19 @@ func expectJSON(_ output: Data, _ expected: String, sourceLocation: SourceLocati
         #expect(live.host.requests.first?.timeout == .seconds(300))
     }
 
+    /// The wait the plugin's own picker stored as a number stays once the page declares it as a
+    /// choice, and a change on the page applies to the next request.
+    @Test func R48__the_declared_wait_keeps_the_stored_value_and_a_change_applies_to_the_next_request() async throws {
+        let live = try LivePlugin(wait: 300)
+        defer { live.stop() }
+        #expect(live.plugin.pluginDescription?.settings == [ApprovalWait.item])
+        #expect(live.context.settings.string(ApprovalWait.item) == "300")
+        live.context.settings.set("30", for: ApprovalWait.item)
+        live.host.responses = [.released]
+        _ = await live.hook(.permissionRequest, permissionInput)
+        #expect(live.host.requests.first?.timeout == .seconds(30))
+    }
+
     @Test func R06__a_closed_hook_withdraws_its_request() async throws {
         let live = try LivePlugin()
         defer { live.stop() }

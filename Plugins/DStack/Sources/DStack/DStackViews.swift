@@ -324,7 +324,7 @@ struct DStackSettingsView: View {
             Button("폴더 추가…") { chooseFolder() }
         } label: {
             Text("D-STACK 프로젝트")
-            Text("Claude Code에서 연 프로젝트 가운데 D-STACK을 쓰는 곳은 저절로 찾아요. 다른 폴더는 직접 더하고, 보고 싶지 않은 프로젝트는 뺄 수 있어요. 뺀 폴더는 폴더 추가로 다시 넣어요.")
+            Text("다른 폴더는 직접 더하고, 보고 싶지 않은 프로젝트는 빼요.")
         }
         .onAppear { Task { await model.refresh() } }
         ForEach(model.projects) { project in

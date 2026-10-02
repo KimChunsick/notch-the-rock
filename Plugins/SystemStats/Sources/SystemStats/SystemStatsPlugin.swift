@@ -91,6 +91,13 @@ public final class SystemStatsPlugin: NotchPlugin {
 
     /// The latest snapshot, for tests.
     var snapshot: SystemSnapshot? { model.snapshot }
+
+    public var pluginDescription: PluginDescription? {
+        PluginDescription(
+            summary: "CPU와 GPU 사용량, 메모리, 온도, 네트워크 속도를 노치에 보여줘요.",
+            permissions: []
+        )
+    }
 }
 
 /// The C entry symbol the app resolves after loading the bundle. Keep one per plugin.

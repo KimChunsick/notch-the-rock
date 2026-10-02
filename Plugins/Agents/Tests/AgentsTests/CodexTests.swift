@@ -446,7 +446,7 @@ final class Outbox {
             recordURL: directory.appendingPathComponent("record.json"),
             entries: HookEntry.claude(helper: directory.appendingPathComponent("notch-hook"))
         ))
-        try capture(Form { AgentsSettingsView(model: hooks, codex: codex, defaults: defaults) }.formStyle(.grouped).frame(width: 520), named: "R07-render-settings")
+        try capture(Form { AgentsSettingsView(model: hooks, codex: codex) }.formStyle(.grouped).frame(width: 520), named: "R07-render-settings")
     }
 }
 

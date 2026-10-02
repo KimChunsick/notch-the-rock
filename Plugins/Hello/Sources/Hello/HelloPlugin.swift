@@ -40,10 +40,6 @@ public final class HelloPlugin: NotchPlugin {
         self.pickGreeting = pickGreeting
     }
 
-    private var preferences: HelloPreferences {
-        HelloPreferences(defaults: context.storage.defaults)
-    }
-
     /// The host calls this at every app launch, including launch at login, and when the plugin is
     /// enabled again. It greets and then greets again at every unlock notification until
     /// `deactivate()`, however close together they arrive.
@@ -62,7 +58,7 @@ public final class HelloPlugin: NotchPlugin {
     /// The new identity makes the view start writing from the first stroke instead of keeping the
     /// replaced greeting's start.
     private func greet() {
-        guard preferences.showsGreeting else { return }
+        guard context.settings.bool(HelloPreferences.showsGreeting) else { return }
         let greeting = pickGreeting()
         greetingCount += 1
         let id = greetingCount
@@ -71,8 +67,12 @@ public final class HelloPlugin: NotchPlugin {
         })
     }
 
-    public var settingsView: AnyView? {
-        AnyView(HelloSettingsView(defaults: context.storage.defaults))
+    public var pluginDescription: PluginDescription? {
+        PluginDescription(
+            summary: "앱을 켤 때와 화면 잠금을 풀 때마다 노치를 펼쳐 시간과 요일에 맞는 인사를 손글씨로 써요.",
+            permissions: [],
+            settings: [HelloPreferences.showsGreeting]
+        )
     }
 }
 

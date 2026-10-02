@@ -154,6 +154,7 @@ extension PluginPermission.Kind {
         case .network: "network"
         case .helperProcesses: "terminal"
         case .otherAppSettings: "slider.horizontal.3"
+        case .pasteboard: "doc.on.clipboard"
         @unknown default: "questionmark.circle"
         }
     }
@@ -171,6 +172,7 @@ extension PluginPermission.Kind {
         case .network: "네트워크"
         case .helperProcesses: "도우미 프로그램 실행"
         case .otherAppSettings(let app): "\(app) 설정 변경"
+        case .pasteboard: "클립보드"
         @unknown default: "알 수 없는 권한"
         }
     }

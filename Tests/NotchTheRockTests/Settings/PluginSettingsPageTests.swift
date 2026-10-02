@@ -168,7 +168,7 @@ private final class LegacyPlugin: NotchPlugin {
     @Test func R48__every_permission_kind_has_a_symbol_and_a_korean_name() {
         let kinds: [PluginPermission.Kind] = [
             .accessibility, .automation(app: "터미널"), .screenRecording, .bluetooth, .notifications,
-            .files(path: "~/Documents"), .keychain, .network, .helperProcesses, .otherAppSettings(app: "Claude Code"),
+            .files(path: "~/Documents"), .keychain, .network, .helperProcesses, .otherAppSettings(app: "Claude Code"), .pasteboard,
         ]
         for kind in kinds {
             #expect(NSImage(systemSymbolName: kind.symbol, accessibilityDescription: nil) != nil, "\(kind.symbol)")
@@ -191,11 +191,11 @@ private final class LegacyPlugin: NotchPlugin {
             let fixture = try PluginFixture()
             defer { fixture.cleanUp() }
             let (catalog, _, _) = try load(type, fixture: fixture)
-            try render(PluginSettingsPane(catalog: catalog), height: height, to: folder.appendingPathComponent(name))
+            try Self.render(PluginSettingsPane(catalog: catalog), height: height, to: folder.appendingPathComponent(name))
         }
     }
 
-    private func render(_ view: some View, height: CGFloat, to url: URL) throws {
+    static func render(_ view: some View, height: CGFloat, to url: URL) throws {
         let hosting = NSHostingView(rootView: view.frame(width: 560, height: height).background(Color(white: 0.12)).environment(\.colorScheme, .dark))
         hosting.frame = CGRect(x: 0, y: 0, width: 560, height: height)
         let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)

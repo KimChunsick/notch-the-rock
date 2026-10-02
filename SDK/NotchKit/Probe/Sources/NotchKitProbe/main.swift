@@ -97,6 +97,7 @@ func name(of kind: PluginPermission.Kind) -> String {
     case .network: "network"
     case .helperProcesses: "helperProcesses"
     case .otherAppSettings(let app): "otherAppSettings(\(app))"
+    case .pasteboard: "pasteboard"
     @unknown default: "unknown"
     }
 }

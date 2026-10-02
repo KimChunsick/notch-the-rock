@@ -101,6 +101,15 @@ public final class BrightnessPlugin: NotchPlugin {
         }
     }
 
+    public var pluginDescription: PluginDescription? {
+        PluginDescription(
+            summary: "밝기 키를 누르면 시스템 대신 노치에 밝기를 보여 주고, 펼친 화면에서 밝기를 조절할 수 있어요.",
+            permissions: [
+                PluginPermission(.accessibility, reason: "밝기 키를 가로채서 시스템 대신 노치에서 처리하려고 써요. 이 플러그인을 끄면 키가 다시 시스템으로 가요."),
+            ]
+        )
+    }
+
     public var settingsView: AnyView? {
         AnyView(BrightnessSettingsView(isTrusted: context.permissions.isAccessibilityTrusted) { [context] in
             context.permissions.requestAccessibility()

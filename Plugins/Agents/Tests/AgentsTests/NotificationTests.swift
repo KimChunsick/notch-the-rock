@@ -166,7 +166,7 @@ import Testing
     let renderDefaults = UserDefaults(suiteName: isolatedDefaultsSuite(in: try! makeDirectory("agents-render")))!
 
     func settingsPage(_ model: ClaudeHooksModel) -> some View {
-        Form { AgentsSettingsView(model: model, codex: CodexModel(defaults: renderDefaults, executable: nil, start: {}, stop: {}), defaults: renderDefaults) }
+        Form { AgentsSettingsView(model: model, codex: CodexModel(defaults: renderDefaults, executable: nil, start: {}, stop: {})) }
             .formStyle(.grouped)
             .frame(width: 560, height: 360)
     }
