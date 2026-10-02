@@ -10,8 +10,9 @@ import SwiftUI
 /// one JSON record per line; the watcher keeps each file's identity and the offset after its last
 /// complete line, so a line still being written is read once it ends. Only what codex persists is
 /// known: a turn starting (working), finishing (idle, with an alert) and being stopped (idle), and the
-/// context use codex counted (`token_count`). A line longer than `RolloutReader.lineLimit` is skipped.
-/// Requests for approval or input and errors are not persisted, so these rows never wait.
+/// context use codex counted (`token_count`). A line longer than `RolloutReader.lineLimit` is skipped,
+/// but a file's session is taken from the leading bytes of its first line however long it is, before
+/// the records after it; what is read before the session is known waits for it. Requests for approval or input and errors are not persisted, so these rows never wait.
 ///
 /// The first pass after `start` indexes the files without alerts, reading only the end of each file
 /// written within `recentWindow`, and only those sessions get a row. Later passes look every
@@ -25,6 +26,8 @@ final class CodexRollouts {
     static let interval: Duration = .seconds(2)
     static let recentWindow: TimeInterval = 3 * 60 * 60
     static let discoveryInterval: TimeInterval = 60
+    /// How many records of a file wait for its session at most; the oldest go first.
+    static let queueLimit = 64
     /// The Codex desktop app (`/Applications/ChatGPT.app`): its sessions' rows and alerts bring it forward.
     static let desktopApp = TerminalLocation(bundleID: "com.openai.codex", tty: nil)
 
@@ -57,6 +60,8 @@ final class CodexRollouts {
         var file: RolloutFile
         /// The file's session, once its `session_meta` line was read.
         var meta: RolloutMeta?
+        /// What was read before `meta`, in order, each with its history date (nil when read live).
+        var queued: [(record: RolloutRecord, at: Date?)] = []
         /// When the file was last seen written.
         var modified: Date
     }
@@ -137,7 +142,10 @@ final class CodexRollouts {
             watched.modified = read.modified
             // A replaced or shortened file is read again from its start, as history.
             let silent = indexing || read.restarted
-            if read.restarted { watched.meta = nil }
+            if read.restarted {
+                watched.meta = nil
+                watched.queued.removeAll()
+            }
             watched.file = read.file
             let date = silent ? read.modified : nil
             for record in read.records {
@@ -145,9 +153,18 @@ final class CodexRollouts {
                     guard watched.meta == nil else { continue }
                     watched.meta = meta
                     show(meta, nil, at: date)
+                    // What waited for the session, each as it was read: history stays silent.
+                    for (queued, at) in watched.queued {
+                        if let alert = apply(queued, meta, silent: at != nil, at: at) { alerts.append(alert) }
+                    }
+                    watched.queued.removeAll()
                     continue
                 }
-                guard let meta = watched.meta else { continue }
+                guard let meta = watched.meta else {
+                    watched.queued.append((record, date))
+                    if watched.queued.count > Self.queueLimit { watched.queued.removeFirst() }
+                    continue
+                }
                 if let alert = apply(record, meta, silent: silent, at: date) {
                     alerts.append(alert)
                 }
@@ -374,23 +391,25 @@ enum RolloutReader {
         }
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? handle.close() }
-        var records: [RolloutRecord] = []
         if file.offset == 0, since != nil || restarted {
             // History, read without alerts: the session and its latest state are enough.
             guard let tail = latest(handle, size: size) else { return nil }
-            if !tail.fromStart, let first = firstLine(handle), let meta = record(first) {
-                records.append(meta)
-            }
             file.offset = tail.end
-            return RolloutRead(path: path, file: file, records: records + tail.records, modified: modified, restarted: restarted)
+            return RolloutRead(path: path, file: file, records: session(handle, missingFrom: tail.records) + tail.records, modified: modified, restarted: restarted)
         }
-        if head, file.offset > 0, let first = firstLine(handle), let meta = record(first) {
-            records.append(meta)
-        }
+        // A file whose session is not known yet: read from its start, or `head`.
+        let unknown = head || file.offset == 0
         guard let next = forward(handle, from: file.offset, to: size, skipping: file.skipping) else { return nil }
         file.offset = next.end
         file.skipping = next.skipping
-        return RolloutRead(path: path, file: file, records: records + next.records, modified: modified, restarted: restarted)
+        let records = unknown ? session(handle, missingFrom: next.records) + next.records : next.records
+        return RolloutRead(path: path, file: file, records: records, modified: modified, restarted: restarted)
+    }
+
+    /// The file's session from its first line, to go ahead of `records` when they do not hold it.
+    static func session(_ handle: FileHandle, missingFrom records: [RolloutRecord]) -> [RolloutRecord] {
+        guard !records.contains(where: { if case .meta = $0 { true } else { false } }), let first = head(handle), case .meta = first else { return [] }
+        return [first]
     }
 
     /// The records of the complete lines from `offset` up to `size`, read `chunkSize` at a time, and the
@@ -494,17 +513,58 @@ enum RolloutReader {
         return (newest.reversed(), end ?? 0, position == 0)
     }
 
-    /// The first complete line, read in pieces: `session_meta` carries codex's instructions.
-    static func firstLine(_ handle: FileHandle) -> Data? {
-        guard (try? handle.seek(toOffset: 0)) != nil else { return nil }
-        var line = Data()
-        while line.count < 8 << 20, let piece = try? handle.read(upToCount: 64 << 10), !piece.isEmpty {
-            if let end = piece.firstIndex(of: newline) {
-                return line + piece[piece.startIndex..<end]
-            }
-            line += piece
+    /// The record of the first line, from its first `chunkSize` bytes at most. `session_meta` carries
+    /// codex's instructions after its id, folder, originator and source, so a longer line is decoded up
+    /// to its last field complete in those bytes. A shorter line not ended yet waits: what it lacks may
+    /// still come.
+    static func head(_ handle: FileHandle) -> RolloutRecord? {
+        guard (try? handle.seek(toOffset: 0)) != nil, let bytes = try? handle.read(upToCount: chunkSize) else { return nil }
+        if let end = bytes.firstIndex(of: newline) {
+            return record(Data(bytes[bytes.startIndex..<end]))
         }
-        return nil
+        guard bytes.count == chunkSize else { return nil }
+        return record(closed(bytes))
+    }
+
+    /// The start of a JSON value cut after its last complete member or element, with the objects and
+    /// arrays still open there closed, so it decodes.
+    static func closed(_ prefix: Data) -> Data {
+        let quote = UInt8(ascii: "\""), backslash = UInt8(ascii: "\\")
+        var open: [UInt8] = []
+        var cut = 0
+        var closers: [UInt8] = []
+        var inString = false
+        var escaped = false
+        for (index, byte) in prefix.enumerated() {
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if byte == backslash {
+                    escaped = true
+                } else if byte == quote {
+                    inString = false
+                }
+                continue
+            }
+            switch byte {
+            case quote:
+                inString = true
+            case UInt8(ascii: "{"), UInt8(ascii: "["):
+                open.append(byte == UInt8(ascii: "{") ? UInt8(ascii: "}") : UInt8(ascii: "]"))
+                cut = index + 1
+                closers = open
+            case UInt8(ascii: "}"), UInt8(ascii: "]"):
+                _ = open.popLast()
+            case UInt8(ascii: ","):
+                cut = index
+                closers = open
+            default:
+                break
+            }
+        }
+        var data = Data(prefix.prefix(cut))
+        data.append(contentsOf: closers.reversed())
+        return data
     }
 
     static func record(_ line: Data) -> RolloutRecord? {

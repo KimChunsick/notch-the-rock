@@ -114,6 +114,29 @@ import Testing
         #expect(row(Self.resumed)?.state == .awaitingAnswer)
     }
 
+    @Test func R56__a_desktop_threads_unreadable_request_says_to_check_the_codex_app() async throws {
+        try joinDesktopAndTerminal()
+        func withoutCommand(_ thread: String) throws -> JSONValue {
+            guard case .object(var message) = try on(thread, "commandApproval"), case .object(var params)? = message["params"] else {
+                Issue.record("commandApproval is not an object")
+                return .null
+            }
+            params["command"] = nil
+            message["params"] = .object(params)
+            return .object(message)
+        }
+        await bridge.receive(try withoutCommand(Self.resumed))?.value
+        await bridge.receive(try on(Self.resumed, "fileChangeApprovalUnseen"))?.value
+        await bridge.receive(try withoutCommand(Self.terminalThread))?.value
+        await bridge.receive(try on(Self.terminalThread, "fileChangeApprovalUnseen"))?.value
+        #expect(host.requests.map(\.message) == [
+            "실행할 명령을 알 수 없어서 노치에서는 허용할 수 없어요. Codex 앱에서 확인해 주세요.",
+            "바뀌는 내용을 알 수 없어서 노치에서는 허용할 수 없어요. Codex 앱에서 확인해 주세요.",
+            "실행할 명령을 알 수 없어서 노치에서는 허용할 수 없어요. 터미널에서 확인해 주세요.",
+            "바뀌는 내용을 알 수 없어서 노치에서는 허용할 수 없어요. 터미널에서 확인해 주세요.",
+        ])
+    }
+
     @Test func R55__turn_dedupe_forgets_only_its_oldest_turn() {
         #expect((0..<1024).allSatisfy { bridge.claimTurnAlert("thread", turn: "\($0)") })
         // Full: a turn seen already still counts as seen, the newest and the oldest alike.
@@ -210,6 +233,40 @@ extension CodexRolloutTests {
         defer { try? handle.close() }
         let tail = try #require(RolloutReader.latest(handle, size: try size()))
         #expect(tail.records.suffix(2) == [.started(turn: "t2"), .context(15)] && tail.end == complete && !tail.fromStart)
+    }
+
+    @Test func R55__an_oversized_session_meta_still_lists_its_session_and_alerts_once() async throws {
+        let instructions = #","base_instructions":{"text":""# + String(repeating: "x", count: 3 << 20) + #""}"#
+        let exec = "019b0000-0000-7000-8000-00000000e001"
+        await scan()
+        // Found after the first pass, already finished: a session_meta past the line limit, then a whole turn.
+        try tree.write(Self.desktop, [RolloutTree.meta(Self.desktop, cwd: "/Users/me/tide-pool", extra: instructions), RolloutTree.event("task_started", turn: "t1"), RolloutTree.event("task_complete", turn: "t1")])
+        try tree.write(exec, [RolloutTree.meta(exec, cwd: "/Users/me/rock-garden", originator: "codex_exec", source: #""exec""#, extra: instructions), RolloutTree.event("task_started", turn: "e1"), RolloutTree.event("task_complete", turn: "e1")])
+        await scan()
+        #expect(session(Self.desktop)?.folder == "tide-pool" && session(Self.desktop)?.state == .idle)
+        #expect(session(Self.desktop)?.terminal == CodexRollouts.desktopApp && session(exec) == nil)
+        #expect(host.requests.count == 1 && host.requests.first?.buttons.map(\.title) == ["Codex 앱으로 이동"])
+        await scan()
+        #expect(host.requests.count == 1)
+
+        // A first line still being written and shorter than one read is not taken yet: its origin comes later.
+        let late = "019b0000-0000-7000-8000-00000000d003"
+        let lateMeta = RolloutTree.meta(late, cwd: "/Users/me/sand-bar")
+        let cut = try #require(lateMeta.range(of: #","originator""#)).lowerBound
+        try Data(lateMeta[..<cut].utf8).write(to: tree.url(late))
+        await scan()
+        #expect(session(late) == nil)
+        try tree.append(late, String(lateMeta[cut...]) + "\n")
+        await scan()
+        #expect(session(late)?.terminal == CodexRollouts.desktopApp)
+
+        // Indexed again from the start: the row comes back the same, without an alert.
+        watcher.stop()
+        #expect(session(Self.desktop) == nil)
+        await scan()
+        #expect(session(Self.desktop)?.folder == "tide-pool" && session(Self.desktop)?.state == .idle)
+        #expect(session(Self.desktop)?.terminal == CodexRollouts.desktopApp && session(exec) == nil)
+        #expect(host.requests.count == 1)
     }
 
     @Test func R55__an_ended_rollout_session_comes_back_only_with_a_new_turn() async throws {

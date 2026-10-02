@@ -461,7 +461,7 @@ final class CodexBridge {
     }
 
     private func decideCommand(_ params: JSONValue) async -> String? {
-        let detail = Self.commandDetail(params, threadFolder: threadFolder(params))
+        let detail = Self.commandDetail(params, threadFolder: threadFolder(params), desktop: desktopThread(params) != nil)
         let title = "\(projectName(params)) · \(params["kind"]?.string == "writeStdin" ? "터미널 입력" : "명령 실행")"
         let available = params["availableDecisions"]?.array?.compactMap(\.string)
         let allowsSession = available?.contains("acceptForSession") ?? true
@@ -493,11 +493,12 @@ final class CodexBridge {
             )
             buttons.append(AttentionButton(id: Self.detailsButtonID, title: "자세히 보기", role: .primary))
         } else {
+            let there = Self.checkThere(desktop: desktopThread(params) != nil)
             detail = OperationDetail(
                 tool: "파일 수정", sections: [], notchText: nil,
                 headline: changes == nil
-                    ? "바뀌는 내용을 알 수 없어서 노치에서는 허용할 수 없어요. 터미널에서 확인해 주세요."
-                    : "바뀌는 내용 중 읽지 못한 부분이 있어서 노치에서는 허용할 수 없어요. 터미널에서 확인해 주세요."
+                    ? "바뀌는 내용을 알 수 없어서 노치에서는 허용할 수 없어요. \(there)"
+                    : "바뀌는 내용 중 읽지 못한 부분이 있어서 노치에서는 허용할 수 없어요. \(there)"
             )
         }
         // codex lets every file change be allowed for the session.
@@ -594,6 +595,12 @@ final class CodexBridge {
     /// Where a request is handed back to: the Codex app for a desktop thread, otherwise the terminal.
     private func releaseTitle(_ params: JSONValue) -> String {
         desktopThread(params) == nil ? ClaudeBridge.releaseTitle : Self.desktopReleaseTitle
+    }
+
+    /// Where to look at a request the notch cannot allow: the Codex app for a desktop thread, otherwise
+    /// the terminal, as `releaseTitle` hands it back.
+    static func checkThere(desktop: Bool) -> String {
+        desktop ? "Codex 앱에서 확인해 주세요." : "터미널에서 확인해 주세요."
     }
 
     /// A request handed back stays unanswered; a desktop thread's brings the Codex app forward and folds
@@ -711,8 +718,9 @@ final class CodexBridge {
 
     /// The command with everything else that changes what it may do. The notch offers 허용 only for a
     /// short command that asks for nothing more; a command run outside the thread's folder shows its
-    /// folder there too, and goes to the full detail when both do not fit.
-    static func commandDetail(_ params: JSONValue, threadFolder: String?) -> OperationDetail {
+    /// folder there too, and goes to the full detail when both do not fit. A `desktop` thread's unknown
+    /// command is checked in the Codex app.
+    static func commandDetail(_ params: JSONValue, threadFolder: String?, desktop: Bool) -> OperationDetail {
         var sections: [OperationDetail.Section] = []
         let command = params["command"]?.string
         let cwd = params["cwd"]?.string
@@ -729,7 +737,7 @@ final class CodexBridge {
             extra = true
         }
         guard let command else {
-            return OperationDetail(tool: "명령", sections: [], notchText: nil, headline: "실행할 명령을 알 수 없어서 노치에서는 허용할 수 없어요. 터미널에서 확인해 주세요.")
+            return OperationDetail(tool: "명령", sections: [], notchText: nil, headline: "실행할 명령을 알 수 없어서 노치에서는 허용할 수 없어요. \(checkThere(desktop: desktop))")
         }
         let elsewhere = cwd.flatMap { $0 == threadFolder ? nil : $0 }
         let text = command + (elsewhere.map { "\n폴더: \($0)" } ?? "")
