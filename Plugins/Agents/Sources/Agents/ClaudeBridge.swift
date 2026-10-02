@@ -58,9 +58,10 @@ final class ClaudeBridge {
     static let defaultDenial = "사용자가 노치에서 거부했어요."
     /// Claude's orange.
     static let accent = Color(red: 0.85, green: 0.47, blue: 0.34)
-    /// How long a notice stays. Waiting requests queue in the notch and their time runs while they
-    /// wait, so a notice must not stay forever.
-    static let noticeTimeout: Duration = .seconds(30)
+    /// How long a notice of either agent stays, counted by the host from when it is shown: one queued
+    /// behind another request still shows for all of it. Requests that wait for an answer use the
+    /// configured wait instead.
+    static let noticeTimeout: Duration = .seconds(5)
     /// `notification_type`s that mean Claude Code waits for the user. `permission_prompt` is left out:
     /// the PermissionRequest hook brings the request itself to the notch, and one request must not
     /// glow twice. A notification without a type is shown.
@@ -462,9 +463,10 @@ final class ClaudeBridge {
         return task
     }
 
-    /// Brings the session's terminal forward, or opens the notch when the terminal is unknown or gone.
+    /// Brings the session's terminal forward and folds the notch, or opens the notch on the Agents
+    /// screen when the terminal is unknown or gone.
     private func jump(to sessionID: String) {
-        if let terminal = sessions[sessionID]?.terminal, activator.activate(terminal) {
+        if let terminal = sessions[sessionID]?.terminal, activator.jump(to: terminal, collapsing: context) {
             return
         }
         context.expand()

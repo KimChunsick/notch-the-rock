@@ -18,6 +18,7 @@ final class FakeHost: NotchHost {
     /// Requests withdrawn by cancelling the task that asked.
     var cancellations = 0
     var expansions = 0
+    var collapses = 0
     var logs: [String] = []
 
     func post(_ activity: LiveActivity, from pluginID: String) {}
@@ -36,7 +37,7 @@ final class FakeHost: NotchHost {
         return responses.isEmpty ? .dismissed : responses.removeFirst()
     }
     func expand(toTabOf pluginID: String) { expansions += 1 }
-    func collapse(from pluginID: String) {}
+    func collapse(from pluginID: String) { collapses += 1 }
     var isAccessibilityTrusted: Bool { true }
     func requestAccessibility(from pluginID: String) {}
     func log(_ level: LogLevel, _ message: String, from pluginID: String) { logs.append(message) }

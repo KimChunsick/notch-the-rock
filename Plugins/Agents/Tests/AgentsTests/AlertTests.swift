@@ -209,6 +209,107 @@ final class FolderTerminals {
         #expect(activator.activated == [ghostty, ghostty])
     }
 
+    /// Every notice of both agents asks the notch for 5 seconds; permission requests and questions,
+    /// which wait for an answer, keep the wait from the settings.
+    @Test func R45__agent_notices_last_five_seconds_and_requests_keep_their_wait() async throws {
+        #expect(ClaudeBridge.noticeTimeout == .seconds(5))
+        let waiting = await alerts(try hook(.notification, #","notification_type":"idle_prompt","message":"waiting""#))
+        #expect(await alerts(try hook(.userPromptSubmit)).isEmpty)
+        let finished = await alerts(try hook(.stop))
+        let ended = await alerts(try hook(.sessionEnd, #","reason":"logout""#))
+
+        let outbox = Outbox()
+        let codex = CodexBridge(
+            context: try makeContext(host: host, directory: try makeDirectory()),
+            activator: activator,
+            terminal: { _ in ghostty },
+            logos: logos
+        )
+        codex.open { [outbox] in outbox.messages.append($0) }
+        codex.receive(try codexFixture("initializeResponse"))
+        codex.receive(try codexFixture("loadedListPage1"))
+        codex.receive(try codexFixture("resumeResponse"))
+        func codexAlerts(_ message: JSONValue) async -> [AttentionRequest] {
+            let before = host.requests.count
+            await codex.receive(message)?.value
+            return Array(host.requests[before...])
+        }
+        let thread = Self.thread1
+        let completed = await codexAlerts(try codexFixture("turnCompleted"))
+        let failed = await codexAlerts(try jsonValue(#"{"method":"turn/completed","params":{"threadId":"\#(thread)","turn":{"id":"t2","items":[],"status":"failed"}}}"#))
+        let closed = await codexAlerts(try jsonValue(#"{"method":"thread/closed","params":{"threadId":"\#(thread)"}}"#))
+        for (name, raised) in [("waiting", waiting), ("finished", finished), ("ended", ended), ("completed", completed), ("failed", failed), ("closed", closed)] {
+            #expect(raised.count == 1, "\(name)")
+            #expect(raised.first?.timeout == .seconds(5), "\(name)")
+        }
+
+        let wait = Duration.seconds(ApprovalWait.defaultSeconds)
+        _ = await claude.decide(try hook(.permissionRequest, SessionTests.bash))
+        #expect(host.requests.last?.releaseTitle != nil && host.requests.last?.timeout == wait)
+        _ = await claude.decide(try hook(.preToolUse, SessionTests.question))
+        #expect(host.requests.last?.releaseTitle != nil && host.requests.last?.timeout == wait)
+        let before = host.requests.count
+        await codex.receive(try codexFixture("commandApproval"))?.value
+        #expect(host.requests.count == before + 1)
+        #expect(host.requests.last?.timeout == wait)
+    }
+
+    /// 터미널로 이동 in an alert of either agent brings the session's terminal forward once and folds
+    /// the notch. 노치 열기, offered when no terminal is known, and a terminal that quit open the
+    /// Agents screen instead and leave the notch open.
+    @Test func R51__the_alerts_jump_brings_the_terminal_forward_and_collapses_the_notch() async throws {
+        host.responses = [Self.jump]
+        let claudeAlert = await alerts(try hook(.stop))
+        #expect(claudeAlert.first?.buttons.map(\.title) == ["터미널로 이동"])
+        #expect(activator.activated == [ghostty])
+        #expect(host.collapses == 1)
+
+        let codex = CodexBridge(
+            context: try makeContext(host: host, directory: try makeDirectory()),
+            activator: activator,
+            terminal: { _ in ghostty },
+            logos: logos
+        )
+        let outbox = Outbox()
+        codex.open { [outbox] in outbox.messages.append($0) }
+        codex.receive(try codexFixture("initializeResponse"))
+        codex.receive(try codexFixture("loadedListPage1"))
+        codex.receive(try codexFixture("resumeResponse"))
+        host.responses = [Self.jump]
+        await codex.receive(try codexFixture("turnCompleted"))?.value
+        #expect(host.requests.last?.buttons.map(\.title) == ["터미널로 이동"])
+        #expect(activator.activated == [ghostty, ghostty])
+        #expect(host.collapses == 2)
+        #expect(host.expansions == 0)
+
+        // No terminal known: 노치 열기 opens the screen.
+        let unknown = HookMessage(
+            event: .stop,
+            payload: try json(#"{"session_id":"s9","cwd":"/Users/me/work/deep-sea","hook_event_name":"Stop"}"#),
+            context: HookContext(terminal: nil, projectDir: nil, claudePID: nil)
+        )
+        host.responses = [Self.jump]
+        #expect(await alerts(unknown).first?.buttons.map(\.title) == ["노치 열기"])
+        #expect(activator.activated.count == 2)
+        #expect(host.expansions == 1)
+        // The terminal quit meanwhile: the screen opens too.
+        activator.succeeds = false
+        host.responses = [Self.jump]
+        _ = await alerts(try hook(.sessionEnd, #","reason":"logout""#))
+        #expect(activator.activated.count == 3)
+        #expect(host.expansions == 2)
+        #expect(host.collapses == 2)
+    }
+
+    @Test func R45__the_settings_note_says_alerts_last_five_seconds_from_when_they_appear() {
+        let note = AgentsSettingsView.alertNote
+        #expect(note.contains("뜬 뒤 5초가 지나면 사라져요"))
+        #expect(note.contains("뜬 때부터 5초를 세요"))
+        #expect(!note.contains("30초"))
+        // The rest still says when the notch alerts and when it does not.
+        #expect(note.contains("같은 멈춤") && note.contains("이전 알림을 대신해요"))
+    }
+
     @Test func R40__render_alerts_with_a_fake_logo() throws {
         logos.images[.claude] = solidLogo(Self.magenta, template: false)
         claude.receive(try hook(.sessionStart))

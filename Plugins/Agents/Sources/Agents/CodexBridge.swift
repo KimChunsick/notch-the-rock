@@ -577,10 +577,11 @@ final class CodexBridge {
         return task
     }
 
-    /// Brings the thread's TUI terminal forward, or opens the notch when it is unknown or gone. The
-    /// terminal it joined in comes first: another TUI may work in the same folder now.
+    /// Brings the thread's TUI terminal forward and folds the notch, or opens the notch on the Agents
+    /// screen when it is unknown or gone. The terminal it joined in comes first: another TUI may work
+    /// in the same folder now.
     private func jump(to thread: String, saved: TerminalLocation?) {
-        if let found = saved ?? terminal(threads[thread]), activator.activate(found) {
+        if let found = saved ?? terminal(threads[thread]), activator.jump(to: found, collapsing: context) {
             return
         }
         context.expand()

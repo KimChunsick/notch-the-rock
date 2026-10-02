@@ -11,8 +11,9 @@ protocol AgentLogoProviding: AnyObject {
 }
 
 extension AgentKind {
-    /// What an alert shows next to its title: the agent's mark, tinted to the notch's foreground when
-    /// it is a template, or the agent's symbol when the mark is not available.
+    /// What an alert shows next to its title, and the home tile beside each session: the agent's mark,
+    /// tinted to the notch's foreground when it is a template, or the agent's symbol when the mark is
+    /// not available.
     @MainActor
     func alertIcon(_ logos: (any AgentLogoProviding)?) -> Image {
         guard let logo = logos?.logo(for: self) else { return Image(systemName: symbol) }

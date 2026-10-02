@@ -543,4 +543,34 @@ func share(of rect: CGRect, in view: NSView, where matches: (UInt8, UInt8, UInt8
         plugin.open(AgentSession(id: key, folder: "rock-garden", state: .idle, changed: world.now, terminal: terminal))
         #expect(host.logs.contains { $0.contains("not running") })
     }
+
+    /// A row tap brings the session's terminal forward once and folds the notch; a row whose terminal
+    /// is unknown or gone leaves the notch as it is.
+    @Test func R51__a_session_row_brings_its_terminal_forward_and_collapses_the_notch() throws {
+        let paths = makeSocketPath()
+        defer { try? FileManager.default.removeItem(atPath: paths.folder) }
+        let directory = try makeDirectory()
+        let plugin = AgentsPlugin(
+            context: try makeContext(host: host, directory: directory),
+            socketPath: paths.socket,
+            settingsURL: directory.appendingPathComponent("settings.json"),
+            claudeExecutable: nil,
+            activator: activator,
+            codexEndpoint: CodexEndpoint(home: directory),
+            codexExecutable: nil,
+            codexLauncher: FakeLauncher(socketPath: ""),
+            codexTerminal: { _ in nil }
+        )
+        let terminal = TerminalLocation(bundleID: "com.apple.Terminal", tty: "/dev/ttys007")
+        plugin.open(AgentSession(id: key, folder: "rock-garden", state: .idle, changed: world.now, terminal: terminal))
+        #expect(activator.activated == [terminal])
+        #expect(host.collapses == 1)
+
+        plugin.open(AgentSession(id: key, folder: "rock-garden", state: .idle, changed: world.now, terminal: nil))
+        activator.succeeds = false
+        plugin.open(AgentSession(id: key, folder: "rock-garden", state: .idle, changed: world.now, terminal: terminal))
+        #expect(activator.activated == [terminal, terminal])
+        #expect(host.collapses == 1)
+        #expect(host.expansions == 0)
+    }
 }

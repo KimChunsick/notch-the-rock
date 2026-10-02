@@ -139,10 +139,10 @@ public final class AgentsPlugin: NotchPlugin {
         bridge.screen.sessions.removeAll()
     }
 
-    /// Brings the terminal of a session on the Agents screen forward; a session without a known
-    /// terminal stays where it is.
+    /// Brings the terminal of a session on the Agents screen forward and folds the notch; a session
+    /// without a known or running terminal leaves the notch as it is.
     func open(_ session: AgentSession) {
-        guard let terminal = session.terminal, !activator.activate(terminal) else { return }
+        guard let terminal = session.terminal, !activator.jump(to: terminal, collapsing: context) else { return }
         context.log.error("The terminal of \(session.agent.name) session \(session.folder) is not running.")
     }
 
@@ -150,6 +150,14 @@ public final class AgentsPlugin: NotchPlugin {
     public var expandedTab: PluginTab? {
         PluginTab(title: Self.manifest.name, symbol: Self.manifest.symbol) { [screen = bridge.screen, logos] in
             AgentsScreen(model: screen, logos: logos) { [weak self] in self?.open($0) }
+        }
+    }
+
+    /// Wide: the open sessions, those waiting for the user first. Small: how many are open and wait.
+    /// Tapping it opens the screen.
+    public var tile: PluginTile? {
+        PluginTile(supportedSizes: [.wide, .small]) { [sessions = bridge.screen.sessions, logos] size in
+            AgentsTile(sessions: sessions, logos: logos, size: size)
         }
     }
 
