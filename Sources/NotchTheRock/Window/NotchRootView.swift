@@ -139,7 +139,8 @@ struct NotchRootView: View {
             }
         case .attention:
             if let pending = host.attention {
-                measured(AttentionContent(pending: pending) { response in
+                let showsTitle = !AttentionBand.titleFits(notch: notchSize, request: pending.request)
+                measured(AttentionContent(pending: pending, showsTitle: showsTitle) { response in
                     host.respond(response, to: pending.id)
                 }, minWidth: screenWidth)
                 .id(pending.id)
@@ -453,18 +454,22 @@ private struct HUDBar: View {
 
 /// Message, choices, text field and buttons of the first waiting request, under its band
 /// (`AttentionBand`), which holds the icon, the title, the countdown and the close button.
+/// A title the band cuts short also opens the details here, whole, so nothing of it is lost.
 /// At least `minWidth` wide, so text fields and buttons have room; long text wraps at the widest
 /// the notch gets.
 private struct AttentionContent: View {
     static let minWidth: CGFloat = 280
 
     let pending: NotchHostModel.PendingAttention
+    /// Whether the title is shown above the message: when it does not fit the band.
+    let showsTitle: Bool
     let respond: (AttentionResponse) -> Void
     @State private var selections: [String: [String]] = [:]
     @State private var text: String
 
-    init(pending: NotchHostModel.PendingAttention, respond: @escaping (AttentionResponse) -> Void) {
+    init(pending: NotchHostModel.PendingAttention, showsTitle: Bool, respond: @escaping (AttentionResponse) -> Void) {
         self.pending = pending
+        self.showsTitle = showsTitle
         self.respond = respond
         _text = State(initialValue: pending.request.textField?.initialText ?? "")
     }
@@ -476,9 +481,9 @@ private struct AttentionContent: View {
         request.buttons.isEmpty && request.textField == nil && request.choices.count == 1 && !request.choices[0].allowsMultiple
     }
 
-    /// Whether anything shows above the buttons: a message, choices or a text field.
+    /// Whether anything shows above the buttons: the title, a message, choices or a text field.
     private var hasDetails: Bool {
-        !request.message.isEmpty || !request.choices.isEmpty || request.textField != nil
+        showsTitle || !request.message.isEmpty || !request.choices.isEmpty || request.textField != nil
     }
 
     /// Spacing steps: 6 inside a choice group, 10 between the details, 14 above the buttons.
@@ -515,6 +520,10 @@ private struct AttentionContent: View {
 
     private var details: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if showsTitle {
+                Text(request.title)
+                    .font(AttentionBand.titleFont)
+            }
             if !request.message.isEmpty {
                 Text(request.message)
                     .font(.system(size: 12))
@@ -619,10 +628,12 @@ private struct AttentionButtonStyle: ButtonStyle {
 /// An attention's controls in the top band, split around the camera like a plugin screen's
 /// (`PluginBand`): the source icon and the title in the left wing, the countdown and the close
 /// button in the right. The shape grows until the left wing holds the whole title, up to its
-/// widest; a longer title is cut short, never under the camera's clearance. The right wing keeps
-/// room for the most seconds the request can show, so the shape does not move as they count down.
+/// widest; a longer title is cut short here, never under the camera's clearance, and shown whole
+/// above the message (`titleFits`). The right wing keeps room for the most seconds the request can
+/// show, so the shape does not move as they count down.
 struct AttentionBand: View {
     static let iconSize: CGFloat = 20
+    static let titleFont = Font.system(size: 14, weight: .semibold)
 
     let pending: NotchHostModel.PendingAttention
     let notchSize: CGSize
@@ -632,6 +643,12 @@ struct AttentionBand: View {
     /// The narrowest attention shape that shows the whole title and the countdown beside the camera.
     static func minimumWidth(notch: CGSize, request: AttentionRequest) -> CGFloat {
         BandLayout.minimumWidth(notch: notch, leading: leadingWidth(request), trailing: trailingWidth(request))
+    }
+
+    /// Whether the left wing of the widest shape holds the icon and the whole title; when it does
+    /// not, the band cuts the title short and the content shows it whole.
+    static func titleFits(notch: CGSize, request: AttentionRequest) -> Bool {
+        leadingWidth(request) <= BandLayout.wingRoom(notch: notch, width: NotchSizing.maxWidth)
     }
 
     /// The icon and the whole title on one line.
@@ -690,7 +707,7 @@ struct AttentionBand: View {
                     .scaledToFit()
                     .frame(width: AttentionBand.iconSize, height: AttentionBand.iconSize)
                 Text(title)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(AttentionBand.titleFont)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }

@@ -8,7 +8,8 @@ import Testing
 /// Attentions drawn offscreen by the app's root view: the top row splits around the camera like a
 /// plugin screen's band, the source icon and the title left of the camera and the countdown and the
 /// close button right of it, with nothing under the camera housing; the message, the choices and
-/// the buttons sit below with the host's 18-pt margin.
+/// the buttons sit below with the host's 18-pt margin. A title too long for the band is cut short
+/// there and shown whole, wrapped, above the message.
 @MainActor
 @Suite struct AttentionBandRenderTests {
     nonisolated static let notch = NotchPaddingRenderTests.notch
@@ -47,10 +48,18 @@ import Testing
 
     static var approval: AttentionRequest {
         AttentionRequest(
-            title: "아주 긴 이름의 프로젝트에서 보낸 승인 요청이라 카메라 앞에서 잘려야 하는 제목이에요 끝까지 다 보이면 안 돼요",
+            title: "아주 긴 이름의 프로젝트에서 보낸 승인 요청이라 카메라 옆에서는 잘리고 본문에서 줄을 바꿔 끝까지 보여야 하는 제목이에요",
             message: "Bash 명령을 실행해도 될까요?", accent: accent, sourceIcon: icon,
             choices: [AttentionChoices(id: "answer", prompt: "", options: ["허용", "이번 세션 동안 허용", "거부"])],
             releaseTitle: "터미널에서 답하기", timeout: .seconds(60)
+        )
+    }
+
+    static var question: AttentionRequest {
+        AttentionRequest(
+            title: "다른 긴 이름의 프로젝트에서 보낸 질문이에요 어느 브랜치에 올릴지 정해야 해서 답을 기다리고 있어요",
+            message: "올릴 브랜치 이름을 적어 주세요.", accent: accent, sourceIcon: icon,
+            textField: AttentionTextField(placeholder: "브랜치 이름"), timeout: .seconds(60)
         )
     }
 
@@ -80,7 +89,7 @@ import Testing
     }
 
     /// Asks the host for `request` and draws the root view over `backdrop` until the shape and its
-    /// contents settle. Writes `<file>.png`, `R46-render-<name>-T139.png` by default, when
+    /// contents settle. Writes `<file>.png`, `R46-render-<name>-T148.png` by default, when
     /// NOTCH_RENDER_DIR is set.
     func draw(
         _ name: String, _ request: AttentionRequest, backdrop: Color = Self.backdrop, file: String? = nil
@@ -119,7 +128,7 @@ import Testing
         let (image, metrics) = try #require(settled, "the attention did not settle: \(targets.count) targets, drawn \(String(describing: drawn))")
         if let directory = ProcessInfo.processInfo.environment["NOTCH_RENDER_DIR"] {
             let data = try #require(NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))
-            try data.write(to: URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent("\(file ?? "R46-render-\(name)-T139").png"))
+            try data.write(to: URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent("\(file ?? "R46-render-\(name)-T148").png"))
         }
         return (image, CGFloat(image.width) / size.width, metrics)
     }
@@ -234,20 +243,138 @@ import Testing
         try expectRightWing(drawn, "plain notice")
     }
 
-    @Test func R46__a_long_request_title_is_cut_short_before_the_camera() async throws {
-        let drawn = try await band("approval", Self.approval)
-        let icon = try #require(drawn.icon, "no icon beside the camera: \(drawn)")
-        let title = try #require(drawn.title, "no title beside the camera: \(drawn)")
-        #expect(icon.maxX < title.minX, "\(drawn)")
-        // Cut short: it runs up to the camera's clearance and no further.
-        #expect(title.maxX < drawn.cameraLeft - BandLayout.cameraClearance + 2, "the title runs under the camera: \(drawn)")
-        #expect(title.maxX > drawn.cameraLeft - BandLayout.cameraClearance - 16, "the title stops short of the camera: \(drawn)")
-        #expect(drawn.shape.width == NotchSizing.maxWidth, "\(drawn)")
-        try expectRightWing(drawn, "approval")
+    /// RGBA bytes of `image`, its rows from the top.
+    nonisolated static func rgba(_ image: CGImage) -> [UInt8] {
+        var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
+        if let context = CGContext(
+            data: &pixels, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: image.width * 4,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) {
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        }
+        return pixels
+    }
+
+    /// The lines of ink inside `rect` (points from the image's top-left), top to bottom, each as the
+    /// box around its ink in points from `rect`'s origin. Ink is a channel of at least 60; rows of
+    /// ink less than 2 pt apart belong to one line, so a Hangul syllable's parts stay together.
+    nonisolated static func lines(_ image: CGImage, scale: CGFloat, in rect: CGRect) -> [CGRect] {
+        let pixels = rgba(image)
+        let x0 = max(0, Int(rect.minX * scale)), x1 = min(image.width, Int(rect.maxX * scale))
+        let y0 = max(0, Int(rect.minY * scale)), y1 = min(image.height, Int(rect.maxY * scale))
+        let joins = Int(2 * scale)
+        var lines: [CGRect] = []
+        var lastInkRow: Int?
+        for y in y0..<y1 {
+            var minX = Int.max, maxX = Int.min
+            for x in x0..<x1 {
+                let i = (y * image.width + x) * 4
+                if max(pixels[i], pixels[i + 1], pixels[i + 2]) >= 60 { minX = min(minX, x); maxX = max(maxX, x) }
+            }
+            guard minX <= maxX else { continue }
+            let row = CGRect(x: CGFloat(minX - x0) / scale, y: CGFloat(y - y0) / scale, width: CGFloat(maxX - minX + 1) / scale, height: 1 / scale)
+            if let lastInkRow, y - lastInkRow <= joins, let last = lines.last {
+                lines[lines.count - 1] = last.union(row)
+            } else {
+                lines.append(row)
+            }
+            lastInkRow = y
+        }
+        return lines
+    }
+
+    /// The lines `title` makes in the body's title font laid out alone `width` wide, white on black,
+    /// as `lines(_:scale:in:)` finds them.
+    func titleLines(_ title: String, width: CGFloat, scale: CGFloat) throws -> [CGRect] {
+        let text = Text(title)
+            .font(AttentionBand.titleFont)
+            .foregroundStyle(.white)
+            .frame(width: width, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(Color.black)
+        let hosting = NSHostingView(rootView: text.environment(\.colorScheme, .dark))
+        let size = hosting.fittingSize
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = hosting
+        hosting.frame = NSRect(origin: .zero, size: size)
+        hosting.layoutSubtreeIfNeeded()
+        let capture = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+        hosting.cacheDisplay(in: hosting.bounds, to: capture)
+        let image = try #require(capture.cgImage)
+        try #require(abs(CGFloat(image.width) / size.width - scale) < 0.01, "the reference is drawn at another scale")
+        return Self.lines(image, scale: scale, in: CGRect(origin: .zero, size: size))
+    }
+
+    /// The attention's content area in points from the canvas's top-left.
+    nonisolated static func content(of metrics: NotchLayout.Metrics) -> CGRect {
+        metrics.content.offsetBy(dx: (NotchLayout.canvasSize.width - metrics.size.width) / 2, dy: 0)
+    }
+
+    nonisolated static func matches(_ line: CGRect, _ expected: CGRect) -> Bool {
+        abs(line.minX - expected.minX) <= 1.5 && abs(line.maxX - expected.maxX) <= 1.5
+            && abs(line.minY - expected.minY) <= 1.5 && abs(line.maxY - expected.maxY) <= 1.5
+    }
+
+    /// A title too long for the band: the band keeps the icon and the start of the title, cut short
+    /// before the camera's clearance, and the body starts with the whole title, wrapped into the same
+    /// lines as the title laid out alone at the content's width, the last one ending where that
+    /// one does, with the next row of the request below it.
+    func expectWholeTitleInBody(_ name: String, _ request: AttentionRequest) async throws {
+        let (image, scale, metrics) = try await draw(name, request)
+        let drawn = await Task.detached { Self.measure(image, scale: scale, shape: metrics.size) }.value
+        let icon = try #require(drawn.icon, "\(name): no icon beside the camera: \(drawn)")
+        let bandTitle = try #require(drawn.title, "\(name): no title beside the camera: \(drawn)")
+        #expect(icon.maxX < bandTitle.minX, "\(name): \(drawn)")
+        #expect(bandTitle.maxX < drawn.cameraLeft - BandLayout.cameraClearance + 2, "\(name): the band title runs under the camera: \(drawn)")
+        #expect(drawn.shape.width == NotchSizing.maxWidth, "\(name): \(drawn)")
+        try expectRightWing(drawn, name)
+
+        let expected = try titleLines(request.title, width: metrics.content.width, scale: scale)
+        let content = Self.content(of: metrics)
+        let body = await Task.detached { Self.lines(image, scale: scale, in: content) }.value
+        print("R46 \(name): \(drawn); content \(content); title alone \(expected); body \(body)")
+        #expect(expected.count >= 2, "\(name): the title fits one line at the content's width: \(expected)")
+        #expect(body.count > expected.count, "\(name): body \(body)")
+        for (index, line) in expected.enumerated() {
+            let found = index < body.count ? body[index] : nil
+            #expect(found.map { Self.matches($0, line) } == true, "\(name): title line \(index + 1) \(line), body has \(String(describing: found))")
+        }
+        if body.count > expected.count {
+            let gap = body[expected.count].minY - body[expected.count - 1].maxY
+            #expect(gap >= 4, "\(name): the row below the title is \(gap) pt from it")
+        }
+    }
+
+    @Test func R46__a_long_approval_title_is_cut_short_in_the_band_and_shown_whole_above_the_message() async throws {
+        try await expectWholeTitleInBody("long-approval", Self.approval)
+    }
+
+    @Test func R46__a_long_question_title_is_cut_short_in_the_band_and_shown_whole_above_its_field() async throws {
+        try await expectWholeTitleInBody("long-question", Self.question)
+    }
+
+    /// A title that fits the band shows there whole and nowhere in the body.
+    @Test func R46__a_short_title_shows_once_in_the_band() async throws {
+        for (name, request) in [("agent-notice", Self.agentNotice), ("plain-notice", Self.plainNotice)] {
+            let (image, scale, metrics) = try await draw(name, request)
+            let drawn = await Task.detached { Self.measure(image, scale: scale, shape: metrics.size) }.value
+            let bandTitle = try #require(drawn.title, "\(name): no title beside the camera: \(drawn)")
+            let expected = try titleLines(request.title, width: metrics.content.width, scale: scale)
+            let whole = try #require(expected.first, "\(name): the title alone draws nothing")
+            let content = Self.content(of: metrics)
+            let body = await Task.detached { Self.lines(image, scale: scale, in: content) }.value
+            print("R46 \(name): band title \(bandTitle), title alone \(expected), body \(body)")
+            #expect(expected.count == 1, "\(name): \(expected)")
+            #expect(abs(bandTitle.width - whole.width) <= 2, "\(name): the band title is \(bandTitle.width) pt wide, alone \(whole.width) pt")
+            #expect(!body.contains { abs($0.width - whole.width) <= 1.5 && abs($0.height - whole.height) <= 1.5 }, "\(name): the title shows in the body too: \(body)")
+        }
     }
 
     @Test func R46__attentions_keep_the_18_pt_margin_on_every_side() async throws {
-        for (name, request) in [("agent-notice", Self.agentNotice), ("plain-notice", Self.plainNotice), ("approval", Self.approval)] {
+        for (name, request) in [
+            ("agent-notice", Self.agentNotice), ("plain-notice", Self.plainNotice),
+            ("long-approval", Self.approval), ("long-question", Self.question),
+        ] {
             let (image, scale, metrics) = try await draw(name, request)
             let gaps = try #require(await Task.detached { NotchPaddingRenderTests.inkGaps(image, scale: scale) }.value, "no ink in \(name)")
             print("R46 \(name) margins: \(gaps), shape \(metrics.size)")
@@ -257,25 +384,36 @@ import Testing
         }
     }
 
-    /// Pixels outside the shape, more than 2 px past its edges, whose red runs more than 20 above
-    /// their blue: the warm accent tinting the light grey backdrop.
-    nonisolated static func tinted(_ image: CGImage, scale: CGFloat, shape: CGSize) -> Int {
-        let width = image.width, height = image.height
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        guard let context = CGContext(
-            data: &pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
-            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return -1 }
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-        let center = CGFloat(width) / 2
-        let left = Int(center - shape.width / 2 * scale) - 2, right = Int(center + shape.width / 2 * scale) + 2
-        let bottom = Int(shape.height * scale) + 2
+    /// The drawn shape as a mask over an image of the canvas `scale` px per point: the `NotchShape`
+    /// outline filled and stroked 2 pt wide, so it reaches 1 pt past the outline for antialiasing.
+    /// Non-zero is on the shape; the side walls' and the rounded bottom corners' outside stay clear.
+    func shapeMask(width: Int, height: Int, scale: CGFloat, metrics: NotchLayout.Metrics) throws -> [UInt8] {
+        var mask = [UInt8](repeating: 0, count: width * height)
+        let path = metrics.shape.path(in: CGRect(origin: .zero, size: metrics.size)).cgPath
+        let context = try #require(CGContext(
+            data: &mask, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width,
+            space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ))
+        context.translateBy(x: 0, y: CGFloat(height))
+        context.scaleBy(x: scale, y: -scale)
+        context.translateBy(x: (CGFloat(width) / scale - metrics.size.width) / 2, y: 0)
+        context.setFillColor(gray: 1, alpha: 1)
+        context.setStrokeColor(gray: 1, alpha: 1)
+        context.setLineWidth(2)
+        context.addPath(path)
+        context.fillPath()
+        context.addPath(path)
+        context.strokePath()
+        return mask
+    }
+
+    /// Pixels off the shape's mask whose red runs more than 20 above their blue: the warm accent
+    /// tinting the light grey backdrop.
+    nonisolated static func tinted(_ image: CGImage, mask: [UInt8]) -> Int {
+        let pixels = rgba(image)
         var count = 0
-        for y in 0..<height {
-            for x in 0..<width where x < left || x > right || y > bottom {
-                let i = (y * width + x) * 4
-                if Int(pixels[i]) - Int(pixels[i + 2]) > 20 { count += 1 }
-            }
+        for p in 0..<(image.width * image.height) where mask[p] == 0 {
+            if Int(pixels[p * 4]) - Int(pixels[p * 4 + 2]) > 20 { count += 1 }
         }
         return count
     }
@@ -283,9 +421,17 @@ import Testing
     @Test func R47__an_agent_notice_draws_nothing_outside_the_notch_shape() async throws {
         var notice = Self.agentNotice
         notice.accent = Color(red: 0.85, green: 0.47, blue: 0.34)
-        let (image, scale, metrics) = try await draw("agent-notice", notice, backdrop: Color(white: 0.92), file: "R47-render-after-T141")
-        let tinted = await Task.detached { Self.tinted(image, scale: scale, shape: metrics.size) }.value
-        print("R47 agent notice over light grey: shape \(metrics.size), \(tinted) accent-tinted pixels outside it")
-        #expect(tinted == 0, "\(tinted) accent-tinted pixels outside the shape")
+        let (image, scale, metrics) = try await draw("agent-notice", notice, backdrop: Color(white: 0.92), file: "R47-render-mask-T148")
+        let mask = try shapeMask(width: image.width, height: image.height, scale: scale, metrics: metrics)
+        // The mask is the outline, not its bounding rectangle: on under the camera, off beside the
+        // left wall and in the rounded bottom-left corner, both inside the rectangle.
+        let left = (NotchLayout.canvasSize.width - metrics.size.width) / 2, bottom = metrics.size.height
+        func on(_ x: CGFloat, _ y: CGFloat) -> Bool { mask[Int(y * scale) * image.width + Int(x * scale)] != 0 }
+        #expect(on(NotchLayout.canvasSize.width / 2, 2))
+        #expect(!on(left + 2, bottom - 2), "the mask covers the outside of the left wall")
+        #expect(!on(left + NotchLayout.openShoulder + 3, bottom - 3), "the mask covers the outside of the bottom-left corner")
+        let tinted = await Task.detached { Self.tinted(image, mask: mask) }.value
+        print("R47 agent notice over light grey: shape \(metrics.size), \(tinted) accent-tinted pixels off the shape's outline")
+        #expect(tinted == 0, "\(tinted) accent-tinted pixels outside the notch shape")
     }
 }
