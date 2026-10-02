@@ -7,9 +7,9 @@ import SwiftUI
 ///
 /// Every presentation but the collapsed notch and the HUD is measured at its own size and the shape
 /// grows to it with the same padding on every side (`NotchSizing`); a change of size springs like
-/// opening does, also between the home and a plugin's screen. A plugin's screen narrower than its
-/// band is offered the width between the shape's paddings, never more, so the shape keeps the band's
-/// width whatever the screen measures. The HUD widens the collapsed notch
+/// opening does, also between the home and a plugin's screen. A plugin's screen or an attention
+/// narrower than its band is offered the width between the shape's paddings, never more, so the
+/// shape keeps the band's width whatever the content measures. The HUD widens the collapsed notch
 /// sideways by wings measured like a live activity's.
 struct NotchRootView: View {
     let host: NotchHostModel
@@ -42,7 +42,10 @@ struct NotchRootView: View {
     var body: some View {
         let state = host.state
         let detail = state == .expanded ? shownPlugin : nil
-        let bandWidth: CGFloat = if state != .expanded {
+        let attention = state == .attention ? host.attention : nil
+        let bandWidth: CGFloat = if let attention {
+            AttentionBand.minimumWidth(notch: notchSize, request: attention.request)
+        } else if state != .expanded {
             0
         } else if let detail {
             PluginBand.minimumWidth(notch: notchSize, plugin: detail)
@@ -56,9 +59,8 @@ struct NotchRootView: View {
             content: contentSize,
             minWidth: bandWidth
         )
-        let glow = state == .attention ? host.attention?.request.accent : nil
-        NotchSurface(metrics: metrics, glow: glow) {
-            content(for: state, screenWidth: detail == nil ? 0 : NotchSizing.contentWidth(filling: bandWidth))
+        NotchSurface(metrics: metrics) {
+            content(for: state, screenWidth: detail == nil && attention == nil ? 0 : NotchSizing.contentWidth(filling: bandWidth))
         } band: {
             if state == .expanded {
                 if let detail {
@@ -69,6 +71,12 @@ struct NotchRootView: View {
                     HomeBand(home: host.home, notchSize: notchSize, width: metrics.size.width, openSettings: openSettings)
                         .transition(Self.contentTransition)
                 }
+            } else if let attention {
+                AttentionBand(pending: attention, notchSize: notchSize, width: metrics.size.width) {
+                    host.respond(.dismissed, to: attention.id)
+                }
+                .id(attention.id)
+                .transition(Self.contentTransition)
             }
         }
         .contentShape(metrics.shape)
@@ -86,8 +94,9 @@ struct NotchRootView: View {
         .onChange(of: host.home.draggedTile != nil) { _, dragging in dragChanged(dragging) }
     }
 
-    /// - Parameter screenWidth: the width a plugin's screen is offered when it is narrower, from the
-    ///   band's width and never from the measured content, so measuring cannot widen the shape.
+    /// - Parameter screenWidth: the width a plugin's screen or an attention is offered when it is
+    ///   narrower, from the band's width and never from the measured content, so measuring cannot
+    ///   widen the shape.
     @ViewBuilder
     private func content(for state: NotchState, screenWidth: CGFloat) -> some View {
         switch state {
@@ -130,9 +139,10 @@ struct NotchRootView: View {
             }
         case .attention:
             if let pending = host.attention {
-                measured(AttentionContent(pending: pending) { response in
+                let showsTitle = !AttentionBand.titleFits(notch: notchSize, request: pending.request)
+                measured(AttentionContent(pending: pending, showsTitle: showsTitle) { response in
                     host.respond(response, to: pending.id)
-                })
+                }, minWidth: screenWidth)
                 .id(pending.id)
                 .transition(Self.contentTransition)
             }
@@ -169,7 +179,6 @@ struct NotchRootView: View {
 /// content adds none of its own.
 struct NotchSurface<Content: View, Band: View>: View {
     let metrics: NotchLayout.Metrics
-    var glow: Color?
     @ViewBuilder let content: Content
     @ViewBuilder let band: Band
 
@@ -177,7 +186,6 @@ struct NotchSurface<Content: View, Band: View>: View {
         ZStack(alignment: .top) {
             metrics.shape
                 .fill(Color.black)
-                .background(AttentionGlow(color: glow, shape: metrics.shape))
             ZStack(alignment: .topLeading) {
                 content
                     .offset(x: metrics.content.minX, y: metrics.content.minY)
@@ -207,24 +215,6 @@ private struct DrawnShapeReporter: ViewModifier, Animatable {
 
     func body(content: Content) -> some View {
         content.onChange(of: metrics, initial: true) { _, drawn in report(drawn) }
-    }
-}
-
-/// Pulsing accent glow behind the shape while an attention request is shown.
-private struct AttentionGlow: View {
-    let color: Color?
-    let shape: NotchShape
-    @State private var bright = false
-
-    var body: some View {
-        if let color {
-            shape
-                .fill(color)
-                .shadow(color: color.opacity(bright ? 0.95 : 0.5), radius: bright ? 16 : 9)
-                .onAppear {
-                    withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) { bright = true }
-                }
-        }
     }
 }
 
@@ -462,19 +452,24 @@ private struct HUDBar: View {
     }
 }
 
-/// Title, message, choices, text field and buttons of the first waiting request.
+/// Message, choices, text field and buttons of the first waiting request, under its band
+/// (`AttentionBand`), which holds the icon, the title, the countdown and the close button.
+/// A title the band cuts short also opens the details here, whole, so nothing of it is lost.
 /// At least `minWidth` wide, so text fields and buttons have room; long text wraps at the widest
 /// the notch gets.
 private struct AttentionContent: View {
     static let minWidth: CGFloat = 280
 
     let pending: NotchHostModel.PendingAttention
+    /// Whether the title is shown above the message: when it does not fit the band.
+    let showsTitle: Bool
     let respond: (AttentionResponse) -> Void
     @State private var selections: [String: [String]] = [:]
     @State private var text: String
 
-    init(pending: NotchHostModel.PendingAttention, respond: @escaping (AttentionResponse) -> Void) {
+    init(pending: NotchHostModel.PendingAttention, showsTitle: Bool, respond: @escaping (AttentionResponse) -> Void) {
         self.pending = pending
+        self.showsTitle = showsTitle
         self.respond = respond
         _text = State(initialValue: pending.request.textField?.initialText ?? "")
     }
@@ -486,34 +481,22 @@ private struct AttentionContent: View {
         request.buttons.isEmpty && request.textField == nil && request.choices.count == 1 && !request.choices[0].allowsMultiple
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                request.sourceIcon?
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 16, height: 16)
-                if let deadline = pending.deadline {
-                    Countdown(deadline: deadline, accent: request.accent)
-                }
-                Spacer(minLength: 16)
-                Button {
-                    respond(.dismissed)
-                } label: {
-                    Image(systemName: "xmark")
-                        .frame(width: 22, height: 22)
-                }
-                .buttonStyle(.plain)
-                .help("닫기")
-            }
+    /// Whether anything shows above the buttons: the title, a message, choices or a text field.
+    private var hasDetails: Bool {
+        showsTitle || !request.message.isEmpty || !request.choices.isEmpty || request.textField != nil
+    }
 
-            // A plain stack in the usual case; long requests scroll instead of being cut off.
-            ViewThatFits(in: .vertical) {
-                details
-                ScrollView { details }
-                    .scrollIndicators(.never)
+    /// Spacing steps: 6 inside a choice group, 10 between the details, 14 above the buttons.
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if hasDetails {
+                // A plain stack in the usual case; long requests scroll instead of being cut off.
+                ViewThatFits(in: .vertical) {
+                    details
+                    ScrollView { details }
+                        .scrollIndicators(.never)
+                }
             }
-            Spacer(minLength: 0)
 
             HStack(spacing: 8) {
                 if let releaseTitle = request.releaseTitle {
@@ -537,8 +520,10 @@ private struct AttentionContent: View {
 
     private var details: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(request.title)
-                .font(.system(size: 14, weight: .semibold))
+            if showsTitle {
+                Text(request.title)
+                    .font(AttentionBand.titleFont)
+            }
             if !request.message.isEmpty {
                 Text(request.message)
                     .font(.system(size: 12))
@@ -640,6 +625,96 @@ private struct AttentionButtonStyle: ButtonStyle {
     }
 }
 
+/// An attention's controls in the top band, split around the camera like a plugin screen's
+/// (`PluginBand`): the source icon and the title in the left wing, the countdown and the close
+/// button in the right. The shape grows until the left wing holds the whole title, up to its
+/// widest; a longer title is cut short here, never under the camera's clearance, and shown whole
+/// above the message (`titleFits`). The right wing keeps room for the most seconds the request can
+/// show, so the shape does not move as they count down.
+struct AttentionBand: View {
+    static let iconSize: CGFloat = 20
+    static let titleFont = Font.system(size: 14, weight: .semibold)
+
+    let pending: NotchHostModel.PendingAttention
+    let notchSize: CGSize
+    let width: CGFloat
+    let dismiss: () -> Void
+
+    /// The narrowest attention shape that shows the whole title and the countdown beside the camera.
+    static func minimumWidth(notch: CGSize, request: AttentionRequest) -> CGFloat {
+        BandLayout.minimumWidth(notch: notch, leading: leadingWidth(request), trailing: trailingWidth(request))
+    }
+
+    /// Whether the left wing of the widest shape holds the icon and the whole title; when it does
+    /// not, the band cuts the title short and the content shows it whole.
+    static func titleFits(notch: CGSize, request: AttentionRequest) -> Bool {
+        leadingWidth(request) <= BandLayout.wingRoom(notch: notch, width: NotchSizing.maxWidth)
+    }
+
+    /// The icon and the whole title on one line.
+    private static func leadingWidth(_ request: AttentionRequest) -> CGFloat {
+        NSHostingView(rootView: Lead(icon: request.sourceIcon, title: request.title)).fittingSize.width.rounded(.up)
+    }
+
+    /// The countdown at the most seconds the request can show, and the close button.
+    private static func trailingWidth(_ request: AttentionRequest) -> CGFloat {
+        guard let timeout = request.timeout else { return closeSize }
+        let label = CountdownLabel(seconds: Int((timeout / .seconds(1)).rounded(.up)), accent: request.accent)
+        return NSHostingView(rootView: label).fittingSize.width.rounded(.up) + trailingSpacing + closeSize
+    }
+
+    private static let closeSize: CGFloat = 22
+    private static let trailingSpacing: CGFloat = 10
+
+    var body: some View {
+        let request = pending.request
+        let leading = min(Self.leadingWidth(request), BandLayout.wingRoom(notch: notchSize, width: width))
+        let layout = BandLayout(notch: notchSize, width: width, leading: leading, trailing: Self.trailingWidth(request))
+        ZStack(alignment: .topLeading) {
+            Lead(icon: request.sourceIcon, title: request.title)
+                .frame(width: layout.leadingFrame.width, height: layout.leadingFrame.height, alignment: .leading)
+                .position(x: layout.leadingFrame.midX, y: layout.leadingFrame.midY)
+            HStack(spacing: Self.trailingSpacing) {
+                if let deadline = pending.deadline {
+                    Countdown(deadline: deadline, accent: request.accent)
+                }
+                Button(action: dismiss) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: Self.closeSize, height: Self.closeSize)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("닫기")
+            }
+            .frame(width: layout.trailingFrame.width, height: layout.trailingFrame.height, alignment: .trailing)
+            .position(x: layout.trailingFrame.midX, y: layout.trailingFrame.midY)
+        }
+        .foregroundStyle(.white)
+        .frame(width: width, height: notchSize.height, alignment: .topLeading)
+    }
+
+    /// The source icon, at its own aspect ratio and rendering, and the title on one line that is
+    /// cut short at the end when it has to be.
+    private struct Lead: View {
+        let icon: Image?
+        let title: String
+
+        var body: some View {
+            HStack(spacing: 6) {
+                icon?
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: AttentionBand.iconSize, height: AttentionBand.iconSize)
+                Text(title)
+                    .font(AttentionBand.titleFont)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+    }
+}
+
 /// Seconds left before the request times out.
 private struct Countdown: View {
     let deadline: ContinuousClock.Instant
@@ -647,10 +722,18 @@ private struct Countdown: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
-            let left = max(0, Int(((deadline - .now) / .seconds(1)).rounded(.up)))
-            Label("\(left)초", systemImage: "timer")
-                .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                .foregroundStyle(accent)
+            CountdownLabel(seconds: max(0, Int(((deadline - .now) / .seconds(1)).rounded(.up))), accent: accent)
         }
+    }
+}
+
+private struct CountdownLabel: View {
+    let seconds: Int
+    let accent: Color
+
+    var body: some View {
+        Label("\(seconds)초", systemImage: "timer")
+            .font(.system(size: 12, weight: .semibold).monospacedDigit())
+            .foregroundStyle(accent)
     }
 }
