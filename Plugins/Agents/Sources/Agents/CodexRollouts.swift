@@ -20,7 +20,8 @@ import SwiftUI
 /// tree is walked again every `discoveryInterval`. Exec runs and subagents are skipped. A thread the
 /// bridge follows is left to it and a turn alerts once whichever of the two sees it end first, while
 /// the row always takes the state the records tell. A thread the bridge closed stays closed whatever
-/// is read of it later; a rollout that ended comes back only with a new turn.
+/// is read of it later; a rollout that ended comes back only with a new turn. A session is listed only
+/// while its process runs (`CodexProcesses`) and leaves with it.
 @MainActor
 final class CodexRollouts {
     static let interval: Duration = .seconds(2)
@@ -39,6 +40,9 @@ final class CodexRollouts {
     private let terminal: @MainActor (String?) -> TerminalLocation?
     private let logos: (any AgentLogoProviding)?
     private let now: () -> Date
+    private let processes: @MainActor () -> CodexProcesses
+    /// What `processes` gave in the current pass; looked at once, by the first session that needs it.
+    private var running: CodexProcesses?
 
     private var files: [String: Watched] = [:]
     /// Where each session's row and alerts take the user, by session id; nil when nothing was found.
@@ -73,7 +77,8 @@ final class CodexRollouts {
         activator: any TerminalActivating,
         terminal: @escaping @MainActor (String?) -> TerminalLocation?,
         logos: (any AgentLogoProviding)? = nil,
-        now: @escaping () -> Date = { .now }
+        now: @escaping () -> Date = { .now },
+        processes: @escaping @MainActor () -> CodexProcesses = CodexProcesses.system
     ) {
         self.root = root
         self.context = context
@@ -82,6 +87,7 @@ final class CodexRollouts {
         self.terminal = terminal
         self.logos = logos
         self.now = now
+        self.processes = processes
     }
 
     private var list: AgentSessionList { bridge.screen.sessions }
@@ -135,6 +141,7 @@ final class CodexRollouts {
         }.value
         guard generation == self.generation else { return [] }
         indexed = true
+        defer { running = nil }
         if discovering { discovered = started }
         var alerts: [Task<Void, Never>] = []
         for read in reads {
@@ -152,10 +159,10 @@ final class CodexRollouts {
                 if case .meta(let meta) = record {
                     guard watched.meta == nil else { continue }
                     watched.meta = meta
-                    show(meta, nil, at: date)
+                    show(meta, nil, at: date, in: watched.file)
                     // What waited for the session, each as it was read: history stays silent.
                     for (queued, at) in watched.queued {
-                        if let alert = apply(queued, meta, silent: at != nil, at: at) { alerts.append(alert) }
+                        if let alert = apply(queued, meta, silent: at != nil, at: at, in: watched.file) { alerts.append(alert) }
                     }
                     watched.queued.removeAll()
                     continue
@@ -165,7 +172,7 @@ final class CodexRollouts {
                     if watched.queued.count > Self.queueLimit { watched.queued.removeFirst() }
                     continue
                 }
-                if let alert = apply(record, meta, silent: silent, at: date) {
+                if let alert = apply(record, meta, silent: silent, at: date, in: watched.file) {
                     alerts.append(alert)
                 }
             }
@@ -174,7 +181,7 @@ final class CodexRollouts {
         return alerts
     }
 
-    private func apply(_ record: RolloutRecord, _ meta: RolloutMeta, silent: Bool, at date: Date?) -> Task<Void, Never>? {
+    private func apply(_ record: RolloutRecord, _ meta: RolloutMeta, silent: Bool, at date: Date?, in file: RolloutFile) -> Task<Void, Never>? {
         guard follows(meta) else { return nil }
         if ended.contains(meta.id) {
             // Resumed: a new turn brings an ended session back. Nothing else does.
@@ -185,12 +192,12 @@ final class CodexRollouts {
         case .meta:
             return nil
         case .started:
-            show(meta, .working, at: date)
+            show(meta, .working, at: date, in: file)
         case .aborted:
-            show(meta, .idle, at: date)
+            show(meta, .idle, at: date, in: file)
         case .completed(let turn):
             // The row is idle either way; only the alert is once per turn, here or in the bridge.
-            show(meta, .idle, at: date)
+            show(meta, .idle, at: date, in: file)
             guard !silent, bridge.claimTurnAlert(meta.id, turn: turn) else { return nil }
             return notify(meta)
         case .ended:
@@ -203,17 +210,23 @@ final class CodexRollouts {
         return nil
     }
 
-    /// Moves the session's row; a session seen for the first time gets its jump target here.
-    private func show(_ meta: RolloutMeta, _ state: AgentSessionState?, at date: Date?) {
+    /// Moves the session's row; a session seen for the first time gets its jump target here. A session
+    /// joins the list only while a process runs it (read from `file`), and its row keeps that process,
+    /// so it leaves once the process is gone even without a `shutdown_complete`.
+    private func show(_ meta: RolloutMeta, _ state: AgentSessionState?, at date: Date?, in file: RolloutFile) {
         guard follows(meta), !ended.contains(meta.id) else { return }
+        let key = AgentSession.Key(agent: .codex, id: meta.id)
+        var pid: pid_t?
+        if list[key] == nil {
+            if running == nil { running = processes() }
+            guard let process = running?.process(of: meta, file: file) else { return }
+            pid = process
+        }
         if targets[meta.id] == nil {
             targets[meta.id] = .some(meta.desktop ? Self.desktopApp : terminal(meta.cwd))
         }
         listed.insert(meta.id)
-        list.update(
-            AgentSession.Key(agent: .codex, id: meta.id), folder: meta.folder, state: state,
-            terminal: targets[meta.id] ?? nil, changed: date
-        )
+        list.update(key, folder: meta.folder, state: state, terminal: targets[meta.id] ?? nil, pid: pid, changed: date)
     }
 
     /// A session this watcher keeps: not an exec run or subagent, not followed by the bridge and not
@@ -295,6 +308,78 @@ struct RolloutFile: Equatable, Sendable {
     var offset: UInt64
     /// `offset` is inside a line longer than `RolloutReader.lineLimit`: the next read drops the rest of it.
     var skipping = false
+}
+
+/// The processes that run rollout sessions now. A row takes its session's process and leaves the list
+/// once that process is gone (`AgentSessionList.prune`); a session no process runs is history, not an
+/// open session, and gets no row.
+struct CodexProcesses {
+    /// A file by its device and inode, as `stat` and the kernel's table of open files give them: the
+    /// path a process opened it by may differ from the one the watcher walks.
+    struct File: Hashable {
+        let device: UInt64
+        let inode: UInt64
+    }
+
+    /// The `codex` process that has each file open. codex keeps a session's rollout open while the
+    /// session is loaded, in the TUI and in an app-server alike.
+    var holders: [File: pid_t] = [:]
+    /// The Codex desktop app, while it runs.
+    var desktopApp: pid_t?
+
+    /// The process `meta`'s session runs in: the desktop app for a desktop session, the `codex` process
+    /// that has `file` open otherwise; nil when none runs it.
+    func process(of meta: RolloutMeta, file: RolloutFile) -> pid_t? {
+        meta.desktop ? desktopApp : holders[File(device: file.device, inode: file.inode)]
+    }
+
+    /// This Mac's, read only: the files the user's `codex` processes have open, and the desktop app.
+    @MainActor static func system() -> CodexProcesses {
+        var processes = CodexProcesses()
+        processes.desktopApp = NSRunningApplication.runningApplications(withBundleIdentifier: CodexRollouts.desktopApp.bundleID)
+            .first?.processIdentifier
+        for pid in systemPIDs() {
+            for file in openFiles(pid) {
+                processes.holders[file] = pid
+            }
+        }
+        return processes
+    }
+
+    /// The user's processes whose executable is named `codex`, read with `proc_listallpids` and
+    /// `proc_pidpath`.
+    static func systemPIDs() -> [pid_t] {
+        let count = proc_listallpids(nil, 0)
+        guard count > 0 else { return [] }
+        var pids = [pid_t](repeating: 0, count: Int(count) + 64)
+        let listed = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+        guard listed > 0 else { return [] }
+        return pids.prefix(Int(listed)).filter { pid in
+            guard pid > 0 else { return false }
+            var path = [CChar](repeating: 0, count: Int(4 * MAXPATHLEN))
+            let length = proc_pidpath(pid, &path, UInt32(path.count))
+            guard length > 0 else { return false }
+            let executable = String(decoding: path.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            return (executable as NSString).lastPathComponent == "codex"
+        }
+    }
+
+    /// The files `pid` has open, read with `PROC_PIDLISTFDS` and `PROC_PIDFDVNODEINFO`.
+    static func openFiles(_ pid: pid_t) -> [File] {
+        let needed = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+        guard needed > 0 else { return [] }
+        let stride = MemoryLayout<proc_fdinfo>.stride
+        var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(needed) / stride + 16)
+        let filled = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, &fds, Int32(fds.count * stride))
+        guard filled > 0 else { return [] }
+        return fds.prefix(Int(filled) / stride).compactMap { fd in
+            guard fd.proc_fdtype == UInt32(PROX_FDTYPE_VNODE) else { return nil }
+            var info = vnode_fdinfo()
+            let size = Int32(MemoryLayout<vnode_fdinfo>.size)
+            guard proc_pidfdinfo(pid, fd.proc_fd, PROC_PIDFDVNODEINFO, &info, size) == size else { return nil }
+            return File(device: UInt64(info.pvi.vi_stat.vst_dev), inode: info.pvi.vi_stat.vst_ino)
+        }
+    }
 }
 
 /// What changed in one file since the last pass.

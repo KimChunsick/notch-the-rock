@@ -50,6 +50,33 @@ struct RolloutTree {
     }
 }
 
+/// The processes the watcher looks at and the session list checks: one `codex` process with every
+/// rollout of the tree open but the `closed` sessions', and the desktop app; nil once each is gone.
+@MainActor
+final class FakeCodexProcesses {
+    let tree: RolloutTree
+    var cli: pid_t? = 4001
+    var desktopApp: pid_t? = 4000
+    var closed: Set<String> = []
+
+    init(tree: RolloutTree) {
+        self.tree = tree
+    }
+
+    func isAlive(_ pid: pid_t) -> Bool { pid == cli || pid == desktopApp }
+
+    func snapshot() -> CodexProcesses {
+        var processes = CodexProcesses(desktopApp: desktopApp)
+        guard let cli, let walker = FileManager.default.enumerator(atPath: tree.root.path) else { return processes }
+        for case let name as String in walker where name.hasSuffix(".jsonl") && !closed.contains(where: { name.contains($0) }) {
+            var info = stat()
+            guard stat(tree.root.appendingPathComponent(name).path, &info) == 0 else { continue }
+            processes.holders[CodexProcesses.File(device: UInt64(info.st_dev), inode: UInt64(info.st_ino))] = cli
+        }
+        return processes
+    }
+}
+
 @MainActor
 @Suite struct CodexRolloutTests {
     static let desktop = "019b0000-0000-7000-8000-00000000d001"
@@ -58,16 +85,22 @@ struct RolloutTree {
     let outbox = Outbox()
     let clock = TestClock()
     let tree: RolloutTree
+    let processes: FakeCodexProcesses
     let bridge: CodexBridge
     let watcher: CodexRollouts
 
     init() throws {
         tree = try RolloutTree()
+        processes = FakeCodexProcesses(tree: tree)
         let context = try makeContext(host: host, directory: try makeDirectory())
         let terminals = ["/Users/me/notch-the-rock": ghostty, "/Users/me/rock-garden": ghostty]
         let lookup: @MainActor (String?) -> TerminalLocation? = { cwd in cwd.flatMap { terminals[$0] } }
         bridge = CodexBridge(context: context, activator: activator, terminal: lookup)
-        watcher = CodexRollouts(root: tree.root, context: context, bridge: bridge, activator: activator, terminal: lookup, now: { [clock] in clock.now })
+        watcher = CodexRollouts(
+            root: tree.root, context: context, bridge: bridge, activator: activator, terminal: lookup,
+            now: { [clock] in clock.now }, processes: processes.snapshot
+        )
+        bridge.screen.sessions.isAlive = processes.isAlive
         bridge.open { [outbox] in outbox.messages.append($0) }
     }
 
@@ -186,6 +219,52 @@ struct RolloutTree {
         await scan()
         bridge.close()
         #expect(list.sessions.map(\.id.id) == [Self.desktop])
+    }
+
+    /// A rollout row lasts as long as the process running its session: the `codex` process that has its
+    /// file open, or the desktop app for a desktop thread. Checked through the list the screen and the
+    /// tile read, with the same `prune` the plugin runs every 10 s.
+    @Test func R33__a_rollout_only_session_leaves_the_list_once_its_process_is_gone() async throws {
+        func cli(_ id: String, _ folder: String) -> [String] {
+            [RolloutTree.meta(id, cwd: "/Users/me/\(folder)", originator: "codex_cli_rs", source: #""cli""#), RolloutTree.event("task_started", turn: "t1")]
+        }
+        // A TUI session from before the app started whose process already exited is history.
+        let exited = "019b0000-0000-7000-8000-00000000f001"
+        processes.closed = [exited]
+        try tree.write(exited, cli(exited, "old-shell"), modified: Date(timeIntervalSinceNow: -600))
+        await scan()
+        #expect(list.sessions.isEmpty)
+
+        // A running TUI session lists with its process; a recent rollout no process has open does not.
+        let running = "019b0000-0000-7000-8000-00000000f002"
+        let stale = "019b0000-0000-7000-8000-00000000f003"
+        processes.closed.insert(stale)
+        try tree.write(running, cli(running, "rock-garden"))
+        try tree.write(stale, cli(stale, "tide-pool"))
+        await scan()
+        #expect(list.sessions.map(\.id.id) == [running])
+        #expect(session(running)?.pid == 4001 && session(running)?.state == .working && session(running)?.terminal == ghostty)
+        list.prune()
+        #expect(session(running) != nil)
+
+        // Its process is killed without a shutdown record: one liveness check takes the row away.
+        processes.cli = nil
+        list.prune()
+        #expect(list.sessions.isEmpty)
+
+        // A desktop thread stays while the desktop app runs and leaves with it; none lists without the app.
+        try tree.write(Self.desktop, [RolloutTree.meta(Self.desktop, cwd: "/Users/me/tide-pool"), RolloutTree.event("task_started", turn: "t1")])
+        await scan()
+        #expect(session(Self.desktop)?.pid == 4000)
+        list.prune()
+        #expect(session(Self.desktop) != nil)
+        processes.desktopApp = nil
+        list.prune()
+        #expect(list.sessions.isEmpty)
+        let later = "019b0000-0000-7000-8000-00000000f004"
+        try tree.write(later, [RolloutTree.meta(later, cwd: "/Users/me/tide-pool"), RolloutTree.event("task_started", turn: "t1")])
+        await scan()
+        #expect(list.sessions.isEmpty)
     }
 
     @Test func R55__exec_and_subagent_sessions_are_ignored() async throws {
