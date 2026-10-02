@@ -123,6 +123,20 @@ extension ClipboardStore {
     /// How long an opening waits for another one to finish.
     static let openingLockTimeout: Duration = .seconds(30)
 
+    /// Openings and resets read and write the key file and the disk, so they run here, never on the
+    /// main thread, one at a time in this process: one started after another sees the key file the
+    /// other created.
+    private static let keyQueue = DispatchQueue(label: "com.notchtherock.clipboard.history-key")
+
+    /// Runs `work` on the queue openings and resets share and returns what it returned or threw.
+    static func onKeyQueue<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async -> Result<T, any Error> {
+        await withCheckedContinuation { continuation in
+            keyQueue.async {
+                continuation.resume(returning: Result { try work() })
+            }
+        }
+    }
+
     /// The points in `open(in:)` and `resetIfUnreadable()` where tests stop one, to run an opening
     /// meanwhile.
     enum OpeningStep: Sendable {
@@ -139,11 +153,13 @@ extension ClipboardStore {
 
     /// What `resetIfUnreadable()` found under the opening lock, with the store to use from then on:
     /// this one's folder and the key in the key file.
-    enum Reset {
-        /// The list can be read with that key, saved by another opening or reachable again, so
-        /// nothing was deleted.
+    enum Reset: Sendable {
+        /// The list can be read with that key: saved by another opening, reachable again, or none
+        /// at all once a new key file replaced a missing or untrusted one and the history it cannot
+        /// open was deleted, as an opening deletes it.
         case readable(ClipboardStore)
-        /// The list still could not be read, and its files and every image file were deleted.
+        /// The list still could not be read with that key, and its files and every image file were
+        /// deleted.
         case deleted(ClipboardStore)
     }
 
@@ -175,6 +191,11 @@ extension ClipboardStore {
     ) throws -> Opened {
         let lock = try lockOpening(in: directory, waitingAtMost: timeout, at: step)
         defer { close(lock) }
+        return try openHoldingLock(in: directory, at: step)
+    }
+
+    /// What `open(in:)` does once it holds the opening lock.
+    private static func openHoldingLock(in directory: URL, at step: (OpeningStep) -> Void) throws -> Opened {
         let marker = directory.appendingPathComponent(oldHistoryMarkerName)
         let (key, origin) = try HistoryKey.load(in: directory) {
             step(.keyInspected)
@@ -196,19 +217,23 @@ extension ClipboardStore {
     /// Deletes the history in this store's folder, image files first and the list last, unless it
     /// can be read now. That this store could not read it is a finding of the past: another opening
     /// may have saved a history there since, with this key or with a key file it replaced, or access
-    /// may have come back. So under the opening lock this reads the key file again and tries the
-    /// list with its key, and deletes only when the list still cannot be read. Without a trusted key
-    /// file (a store made with a given key, as the tests do) the store's own key is tried. Nothing
-    /// is created or deleted besides: the key file is only read, and one that cannot be read is
-    /// thrown. When another opening holds the lock for longer than `timeout`, this throws
-    /// `ETIMEDOUT` with nothing deleted. `step` is called at the points `OpeningStep` names.
+    /// may have come back, or the key file may be gone. So under the opening lock this gets the key
+    /// exactly as `open(in:)` does: the key in the key file, else a new key in a new key file, with
+    /// the history that key cannot open deleted. The store it returns seals with that key and writes
+    /// as this one does; it never seals with a key that is not in the key file, which the next
+    /// opening would replace, deleting what was saved. Then it tries the list with that key and
+    /// deletes only when the list still cannot be read. It reads and writes the disk, so run it off
+    /// the main thread. When the key file cannot be read or created this throws with nothing
+    /// deleted, and when another opening holds the lock for longer than `timeout` it throws
+    /// `ETIMEDOUT` with nothing changed. `step` is called at the points `OpeningStep` names.
     func resetIfUnreadable(
         waitingAtMost timeout: Duration = Self.openingLockTimeout,
         at step: (OpeningStep) -> Void = { _ in }
     ) throws -> Reset {
         let lock = try Self.lockOpening(in: directory, waitingAtMost: timeout, at: step)
         defer { close(lock) }
-        let current = ClipboardStore(directory: directory, key: try HistoryKey.stored(in: directory) ?? key, writeFile: writeFile)
+        let opened = try Self.openHoldingLock(in: directory, at: step)
+        let current = ClipboardStore(directory: directory, key: opened.key, writeFile: writeFile)
         if (try? current.loadList()) != nil {
             return .readable(current)
         }
@@ -326,14 +351,6 @@ enum HistoryKey {
             throw CocoaError(.fileReadCorruptFile, userInfo: [NSFilePathErrorKey: url.path])
         }
         return (key, .stored)
-    }
-
-    /// The key in the key file, nil when there is none or it is not trusted, the cases
-    /// `load(in:willCreate:)` replaces. Creates and changes nothing; a key file that cannot be read
-    /// for another reason is thrown.
-    static func stored(in directory: URL) throws -> SymmetricKey? {
-        guard case .key(let key) = try read(directory.appendingPathComponent(fileName)) else { return nil }
-        return key
     }
 
     /// The key in the file at `url` when that is a regular file of this user with mode 0600 holding

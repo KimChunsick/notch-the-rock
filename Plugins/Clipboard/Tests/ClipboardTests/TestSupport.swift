@@ -115,6 +115,15 @@ func imageFile(for id: UUID, in directory: URL) -> URL {
     directory.appendingPathComponent(id.uuidString).appendingPathExtension(ClipboardStore.imageExtension)
 }
 
+func keyFile(in directory: URL) -> URL {
+    directory.appendingPathComponent(HistoryKey.fileName)
+}
+
+/// The key in the key file, read as plain bytes.
+func storedKey(in directory: URL) throws -> SymmetricKey {
+    SymmetricKey(data: try Data(contentsOf: keyFile(in: directory)))
+}
+
 /// Collects what the history reports as errors.
 @MainActor
 final class ErrorLog {

@@ -50,13 +50,23 @@ private func bytes(of key: SymmetricKey) -> Data {
     key.withUnsafeBytes { Data($0) }
 }
 
-private func keyFile(in directory: URL) -> URL {
-    directory.appendingPathComponent(HistoryKey.fileName)
+private func hex(_ data: Data) -> String {
+    data.map { String(format: "%02x", $0) }.joined()
 }
 
-/// The key in the key file, read as plain bytes.
-private func storedKey(in directory: URL) throws -> SymmetricKey {
-    SymmetricKey(data: try Data(contentsOf: keyFile(in: directory)))
+/// Runs ClipboardTestHelper as another process: it opens the history in `directory` the way the
+/// plugin does, records `texts`, saves and prints the key it opened the history with, in hex.
+private func runHelper(in directory: URL, recording texts: [String]) throws -> (status: Int32, printed: String) {
+    let helper = Process()
+    helper.executableURL = Bundle(for: OpeningGate.self).bundleURL
+        .deletingLastPathComponent().appendingPathComponent("ClipboardTestHelper")
+    helper.arguments = [directory.path] + texts
+    let output = Pipe()
+    helper.standardOutput = output
+    try helper.run()
+    let printed = output.fileHandleForReading.readDataToEndOfFile()
+    helper.waitUntilExit()
+    return (helper.terminationStatus, String(decoding: printed, as: UTF8.self))
 }
 
 /// The list on disk, opened with the key in the key file.
@@ -200,21 +210,13 @@ private func put(_ text: String, on pasteboard: NSPasteboard) {
 @MainActor
 @Test func R57__another_process_reopens_the_history_with_the_same_key() throws {
     let directory = try makeDirectory()
-    let helper = Process()
-    helper.executableURL = Bundle(for: OpeningGate.self).bundleURL
-        .deletingLastPathComponent().appendingPathComponent("ClipboardTestHelper")
-    helper.arguments = [directory.path, "copied in the other process", "copied there last"]
-    let output = Pipe()
-    helper.standardOutput = output
-    try helper.run()
-    let printed = output.fileHandleForReading.readDataToEndOfFile()
-    helper.waitUntilExit()
-    #expect(helper.terminationStatus == 0)
+    let helper = try runHelper(in: directory, recording: ["copied in the other process", "copied there last"])
+    #expect(helper.status == 0)
 
     let opened = try ClipboardStore.open(in: directory)
     let keyBytes = bytes(of: opened.key)
     #expect(opened.origin == .stored)
-    #expect(keyBytes.map { String(format: "%02x", $0) }.joined() + "\n" == String(decoding: printed, as: UTF8.self))
+    #expect(hex(keyBytes) + "\n" == helper.printed)
     #expect(try Data(contentsOf: keyFile(in: directory)) == keyBytes)
     let history = ClipboardHistory(logError: { _ in })
     history.open(opened.store)
@@ -459,7 +461,7 @@ private func openTwice(
 /// it deletes nothing: it keeps that history, adds this session's copy and saves both with that key.
 @MainActor
 @Test(arguments: ["access came back", "the key file was replaced"])
-func R57__a_reset_never_deletes_a_history_another_opening_saved(_ change: String) throws {
+func R57__a_reset_never_deletes_a_history_another_opening_saved(_ change: String) async throws {
     let directory = try makeDirectory()
     let list = directory.appendingPathComponent(ClipboardStore.listFileName)
     defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: list.path) }
@@ -488,7 +490,7 @@ func R57__a_reset_never_deletes_a_history_another_opening_saved(_ change: String
     let keyBytes = try Data(contentsOf: keyFile(in: directory))
     history.record(.text("copied in this session"))
 
-    history.resetUnreadableStore()
+    await history.resetUnreadableStore()
     history.flush()
 
     #expect(!history.isStoreUnreadable)
@@ -552,6 +554,97 @@ func R57__a_reset_never_deletes_a_history_another_opening_saved(_ change: String
 
     #expect(error?.code == .ETIMEDOUT)
     #expect(try contents(of: directory) == before)
+}
+
+/// This session could not read the history, and then the key file went: removed, or replaced by a
+/// file that is not trusted. A reset gets its key as an opening does, so it saves this session with
+/// the key in a new key file and never with a key no trusted file holds: a later opening, in this
+/// process or in another, reads what it saved.
+@MainActor
+@Test(arguments: ["removed", "replaced by an untrusted file"])
+func R57__a_reset_saves_only_with_the_key_in_the_key_file(_ change: String) async throws {
+    let directory = try makeDirectory()
+    let opened = try ClipboardStore.open(in: directory)
+    writeHistory(in: directory, key: makeKey(), text: "sealed with another key")
+    let history = ClipboardHistory(logError: { _ in })
+    history.open(opened.store)
+    #expect(history.isStoreUnreadable)
+    history.record(.text("copied in this session"))
+    try FileManager.default.removeItem(at: keyFile(in: directory))
+    if change == "replaced by an untrusted file" {
+        try bytes(of: makeKey()).write(to: keyFile(in: directory))
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: keyFile(in: directory).path)
+    }
+
+    await history.resetUnreadableStore()
+    history.flush()
+
+    #expect(!history.isStoreUnreadable)
+    let reopened = try ClipboardStore.open(in: directory)
+    #expect(reopened.origin == .stored)
+    #expect(!reopened.removedOldHistory)
+    #expect(try reopened.store.loadList().map(\.content) == [.text("copied in this session")])
+
+    let helper = try runHelper(in: directory, recording: ["copied in the other process"])
+    #expect(helper.status == 0)
+    #expect(helper.printed == hex(try Data(contentsOf: keyFile(in: directory))) + "\n")
+    #expect(try storedContents(in: directory) == [.text("copied in the other process"), .text("copied in this session")])
+}
+
+extension MainActorTimingTests {
+    /// While another opening holds the lock, a reset waits for it on the queue openings use, never
+    /// on the main actor: the main actor answers at once, a copy made meanwhile shows at once and a
+    /// second reset does nothing. Once the lock is free, the reset opens the history and saves the
+    /// copy there.
+    @MainActor
+    @Test func R09__a_reset_waiting_for_the_lock_leaves_the_main_actor_free() async throws {
+        let directory = try makeDirectory()
+        let opened = try ClipboardStore.open(in: directory)
+        writeHistory(in: directory, key: makeKey(), text: "sealed with another key")
+        try Data().write(to: directory.appendingPathComponent(ClipboardStore.oldHistoryMarkerName))
+        let history = ClipboardHistory(logError: { _ in })
+        history.open(opened.store)
+        #expect(history.isStoreUnreadable)
+        history.record(.text("copied before the reset"))
+
+        // Another opening stops between finding the old history and deleting it, holding the lock
+        // until the test releases it, or five seconds at the latest, counted from a quiet main actor.
+        await waitForAQuietMainActor()
+        let holding = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let released = OSAllocatedUnfairLock(initialState: false)
+        async let holder = onThread {
+            Result {
+                try ClipboardStore.open(in: directory) {
+                    guard $0 == .oldHistoryChecked else { return }
+                    holding.signal()
+                    _ = release.wait(timeout: .now() + 5)
+                    released.withLock { $0 = true }
+                }
+            }
+        }
+        #expect(await onThread { holding.wait(timeout: .now() + 60) } == .success, "the other opening never took the lock")
+
+        let started = ContinuousClock.now
+        let resetting = Task { @MainActor in await history.resetUnreadableStore() }
+        await Task.yield()
+        let answered = await Task { @MainActor in ContinuousClock.now }.value
+        #expect(!released.withLock { $0 }, "the main actor answered only once the lock was free")
+        #expect(answered - started < .seconds(1), "the main actor answered after \(answered - started)")
+        history.record(.text("copied while the reset waits"))
+        #expect(history.items.first?.content == .text("copied while the reset waits"))
+        await history.resetUnreadableStore()
+        #expect(!released.withLock { $0 }, "a second reset waited for the lock")
+
+        release.signal()
+        _ = try await holder.get()
+        await resetting.value
+        history.flush()
+        let expected: [ClipItem.Content] = [.text("copied while the reset waits"), .text("copied before the reset")]
+        #expect(!history.isStoreUnreadable)
+        #expect(history.items.map(\.content) == expected)
+        #expect(try storedContents(in: directory) == expected)
+    }
 }
 
 /// The plugin's sources make no keychain call of any kind: no Security framework keychain symbol

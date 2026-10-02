@@ -466,7 +466,7 @@ struct ClipboardSettingsView: View {
                     isConfirmingReset = true
                 }
                 .confirmationDialog("디스크에 있는 읽지 못한 기록을 지울까요?", isPresented: $isConfirmingReset) {
-                    Button("지우고 새로 저장", role: .destructive) { history.resetUnreadableStore() }
+                    Button("지우고 새로 저장", role: .destructive) { Task { await history.resetUnreadableStore() } }
                 } message: {
                     Text("디스크에 저장돼 있던, 읽지 못한 기록만 지워요. 지운 기록은 되살릴 수 없어요. 지금 목록에 보이는 기록은 그대로 두고, 지운 뒤에 다시 저장해요.")
                 }

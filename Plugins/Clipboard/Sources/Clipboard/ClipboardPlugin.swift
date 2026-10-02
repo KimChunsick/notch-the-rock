@@ -15,11 +15,6 @@ public final class ClipboardPlugin: NotchPlugin {
         sdkVersion: NotchKitSDK.version
     )
 
-    /// Opening the history reads or creates the key file and reads the disk, so it runs here, never
-    /// on the main thread, one opening at a time: an opening started after a quick off and on sees
-    /// the key file the earlier one created.
-    private static let keyQueue = DispatchQueue(label: "com.notchtherock.clipboard.history-key")
-
     private let context: NotchContext
     private let pasteboard: NSPasteboard
     private let openStore: @Sendable (URL) throws -> ClipboardStore.Opened
@@ -62,12 +57,10 @@ public final class ClipboardPlugin: NotchPlugin {
         history.record(from: pasteboard)
         let openStore = openStore
         let directory = context.storage.directory
+        // Off the main thread, one opening or reset at a time: an opening started after a quick off
+        // and on sees the key file the earlier one created.
         opening = Task { [weak self] in
-            let opened = await withCheckedContinuation { continuation in
-                Self.keyQueue.async {
-                    continuation.resume(returning: Result { try openStore(directory) })
-                }
-            }
+            let opened = await ClipboardStore.onKeyQueue { try openStore(directory) }
             guard let self, !Task.isCancelled else { return }
             self.finishOpening(opened)
         }
