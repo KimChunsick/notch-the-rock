@@ -112,7 +112,7 @@ private struct SettingControl: View {
             let value = settings.numberBinding(item)
             LabeledContent(item.title) {
                 HStack(spacing: 6) {
-                    Text(value.wrappedValue.formatted(.number.precision(.fractionLength(0...2))) + (unit ?? ""))
+                    Text(NumberSettingText.text(value.wrappedValue, step: step, unit: unit))
                         .monospacedDigit()
                     Stepper(item.title, value: value, in: range, step: step)
                         .labelsHidden()
@@ -123,6 +123,28 @@ private struct SettingControl: View {
         @unknown default:
             EmptyView()
         }
+    }
+}
+
+/// How a number item shows its value next to its stepper: with as many decimals as its step has, so
+/// two values the stepper reaches never read the same, then its unit.
+enum NumberSettingText {
+    /// A step with more decimals, or endless ones such as 1/3, shows this many.
+    static let maxFractionDigits = 6
+
+    static func text(_ value: Double, step: Double, unit: String?, locale: Locale = .autoupdatingCurrent) -> String {
+        value.formatted(.number.precision(.fractionLength(fractionDigits(of: step))).locale(locale)) + (unit ?? "")
+    }
+
+    /// The decimal places of `step`: the fewest that make it a whole number, within the error of a
+    /// binary `Double` such as 0.1.
+    static func fractionDigits(of step: Double) -> Int {
+        var scaled = abs(step)
+        for digits in 0..<maxFractionDigits {
+            if abs(scaled - scaled.rounded()) <= 1e-9 * max(1, scaled) { return digits }
+            scaled *= 10
+        }
+        return maxFractionDigits
     }
 }
 

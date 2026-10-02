@@ -176,6 +176,17 @@ private final class LegacyPlugin: NotchPlugin {
         }
     }
 
+    @Test func R48__a_number_setting_shows_as_many_decimals_as_its_step_with_its_unit() {
+        let posix = Locale(identifier: "en_US_POSIX")
+        let fine = [0.001, 0.002].map { NumberSettingText.text($0, step: 0.001, unit: nil, locale: posix) }
+        #expect(fine == ["0.001", "0.002"])
+        #expect(NumberSettingText.text(5, step: 1, unit: "초", locale: posix) == "5초")
+        #expect(NumberSettingText.text(1.5, step: 0.5, unit: nil, locale: posix) == "1.5")
+        #expect(NumberSettingText.text(2, step: 0.5, unit: nil, locale: posix) == "2.0")
+        #expect(NumberSettingText.text(0.3, step: 0.1, unit: "%", locale: posix) == "0.3%")
+        #expect(NumberSettingText.text(1.0 / 3, step: 1.0 / 3, unit: nil, locale: posix) == "0.333333", "a step with endless decimals stops at the cap")
+    }
+
     // MARK: Renders
 
     /// The declaring plugin's page and the 1.3 plugin's page. Written only when

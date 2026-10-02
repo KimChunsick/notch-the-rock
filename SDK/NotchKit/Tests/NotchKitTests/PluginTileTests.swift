@@ -88,13 +88,15 @@ enum CompatFixture {
     static let environment = ProcessInfo.processInfo.environment
     /// The plugin template built against NotchKit 1.0.
     static let sdk10Bundle = environment["NOTCHKIT_COMPAT_SDK10_BUNDLE"]
+    /// The plugin template built against NotchKit 1.3, with a settings view of its own.
+    static let sdk13Bundle = environment["NOTCHKIT_COMPAT_SDK13_BUNDLE"]
     /// The plugin template built against the current NotchKit.
     static let currentBundle = environment["NOTCHKIT_COMPAT_CURRENT_BUNDLE"]
     /// `notchkit-probe` built against the current NotchKit. It loads a bundle with the current
     /// `PluginLoader` in a process holding the single shared `libNotchKit.dylib`, as the app does;
     /// this test process links NotchKit statically, so a plugin loaded here would bind to another copy.
     static let probe = environment["NOTCHKIT_PROBE"]
-    static let isBuilt = sdk10Bundle != nil && currentBundle != nil && probe != nil
+    static let isBuilt = sdk10Bundle != nil && sdk13Bundle != nil && currentBundle != nil && probe != nil
 
     /// Copies `bundle` into a fresh temporary folder, so the test loads its own copy.
     static func copy(_ bundle: String) throws -> URL {
@@ -133,6 +135,17 @@ struct SDKCompatibilityTests {
         #expect(output.contains("tile: none"))
         #expect(output.contains("setup: none"), "built before SDK 1.3: no onboarding step")
         #expect(output.contains("description: none"), "built before SDK 1.4: no description")
+        #expect(output.contains("OK:"))
+    }
+
+    @Test func R48__sdk_1_3_bundle_with_its_own_settings_view_opens_without_a_description() throws {
+        let bundle = try CompatFixture.copy(try #require(CompatFixture.sdk13Bundle))
+        #expect(try PluginBundleInfo(contentsOf: bundle).sdkVersion == SDKVersion(major: 1, minor: 3))
+        let (status, output) = try CompatFixture.probe(bundle)
+        #expect(status == 0)
+        #expect(output.contains("sdk: 1.3 (bundle 1.3, host \(NotchKitSDK.version))"))
+        #expect(output.contains("settingsView: yes\n"), "the 1.3 binary's own settings view is still there")
+        #expect(output.contains("description: none\n"), "built before SDK 1.4: no description")
         #expect(output.contains("OK:"))
     }
 
