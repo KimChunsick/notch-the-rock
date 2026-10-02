@@ -14,6 +14,9 @@ import Testing
 final class FakeHost: NotchHost {
     var responses: [AttentionResponse] = []
     var waitsForCancellation = false
+    /// While true, a request waits unanswered, as a notice queued behind another does; it takes its
+    /// response once this is false again.
+    var holds = false
     var requests: [AttentionRequest] = []
     /// Requests withdrawn by cancelling the task that asked.
     var cancellations = 0
@@ -33,6 +36,9 @@ final class FakeHost: NotchHost {
             }
             cancellations += 1
             return .cancelled
+        }
+        while holds && !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(10))
         }
         return responses.isEmpty ? .dismissed : responses.removeFirst()
     }
