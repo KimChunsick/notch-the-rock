@@ -7,8 +7,9 @@ import SwiftUI
 /// loaded thread and to each new one (`thread/started`), and turns the server's requests into notch
 /// requests. Command and file-change approvals are answered `accept`, `acceptForSession` or
 /// `decline`; questions are answered by question id. A request answered elsewhere
-/// (`serverRequest/resolved`), one the user hands back to the terminal and one that times out leave
-/// the notch unanswered, so the `codex` TUI keeps its own prompt. A finished or failed turn and a
+/// (`serverRequest/resolved`), one the user hands back and one that times out leave the notch
+/// unanswered, so the `codex` TUI keeps its own prompt; a desktop thread's is handed back to the Codex
+/// app, which comes forward. A finished or failed turn and a
 /// closed thread glow with the Codex mark and the project name, and from there the user jumps to the
 /// TUI's terminal.
 @MainActor
@@ -25,6 +26,8 @@ final class CodexBridge {
     static let discoveryAttempts = 4
     /// The `source` of a thread the Codex desktop app started (its rollouts say the same); the TUI's say `cli`.
     static let desktopSource = "vscode"
+    /// What hands a desktop thread's request back to the Codex app; the TUI's say `ClaudeBridge.releaseTitle`.
+    static let desktopReleaseTitle = "Codex 앱에서 보기"
     /// How many finished turns and closed threads the bridge remembers.
     static let remembered = 1024
     /// A neutral slate, so codex's requests never look like Claude Code's and borrow no brand colour.
@@ -505,15 +508,14 @@ final class CodexBridge {
     private func decide(title: String, detail: OperationDetail, buttons: [AttentionButton], allowsSession: Bool, params: JSONValue) async -> String? {
         let wait = wait()
         let deadline = ContinuousClock.now + wait
-        let response = await context.requestAttention(AttentionRequest(
+        let response = await ask(AttentionRequest(
             title: title,
             message: detail.notchText ?? detail.headline,
             accent: Self.accent,
             sourceIcon: icon(params),
             buttons: buttons,
-            releaseTitle: ClaudeBridge.releaseTitle,
             timeout: wait
-        ))
+        ), params)
         guard case .answered(let answer) = response else { return nil }
         let offered = Set(buttons.map(\.id))
         switch answer.buttonID {
@@ -524,7 +526,7 @@ final class CodexBridge {
         case Self.allowForSessionButtonID? where offered.contains(Self.allowForSessionButtonID):
             return "acceptForSession"
         case Self.detailsButtonID? where offered.contains(Self.detailsButtonID):
-            switch await showOnScreen(title, .permission(detail), allowsSession: allowsSession, until: deadline) {
+            switch await showOnScreen(title, .permission(detail), params, allowsSession: allowsSession, until: deadline) {
             case .allow: return "accept"
             case .allowForSession where allowsSession: return "acceptForSession"
             case .deny: return "decline"
@@ -543,7 +545,7 @@ final class CodexBridge {
         let title = "\(projectName(params)) · Codex의 질문"
         let wait = wait()
         let deadline = ContinuousClock.now + wait
-        let response = await context.requestAttention(AttentionRequest(
+        let response = await ask(AttentionRequest(
             title: title,
             message: "",
             accent: Self.accent,
@@ -552,9 +554,8 @@ final class CodexBridge {
                 + [AttentionButton(id: Self.sendAnswersButtonID, title: "보내기", role: .primary)],
             choices: questions.map { AttentionChoices(id: $0.id, prompt: $0.prompt, options: $0.options) },
             textField: single && questions[0].takesText ? AttentionTextField(placeholder: "직접 입력해서 답해요") : nil,
-            releaseTitle: ClaudeBridge.releaseTitle,
             timeout: wait
-        ))
+        ), params)
         guard case .answered(let reply) = response else { return nil }
         var picked: [Int: [String]] = [:]
         for (index, question) in questions.enumerated() {
@@ -565,15 +566,41 @@ final class CodexBridge {
             return answers
         }
         guard !single else { return nil }
-        let result = await showOnScreen(title, .questions(questions.map(\.question), picked: picked), until: deadline)
+        let result = await showOnScreen(title, .questions(questions.map(\.question), picked: picked), params, until: deadline)
         guard case .answers(let screenPicked, let screenTyped) = result else { return nil }
         return CodexQuestion.answers(questions, picked: screenPicked, typed: screenTyped)
     }
 
-    private func showOnScreen(_ title: String, _ content: ScreenItem.Content, allowsSession: Bool = false, until deadline: ContinuousClock.Instant) async -> ScreenResponse {
+    /// Asks in the notch, offering to hand the request back to where the thread runs.
+    private func ask(_ request: AttentionRequest, _ params: JSONValue) async -> AttentionResponse {
+        var request = request
+        request.releaseTitle = releaseTitle(params)
+        let response = await context.requestAttention(request)
+        if response == .released { handBack(params) }
+        return response
+    }
+
+    private func showOnScreen(_ title: String, _ content: ScreenItem.Content, _ params: JSONValue, allowsSession: Bool = false, until deadline: ContinuousClock.Instant) async -> ScreenResponse {
         guard deadline > .now else { return .timedOut }
         context.expand()
-        return await screen.show(title: title, content: content, accent: Self.accent, allowsSession: allowsSession, until: deadline)
+        let response = await screen.show(
+            title: title, content: content, accent: Self.accent, allowsSession: allowsSession,
+            releaseTitle: releaseTitle(params), until: deadline
+        )
+        if response == .released { handBack(params) }
+        return response
+    }
+
+    /// Where a request is handed back to: the Codex app for a desktop thread, otherwise the terminal.
+    private func releaseTitle(_ params: JSONValue) -> String {
+        desktopThread(params) == nil ? ClaudeBridge.releaseTitle : Self.desktopReleaseTitle
+    }
+
+    /// A request handed back stays unanswered; a desktop thread's brings the Codex app forward and folds
+    /// the notch, the jump its alerts make. A TUI's terminal is not brought forward.
+    private func handBack(_ params: JSONValue) {
+        guard let thread = desktopThread(params) else { return }
+        jump(to: thread, saved: CodexRollouts.desktopApp)
     }
 
     // MARK: Notices and the terminal
@@ -652,8 +679,13 @@ final class CodexBridge {
         return target == CodexRollouts.desktopApp ? "Codex 앱으로 이동" : "터미널로 이동"
     }
 
+    /// The request's thread when the Codex desktop app started it.
+    private func desktopThread(_ params: JSONValue) -> String? {
+        params["threadId"]?.string.flatMap { desktopThreads.contains($0) ? $0 : nil }
+    }
+
     private func icon(_ params: JSONValue) -> Image? {
-        if let thread = params["threadId"]?.string, desktopThreads.contains(thread) {
+        if desktopThread(params) != nil {
             return ClaudeBridge.appIcon(CodexRollouts.desktopApp)
         }
         return terminal(folder(params)).flatMap(ClaudeBridge.appIcon)

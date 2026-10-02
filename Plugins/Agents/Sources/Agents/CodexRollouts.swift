@@ -10,15 +10,16 @@ import SwiftUI
 /// one JSON record per line; the watcher keeps each file's identity and the offset after its last
 /// complete line, so a line still being written is read once it ends. Only what codex persists is
 /// known: a turn starting (working), finishing (idle, with an alert) and being stopped (idle), and the
-/// context use codex counted (`token_count`).
+/// context use codex counted (`token_count`). A line longer than `RolloutReader.lineLimit` is skipped.
 /// Requests for approval or input and errors are not persisted, so these rows never wait.
 ///
 /// The first pass after `start` indexes the files without alerts, reading only the end of each file
 /// written within `recentWindow`, and only those sessions get a row. Later passes look every
 /// `interval` at the files written within `recentWindow` and the recent date folders only; the whole
 /// tree is walked again every `discoveryInterval`. Exec runs and subagents are skipped. A thread the
-/// bridge follows is left to it, a turn alerts once whichever of the two sees it end first, and a
-/// session that closed stays closed whatever is read of it later.
+/// bridge follows is left to it and a turn alerts once whichever of the two sees it end first, while
+/// the row always takes the state the records tell. A thread the bridge closed stays closed whatever
+/// is read of it later; a rollout that ended comes back only with a new turn.
 @MainActor
 final class CodexRollouts {
     static let interval: Duration = .seconds(2)
@@ -171,10 +172,10 @@ final class CodexRollouts {
         case .aborted:
             show(meta, .idle, at: date)
         case .completed(let turn):
-            // A turn that alerted already, here or in the bridge, moves nothing: the bridge may have closed it.
-            guard silent || bridge.claimTurnAlert(meta.id, turn: turn) else { return nil }
+            // The row is idle either way; only the alert is once per turn, here or in the bridge.
             show(meta, .idle, at: date)
-            return silent ? nil : notify(meta)
+            guard !silent, bridge.claimTurnAlert(meta.id, turn: turn) else { return nil }
+            return notify(meta)
         case .ended:
             ended.insert(meta.id)
             list.remove(AgentSession.Key(agent: .codex, id: meta.id))
@@ -264,16 +265,19 @@ enum RolloutRecord: Equatable, Sendable {
     case completed(turn: String?)
     case aborted(turn: String?)
     case ended
-    /// How full the context window is, in percent (`token_count`).
-    case context(Int)
+    /// How full the context window is, in percent (`token_count` with usage); nil when its counts or
+    /// window are unknown, which clears the row's percent.
+    case context(Int?)
 }
 
 /// Where the watcher stopped reading a file.
 struct RolloutFile: Equatable, Sendable {
     var device: UInt64
     var inode: UInt64
-    /// The byte after the last complete line read.
+    /// The byte after the last complete line read, or after the part read of a line too long to keep.
     var offset: UInt64
+    /// `offset` is inside a line longer than `RolloutReader.lineLimit`: the next read drops the rest of it.
+    var skipping = false
 }
 
 /// What changed in one file since the last pass.
@@ -303,6 +307,8 @@ enum RolloutReader {
 
     /// How much of a file one read takes.
     static let chunkSize = 256 << 10
+    /// The longest line kept; a longer one is skipped up to its end. Event lines are a few hundred bytes.
+    static let lineLimit = 1 << 20
     static let newline = UInt8(ascii: "\n")
 
     /// The rollout files in `scope` that changed since `known`. With `since` (the indexing pass), a file
@@ -360,6 +366,7 @@ enum RolloutReader {
         if same, let known {
             guard known.offset < size else { return nil }
             file.offset = known.offset
+            file.skipping = known.skipping
         }
         if let since, modified < since {
             file.offset = size
@@ -380,42 +387,65 @@ enum RolloutReader {
         if head, file.offset > 0, let first = firstLine(handle), let meta = record(first) {
             records.append(meta)
         }
-        guard let next = forward(handle, from: file.offset, to: size) else { return nil }
+        guard let next = forward(handle, from: file.offset, to: size, skipping: file.skipping) else { return nil }
         file.offset = next.end
+        file.skipping = next.skipping
         return RolloutRead(path: path, file: file, records: records + next.records, modified: modified, restarted: restarted)
     }
 
     /// The records of the complete lines from `offset` up to `size`, read `chunkSize` at a time, and the
-    /// offset after the last of them. A line still being written is left for the next pass.
-    static func forward(_ handle: FileHandle, from offset: UInt64, to size: UInt64) -> (records: [RolloutRecord], end: UInt64)? {
+    /// offset after the last of them. A line still being written is left for the next pass, unless it is
+    /// longer than `lineLimit`: it is then dropped up to its end, `skipping` while that end is not read
+    /// yet, so the offset moves on and nothing is kept of it. `skipping` starts inside such a line.
+    static func forward(_ handle: FileHandle, from offset: UInt64, to size: UInt64, skipping: Bool) -> (records: [RolloutRecord], end: UInt64, skipping: Bool)? {
         guard (try? handle.seek(toOffset: offset)) != nil else { return nil }
         var records: [RolloutRecord] = []
         var end = offset
         var position = offset
+        var skipping = skipping
         // The bytes from `end` on: a line not complete yet.
         var pending = Data()
         while position < size {
             guard let chunk = try? handle.read(upToCount: Int(min(size - position, UInt64(chunkSize)))), !chunk.isEmpty else { break }
             position += UInt64(chunk.count)
-            pending.append(chunk)
-            guard let last = pending.lastIndex(of: newline) else { continue }
-            for line in pending[pending.startIndex..<last].split(separator: newline) {
-                if let record = record(Data(line)) { records.append(record) }
+            if skipping {
+                guard let first = chunk.firstIndex(of: newline) else {
+                    end = position
+                    continue
+                }
+                skipping = false
+                end = position - UInt64(chunk.distance(from: first, to: chunk.endIndex)) + 1
+                pending = Data(chunk[chunk.index(after: first)...])
+            } else {
+                pending.append(chunk)
             }
-            end += UInt64(pending.distance(from: pending.startIndex, to: last) + 1)
-            pending = Data(pending[pending.index(after: last)...])
+            if let last = pending.lastIndex(of: newline) {
+                for line in pending[pending.startIndex..<last].split(separator: newline) {
+                    if let record = record(Data(line)) { records.append(record) }
+                }
+                end += UInt64(pending.distance(from: pending.startIndex, to: last) + 1)
+                pending = Data(pending[pending.index(after: last)...])
+            }
+            if pending.count > lineLimit {
+                end = position
+                pending = Data()
+                skipping = true
+            }
         }
-        return (records, end)
+        return (records, end, skipping)
     }
 
     /// The records of a file's last complete lines, read backwards `chunkSize` at a time until they hold
     /// both a turn's state and the context use, or the file's start; in file order, with the offset after
-    /// the last complete line and whether the file's start was reached.
+    /// the last complete line and whether the file's start was reached. Neither the line still being
+    /// written nor one longer than `lineLimit` is kept.
     static func latest(_ handle: FileHandle, size: UInt64) -> (records: [RolloutRecord], end: UInt64, fromStart: Bool)? {
         var position = size
         // The bytes from `position` on not split into lines yet; their first line may begin earlier.
         var rest = Data()
         var end: UInt64?
+        // The line `rest` ends in is longer than `lineLimit`: its bytes are dropped up to its start.
+        var skipping = false
         var newest: [RolloutRecord] = []
         var state = false
         var usage = false
@@ -424,15 +454,31 @@ enum RolloutReader {
             guard (try? handle.seek(toOffset: start)) != nil,
                   let chunk = try? handle.read(upToCount: Int(position - start)), chunk.count == Int(position - start) else { return nil }
             position = start
-            rest = chunk + rest
-            if end == nil {
-                // The last line may still be being written.
-                guard let last = rest.lastIndex(of: newline) else { continue }
-                end = position + UInt64(rest.distance(from: rest.startIndex, to: last) + 1)
-                rest = Data(rest[rest.startIndex..<last])
+            if end != nil {
+                rest = skipping ? chunk : chunk + rest
+            } else {
+                // The last line may still be being written: only where it begins is needed.
+                guard let last = chunk.lastIndex(of: newline) else { continue }
+                end = position + UInt64(chunk.distance(from: chunk.startIndex, to: last) + 1)
+                rest = Data(chunk[chunk.startIndex..<last])
+            }
+            if skipping {
+                // What follows the long line's start is part of it.
+                guard let begins = rest.lastIndex(of: newline) else {
+                    rest = Data()
+                    continue
+                }
+                rest = Data(rest[rest.startIndex..<begins])
+                skipping = false
             }
             let cut = position == 0 ? nil : rest.firstIndex(of: newline)
-            if position > 0, cut == nil { continue }
+            if position > 0, cut == nil {
+                if rest.count > lineLimit {
+                    rest = Data()
+                    skipping = true
+                }
+                continue
+            }
             let lines = cut.map { rest[rest.index(after: $0)...] } ?? rest[...]
             for line in lines.split(separator: newline).reversed() {
                 guard let record = record(Data(line)) else { continue }
@@ -477,9 +523,10 @@ enum RolloutReader {
             case "turn_aborted": return .aborted(turn: turn)
             case "shutdown_complete": return .ended
             case "token_count":
-                // Without `info` (a rate-limit update) the use is unknown, and the row keeps its percent.
-                let info = payload["info"]
-                return ContextUsage.codex(lastTotal: info?["last_token_usage"]?["total_tokens"], window: info?["model_context_window"]).map(RolloutRecord.context)
+                // Without `info` a rate-limit update, which leaves the row's percent; with it, usage whose
+                // unknown counts or window clear the percent.
+                guard let info = payload["info"], info != .null else { return nil }
+                return .context(ContextUsage.codex(lastTotal: info["last_token_usage"]?["total_tokens"], window: info["model_context_window"]))
             default: return nil
             }
         default:

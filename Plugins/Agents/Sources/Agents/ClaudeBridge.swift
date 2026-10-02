@@ -205,8 +205,8 @@ final class ClaudeBridge {
 
     /// Reads the session's context use from the end of its transcript after a hook event: at once when
     /// the last read began `contextInterval` ago or more, otherwise once it has; events meanwhile share
-    /// that read. Nil when the session's transcript is not known. A transcript without usage keeps
-    /// what the row shows.
+    /// that read. Nil when the session's transcript is not known. A use the transcript leaves unknown
+    /// clears what the row shows.
     @discardableResult
     func refreshContext(_ sessionID: String) -> Task<Void, Never>? {
         guard let path = sessions[sessionID]?.transcript else { return nil }
@@ -218,7 +218,6 @@ final class ClaudeBridge {
             guard !Task.isCancelled else { return }
             self.contextReadAt[sessionID] = .now
             let percent = await Task.detached(priority: .utility) { ContextUsage.claude(transcript: URL(fileURLWithPath: path)) }.value
-            guard let percent else { return }
             self.screen.sessions.setContext(Key(agent: .claude, id: sessionID), percent)
         }
         contextReads[sessionID] = task

@@ -23,6 +23,8 @@ struct ScreenItem: Identifiable {
     /// A denial carries the typed reason back to the agent (Claude Code's does; codex's `decline`
     /// has no room for one).
     var takesDenyReason = false
+    /// What hands the request back to where it came from.
+    var releaseTitle: String
 }
 
 enum ScreenResponse: Equatable {
@@ -32,7 +34,7 @@ enum ScreenResponse: Equatable {
     case deny(reason: String)
     /// Picked options and typed answers by question index.
     case answers(picked: [Int: [String]], typed: [Int: String])
-    /// 터미널에서 답하기.
+    /// Handed back: 터미널에서 답하기, or the Codex app's for a desktop thread.
     case released
     case timedOut
     case cancelled
@@ -57,6 +59,7 @@ final class AgentsScreenModel {
         accent: Color,
         allowsSession: Bool = false,
         takesDenyReason: Bool = false,
+        releaseTitle: String = ClaudeBridge.releaseTitle,
         until deadline: ContinuousClock.Instant
     ) async -> ScreenResponse {
         guard !Task.isCancelled else { return .cancelled }
@@ -74,7 +77,7 @@ final class AgentsScreenModel {
                 waiting[id] = continuation
                 items.append(ScreenItem(
                     id: id, title: title, content: content, expires: expires, accent: accent,
-                    allowsSession: allowsSession, takesDenyReason: takesDenyReason
+                    allowsSession: allowsSession, takesDenyReason: takesDenyReason, releaseTitle: releaseTitle
                 ))
             }
         } onCancel: {
@@ -326,7 +329,7 @@ private struct ScreenItemView: View {
                     .textFieldStyle(.roundedBorder)
             }
             HStack(spacing: 8) {
-                Button(ClaudeBridge.releaseTitle) { respond(.released) }
+                Button(item.releaseTitle) { respond(.released) }
                     .buttonStyle(.bordered)
                 Spacer(minLength: 0)
                 Button("거부") { respond(.deny(reason: reason)) }
@@ -375,7 +378,7 @@ private struct ScreenItemView: View {
             }
             .frame(minHeight: AgentsScreen.minimumBodyHeight, maxHeight: .infinity)
             HStack(spacing: 8) {
-                Button(ClaudeBridge.releaseTitle) { respond(.released) }
+                Button(item.releaseTitle) { respond(.released) }
                     .buttonStyle(.bordered)
                 Spacer(minLength: 0)
                 Button("보내기") { respond(draft.response) }

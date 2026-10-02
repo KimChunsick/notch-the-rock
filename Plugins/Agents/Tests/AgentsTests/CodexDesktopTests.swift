@@ -82,6 +82,38 @@ import Testing
         try capture(Form { AgentsSettingsView(model: hooks, codex: codex, defaults: defaults) }.formStyle(.grouped).frame(width: 520), named: "R56-render-settings-T160")
     }
 
+    /// A desktop thread listed and resumed, and a terminal's thread.
+    func joinDesktopAndTerminal() throws {
+        bridge.receive(try codexFixture("initializeResponse"))
+        bridge.receive(try jsonValue(#"{"id":2,"result":{"data":["\#(Self.resumed)"],"nextCursor":null}}"#))
+        bridge.receive(try jsonValue(#"{"id":3,"result":{"thread":{"id":"\#(Self.resumed)","cwd":"/Users/me/tide-pool","source":"vscode","status":{"type":"idle"}}}}"#))
+        bridge.receive(try jsonValue(Self.started(Self.terminalThread, cwd: "/Users/me/notch-the-rock", source: "cli")))
+    }
+
+    @Test func R56__a_desktop_threads_approval_hands_back_to_the_codex_app() async throws {
+        try joinDesktopAndTerminal()
+        host.responses = [.released]
+        await bridge.receive(try on(Self.resumed, "commandApproval"))?.value
+        #expect(host.requests.count == 1 && host.requests[0].releaseTitle == "Codex 앱에서 보기")
+        #expect(activator.activated == [CodexRollouts.desktopApp] && host.collapses == 1 && host.expansions == 0)
+        // Left unanswered, for the app to ask: the row still waits.
+        #expect(row(Self.resumed)?.state == .awaitingApproval)
+        // A terminal thread's keeps the terminal's wording and brings nothing forward.
+        host.responses = [.released]
+        await bridge.receive(try on(Self.terminalThread, "commandApproval"))?.value
+        #expect(host.requests.count == 2 && host.requests[1].releaseTitle == ClaudeBridge.releaseTitle)
+        #expect(activator.activated == [CodexRollouts.desktopApp] && host.collapses == 1)
+    }
+
+    @Test func R56__a_desktop_threads_question_hands_back_to_the_codex_app() async throws {
+        try joinDesktopAndTerminal()
+        host.responses = [.released]
+        await bridge.receive(try on(Self.resumed, "userInput"))?.value
+        #expect(host.requests.count == 1 && host.requests[0].releaseTitle == "Codex 앱에서 보기")
+        #expect(activator.activated == [CodexRollouts.desktopApp] && host.collapses == 1 && host.expansions == 0)
+        #expect(row(Self.resumed)?.state == .awaitingAnswer)
+    }
+
     @Test func R55__turn_dedupe_forgets_only_its_oldest_turn() {
         #expect((0..<1024).allSatisfy { bridge.claimTurnAlert("thread", turn: "\($0)") })
         // Full: a turn seen already still counts as seen, the newest and the oldest alike.
@@ -117,6 +149,67 @@ extension CodexRolloutTests {
         try tree.append(followed, [RolloutTree.event("task_started", turn: "t2"), ContextTests.tokenCount(last: 50000, total: 50000, window: "258400")].map { $0 + "\n" }.joined())
         await scan()
         #expect(host.requests.count == 2 && session(followed) == nil)
+    }
+
+    @Test func R55__a_turn_the_bridge_alerted_before_its_connection_dropped_ends_idle() async throws {
+        await scan()
+        bridge.receive(try codexFixture("initializeResponse"))
+        bridge.receive(try codexFixture("loadedListPage1"))
+        bridge.receive(try codexFixture("resumeResponse"))
+        let followed = CodexBridgeTests.thread1
+        let turn = "019a0000-0000-7000-8000-0000000000a1"
+        try tree.write(followed, [RolloutTree.meta(followed, cwd: "/Users/me/notch-the-rock", originator: "codex_cli_rs", source: #""cli""#)])
+        await scan()
+        // The bridge alerts the turn's end, then its connection drops before the rollout holds that turn.
+        await bridge.receive(try codexFixture("turnCompleted"))?.value
+        bridge.close()
+        #expect(host.requests.count == 1 && session(followed) == nil)
+        // The turn starting and ending is read late: the row ends idle, and the turn does not alert again.
+        try tree.append(followed, [RolloutTree.event("task_started", turn: turn), RolloutTree.event("task_complete", turn: turn)].map { $0 + "\n" }.joined())
+        await scan()
+        #expect(session(followed)?.state == .idle)
+        #expect(host.requests.count == 1)
+    }
+
+    @Test func R49__a_rollout_token_count_with_an_unknown_window_clears_the_percent() async throws {
+        await scan()
+        try tree.write(Self.desktop, [RolloutTree.meta(Self.desktop, cwd: "/Users/me/tide-pool"), ContextTests.tokenCount(last: 50000, total: 50000, window: "258400")])
+        await scan()
+        #expect(session(Self.desktop)?.contextPercent == 15)
+        // A rate-limit update has no usage: the percent stays.
+        try tree.append(Self.desktop, #"{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":null}}}"# + "\n")
+        await scan()
+        #expect(session(Self.desktop)?.contextPercent == 15)
+        // Usage whose window is not known: the percent is unknown now, and goes.
+        try tree.append(Self.desktop, ContextTests.tokenCount(last: 60000, total: 110000, window: "null") + "\n")
+        await scan()
+        #expect(session(Self.desktop) != nil && session(Self.desktop)?.contextPercent == nil)
+    }
+
+    @Test func R55__a_line_past_the_limit_is_skipped_and_the_offset_moves_on() async throws {
+        try tree.write(Self.desktop, [RolloutTree.meta(Self.desktop, cwd: "/Users/me/tide-pool"), RolloutTree.event("task_started", turn: "t1")])
+        let url = tree.url(Self.desktop)
+        func size() throws -> UInt64 { try #require(FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber).uint64Value }
+        let big = #"{"type":"response_item","payload":{"type":"message","text":""# + String(repeating: "x", count: 3 << 20)
+        // A record past the limit, still being written: the read moves past it rather than waiting on it.
+        try tree.append(Self.desktop, big)
+        let first = try #require(RolloutReader.read(url.path, known: nil, head: false, since: nil))
+        let written = try size()
+        #expect(first.records.count == 2 && first.file.offset == written)
+        // It ends and a turn's end follows: the next read starts where that one stopped.
+        try tree.append(Self.desktop, #""}}"# + "\n" + RolloutTree.event("task_complete", turn: "t1") + "\n")
+        let next = try #require(RolloutReader.read(url.path, known: first.file, head: false, since: nil))
+        let ended = try size()
+        #expect(next.records == [.completed(turn: "t1")] && next.file.offset == ended)
+
+        // From the tail, an oversized line between the records and one still being written at the end are passed over.
+        try tree.append(Self.desktop, [RolloutTree.event("task_started", turn: "t2"), big + #""}}"#, ContextTests.tokenCount(last: 50000, total: 50000, window: "258400")].map { $0 + "\n" }.joined())
+        let complete = try size()
+        try tree.append(Self.desktop, big)
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let tail = try #require(RolloutReader.latest(handle, size: try size()))
+        #expect(tail.records.suffix(2) == [.started(turn: "t2"), .context(15)] && tail.end == complete && !tail.fromStart)
     }
 
     @Test func R55__an_ended_rollout_session_comes_back_only_with_a_new_turn() async throws {
@@ -196,6 +289,26 @@ extension ContextTests {
         #expect(percent("claude-nova-9", 84000) == nil)
     }
 
+    @Test func R49__an_unknown_claude_use_clears_the_percent_a_row_showed() async throws {
+        let directory = try makeDirectory()
+        let transcript = directory.appendingPathComponent("s1.jsonl")
+        // Past 200k a model that may run with either window runs with 1M: 30%.
+        try Transcript.data([Transcript.assistant("claude-opus-4-6", input: 0, creation: 0, read: 300000)]).write(to: transcript)
+        let bridge = ClaudeBridge(context: try makeContext(host: host, directory: directory), activator: FakeActivator())
+        world.attach(to: bridge.screen.sessions)
+        let key = AgentSession.Key(agent: .claude, id: "s1")
+        let payload = #"{"session_id":"s1","cwd":"/Users/me/work/rock-garden","hook_event_name":"Stop","transcript_path":"\#(transcript.path)"}"#
+        let stop = HookMessage(event: .stop, payload: try json(payload), context: HookContext(terminal: ghostty, projectDir: nil, claudePID: 4242))
+        bridge.receive(stop)
+        await bridge.refreshContext("s1")?.value
+        #expect(bridge.screen.sessions[key]?.contextPercent == 30)
+        // Compacted to 84k: either window holds that, so the use is unknown and the percent goes.
+        try Transcript.data([Transcript.assistant("claude-opus-4-6", input: 0, creation: 0, read: 84000)]).write(to: transcript)
+        bridge.receive(stop)
+        await bridge.refreshContext("s1")?.value
+        #expect(bridge.screen.sessions[key] != nil && bridge.screen.sessions[key]?.contextPercent == nil)
+    }
+
     @Test func R49__token_counts_must_be_whole_non_negative_numbers() {
         func claude(_ input: String, _ read: String = "0") -> Int? {
             let line = #"{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":\#(input),"cache_creation_input_tokens":0,"cache_read_input_tokens":\#(read),"output_tokens":1}}}"#
@@ -210,6 +323,7 @@ extension ContextTests {
         #expect(ContextUsage.codex(lastTotal: .number(1e100), window: .number(258400)) == nil)
         #expect(ContextUsage.codex(lastTotal: .number(50000), window: .number(-1)) == nil)
         #expect(ContextUsage.codex(lastTotal: .number(50000), window: .number(.infinity)) == nil)
-        #expect(RolloutReader.record(Data(Self.tokenCount(last: 50000, total: 50000, window: "1e300").utf8)) == nil)
+        // Usage with a window that is no token count: unknown, which clears the percent.
+        #expect(RolloutReader.record(Data(Self.tokenCount(last: 50000, total: 50000, window: "1e300").utf8)) == .context(nil))
     }
 }
