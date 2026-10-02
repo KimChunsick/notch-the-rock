@@ -21,7 +21,8 @@ import SwiftUI
 /// bridge follows is left to it and a turn alerts once whichever of the two sees it end first, while
 /// the row always takes the state the records tell. A thread the bridge closed stays closed whatever
 /// is read of it later; a rollout that ended comes back only with a new turn. A session is listed only
-/// while its process runs (`CodexProcesses`) and leaves with it.
+/// while a process has its rollout open (`CodexProcesses`), the desktop app's threads too: every pass
+/// gives each row the process that has its file open now and takes away the rows none has open.
 @MainActor
 final class CodexRollouts {
     static let interval: Duration = .seconds(2)
@@ -41,7 +42,7 @@ final class CodexRollouts {
     private let logos: (any AgentLogoProviding)?
     private let now: () -> Date
     private let processes: @MainActor () -> CodexProcesses
-    /// What `processes` gave in the current pass; looked at once, by the first session that needs it.
+    /// What `processes` gave in the current pass; looked at once, by the first session or row that needs it.
     private var running: CodexProcesses?
 
     private var files: [String: Watched] = [:]
@@ -178,7 +179,40 @@ final class CodexRollouts {
             }
             files[read.path] = watched
         }
+        reconcile()
         return alerts
+    }
+
+    /// Checks this watcher's rows against the processes that have their rollouts open now: a row moves
+    /// to the process that has its file open (a session resumed in another process), and leaves at once
+    /// when none has it (a TUI that moved on to a new session, a desktop thread the app unloaded), even
+    /// while the process that had it runs on. A row the bridge follows or closed is the bridge's; one the
+    /// list already dropped is forgotten.
+    private func reconcile() {
+        var rows: Set<String> = []
+        for session in listed where !bridge.owns(session) && !bridge.isClosed(session) {
+            if list[AgentSession.Key(agent: .codex, id: session)] == nil {
+                listed.remove(session)
+            } else {
+                rows.insert(session)
+            }
+        }
+        guard !rows.isEmpty else { return }
+        if running == nil { running = processes() }
+        var holders: [String: pid_t] = [:]
+        for watched in files.values {
+            guard let session = watched.meta?.id, rows.contains(session), let pid = running?.holder(of: watched.file) else { continue }
+            holders[session] = pid
+        }
+        for session in rows {
+            let key = AgentSession.Key(agent: .codex, id: session)
+            if let pid = holders[session] {
+                list.setProcess(key, pid)
+            } else {
+                list.remove(key)
+                listed.remove(session)
+            }
+        }
     }
 
     private func apply(_ record: RolloutRecord, _ meta: RolloutMeta, silent: Bool, at date: Date?, in file: RolloutFile) -> Task<Void, Never>? {
@@ -211,15 +245,15 @@ final class CodexRollouts {
     }
 
     /// Moves the session's row; a session seen for the first time gets its jump target here. A session
-    /// joins the list only while a process runs it (read from `file`), and its row keeps that process,
-    /// so it leaves once the process is gone even without a `shutdown_complete`.
+    /// joins the list only while a process has `file` open, and its row keeps that process, so it leaves
+    /// once the process is gone even without a `shutdown_complete`.
     private func show(_ meta: RolloutMeta, _ state: AgentSessionState?, at date: Date?, in file: RolloutFile) {
         guard follows(meta), !ended.contains(meta.id) else { return }
         let key = AgentSession.Key(agent: .codex, id: meta.id)
         var pid: pid_t?
         if list[key] == nil {
             if running == nil { running = processes() }
-            guard let process = running?.process(of: meta, file: file) else { return }
+            guard let process = running?.holder(of: file) else { return }
             pid = process
         }
         if targets[meta.id] == nil {
@@ -310,9 +344,10 @@ struct RolloutFile: Equatable, Sendable {
     var skipping = false
 }
 
-/// The processes that run rollout sessions now. A row takes its session's process and leaves the list
-/// once that process is gone (`AgentSessionList.prune`); a session no process runs is history, not an
-/// open session, and gets no row.
+/// The processes that have rollouts open now. A row takes the process that has its session's rollout
+/// open and leaves the list once that process is gone (`AgentSessionList.prune`) or has closed the file
+/// (`CodexRollouts`); a session no process has open is history, not an open session, and gets no row.
+/// The desktop app running is not enough: its app-server has open only the threads it has loaded.
 struct CodexProcesses {
     /// A file by its device and inode, as `stat` and the kernel's table of open files give them: the
     /// path a process opened it by may differ from the one the watcher walks.
@@ -322,22 +357,17 @@ struct CodexProcesses {
     }
 
     /// The `codex` process that has each file open. codex keeps a session's rollout open while the
-    /// session is loaded, in the TUI and in an app-server alike.
+    /// session is loaded, in the TUI and in an app-server (the desktop app's own included) alike.
     var holders: [File: pid_t] = [:]
-    /// The Codex desktop app, while it runs.
-    var desktopApp: pid_t?
 
-    /// The process `meta`'s session runs in: the desktop app for a desktop session, the `codex` process
-    /// that has `file` open otherwise; nil when none runs it.
-    func process(of meta: RolloutMeta, file: RolloutFile) -> pid_t? {
-        meta.desktop ? desktopApp : holders[File(device: file.device, inode: file.inode)]
+    /// The `codex` process that has `file` open; nil when none has.
+    func holder(of file: RolloutFile) -> pid_t? {
+        holders[File(device: file.device, inode: file.inode)]
     }
 
-    /// This Mac's, read only: the files the user's `codex` processes have open, and the desktop app.
-    @MainActor static func system() -> CodexProcesses {
+    /// This Mac's, read only: the files the user's `codex` processes have open.
+    static func system() -> CodexProcesses {
         var processes = CodexProcesses()
-        processes.desktopApp = NSRunningApplication.runningApplications(withBundleIdentifier: CodexRollouts.desktopApp.bundleID)
-            .first?.processIdentifier
         for pid in systemPIDs() {
             for file in openFiles(pid) {
                 processes.holders[file] = pid

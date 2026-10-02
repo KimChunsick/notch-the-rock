@@ -139,6 +139,13 @@ final class AgentSessionList {
         byKey[key]?.contextPercent = percent
     }
 
+    /// Gives `key`'s session to another process: the one that runs it now. Not an event: the row keeps
+    /// its place and its time.
+    func setProcess(_ key: AgentSession.Key, _ pid: pid_t) {
+        guard byKey[key] != nil, byKey[key]?.pid != pid else { return }
+        byKey[key]?.pid = pid
+    }
+
     func remove(_ key: AgentSession.Key) {
         byKey[key] = nil
     }
