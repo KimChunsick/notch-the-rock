@@ -132,6 +132,7 @@ struct SDKCompatibilityTests {
         #expect(output.contains("sdk: 1.0 (bundle 1.0, host \(NotchKitSDK.version))"))
         #expect(output.contains("tile: none"))
         #expect(output.contains("setup: none"), "built before SDK 1.3: no onboarding step")
+        #expect(output.contains("description: none"), "built before SDK 1.4: no description")
         #expect(output.contains("OK:"))
     }
 
@@ -141,5 +142,8 @@ struct SDKCompatibilityTests {
         #expect(status == 0)
         #expect(output.contains("sdk: \(NotchKitSDK.version) (bundle \(NotchKitSDK.version), host \(NotchKitSDK.version))"))
         #expect(output.contains("tile: small (2x2)\n"))
+        #expect(output.contains("permissions: none\n"), "the template declares that it uses no permission")
+        #expect(output.contains("settings: toggle showsStatus\n"))
+        #expect(!output.contains("description: none"))
     }
 }

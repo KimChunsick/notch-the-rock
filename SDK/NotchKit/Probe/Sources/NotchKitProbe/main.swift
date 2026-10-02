@@ -6,8 +6,9 @@ import NotchKit
 //   notchkit-probe <Name.notchplugin>
 //       Reads Info.plist, rejects an incompatible NotchKitSDKVersion before running any plugin
 //       code, dlopens the executable, resolves the entry symbol, creates the plugin against a stub
-//       host and prints its manifest, tab, tile (sizes, default first) and setup items. Exits 1
-//       with the reason on any failure.
+//       host and prints its manifest, tab, tile (sizes, default first), setup items and the
+//       description its Settings page shows (summary, permissions, settings items). Exits 1 with the
+//       reason on any failure.
 //   notchkit-probe --manifest <binary> [<entry-symbol>]
 //       Prints the manifest of a plugin binary that is not in a bundle yet as key=value lines.
 //       build-plugin.sh derives the bundle's Info.plist from this output.
@@ -57,8 +58,47 @@ func probeBundle(at path: String) throws -> [String] {
         "settingsView: \(plugin.settingsView == nil ? "-" : "yes")",
         "tile: \(tileSizes ?? "none")",
         "setup: \(plugin.setup?.items.map(\.id).joined(separator: ", ") ?? "none")",
+    ] + describe(plugin.pluginDescription) + [
         "OK: 앱과 같은 방식으로 불러와서 \(type(of: plugin)) 인스턴스를 만들었어요.",
     ]
+}
+
+/// `description: none` for a plugin that declares none (built before SDK 1.4); otherwise its
+/// summary, each permission with its reason and each settings item's kind and key.
+func describe(_ description: PluginDescription?) -> [String] {
+    guard let description else { return ["description: none"] }
+    let permissions = description.permissions.map { "\(name(of: $0.kind)) (\($0.reason))" }
+    let settings = description.settings.map { item in
+        let kind = switch item.control {
+        case .toggle: "toggle"
+        case .choice: "choice"
+        case .number: "number"
+        case .text: "text"
+        @unknown default: "unknown"
+        }
+        return "\(kind) \(item.key)"
+    }
+    return [
+        "description: \(description.summary)",
+        "permissions: \(permissions.isEmpty ? "none" : permissions.joined(separator: "; "))",
+        "settings: \(settings.isEmpty ? "none" : settings.joined(separator: ", "))",
+    ]
+}
+
+func name(of kind: PluginPermission.Kind) -> String {
+    switch kind {
+    case .accessibility: "accessibility"
+    case .automation(let app): "automation(\(app))"
+    case .screenRecording: "screenRecording"
+    case .bluetooth: "bluetooth"
+    case .notifications: "notifications"
+    case .files(let path): "files(\(path))"
+    case .keychain: "keychain"
+    case .network: "network"
+    case .helperProcesses: "helperProcesses"
+    case .otherAppSettings(let app): "otherAppSettings(\(app))"
+    @unknown default: "unknown"
+    }
 }
 
 @MainActor

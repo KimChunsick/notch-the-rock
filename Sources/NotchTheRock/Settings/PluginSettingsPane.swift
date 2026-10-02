@@ -1,8 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// 플러그인: every discovered bundle with its state, an on/off switch, consent for user bundles and
-/// the plugin's own settings page while it is on. Scrolls to the page of the record running the
+/// 플러그인: every discovered bundle with its state, an on/off switch, consent for user bundles and,
+/// while it is on, the plugin's page: what it declares (`DeclaredPluginPage`) and its own view. Scrolls to the page of the record running the
 /// plugin whose gear was pressed (`revealed`).
 struct PluginSettingsPane: View {
     let catalog: PluginCatalog
@@ -19,6 +19,7 @@ struct PluginSettingsPane: View {
                             .foregroundStyle(.secondary)
                     }
                     ForEach(catalog.records) { record in
+                        let page = catalog.page(for: record.id)
                         Section {
                             PluginRow(
                                 record: record,
@@ -26,11 +27,15 @@ struct PluginSettingsPane: View {
                                 setEnabled: { catalog.setEnabled($0, for: record.id) },
                                 consent: { consent(to: record.id) }
                             )
-                            if let settings = catalog.settingsView(for: record.id) {
-                                settings
+                            // Built before SDK 1.4: its own view right under the header, as before.
+                            if let page, page.description == nil, let custom = page.customView {
+                                custom
                             }
                         }
                         .id(record.id)
+                        if let page, let description = page.description {
+                            DeclaredPluginPage(description: description, settings: page.settings, customView: page.customView)
+                        }
                     }
                 }
                 .formStyle(.grouped)

@@ -296,23 +296,91 @@ import Testing
 
 // MARK: Stand-ins: each repeats its plugin's tab view layout (Plugins/<Name>/Sources) with fixed values.
 
-/// `BatteryView`, fully charged: the symbol and the percentage at either end of what it is offered.
+/// `BatteryView`, fully charged, in its two rows: the symbol and the percentage, then the state, at
+/// either end of what it is offered; under them two apps and a peripheral chip, each group under its
+/// caption, at the row's own width and never wider than the screen (`RowViewport`).
 struct BatteryStandIn: View {
+    private static let percentageSize: CGFloat = 32
+    private static let percentageRoom: (top: CGFloat, bottom: CGFloat) = {
+        let system = NSFont.systemFont(ofSize: percentageSize, weight: .semibold)
+        let font = system.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: percentageSize) } ?? system
+        return (font.ascender - font.capHeight, -font.descender)
+    }()
+
     var body: some View {
-        HStack(spacing: 0) {
-            Image(systemName: "battery.100percent")
-                .font(.system(size: 44))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(Color.primary)
-            Spacer(minLength: 16)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("100%")
-                    .font(.system(size: 32, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                Text("완전히 충전됨")
-                    .font(.headline)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 0) {
+                HStack(spacing: 12) {
+                    Image(systemName: "battery.100percent")
+                        .font(.system(size: 44))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(Color.primary)
+                        .padding(.leading, -5.5)
+                        .frame(height: 30)
+                    Text("100%")
+                        .font(.system(size: Self.percentageSize, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .padding(.top, -Self.percentageRoom.top)
+                        .padding(.bottom, -Self.percentageRoom.bottom)
+                }
+                .fixedSize()
+                Spacer(minLength: 16)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("완전히 충전됨")
+                        .font(.headline)
+                }
+            }
+            RowViewport {
+                HStack(alignment: .top, spacing: 12) {
+                    group("전력을 많이 쓰는 앱") {
+                        ForEach(0..<2, id: \.self) { _ in
+                            RoundedRectangle(cornerRadius: 5).fill(.white.opacity(0.6)).frame(width: 22, height: 22)
+                        }
+                    }
+                    Rectangle()
+                        .fill(.quaternary)
+                        .frame(width: 1)
+                    group("주변 기기") {
+                        HStack(spacing: 4) {
+                            Image(systemName: "airpods")
+                            Text("80%")
+                                .monospacedDigit()
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 6)
+                        .frame(height: 22)
+                        .background(Capsule().fill(.white.opacity(0.08)))
+                    }
+                }
+                .fixedSize()
             }
         }
+    }
+
+    private func group(_ caption: String, @ViewBuilder items: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(caption)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            HStack(spacing: 6) {
+                items()
+            }
+        }
+    }
+}
+
+/// `BatteryView`'s lower row viewport: as wide as the row, at most what it is offered.
+private struct RowViewport: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let row = subviews.first?.sizeThatFits(.unspecified) else { return .zero }
+        return CGSize(width: min(row.width, proposal.width ?? row.width), height: row.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(bounds.size))
     }
 }
 

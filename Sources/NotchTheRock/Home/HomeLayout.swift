@@ -14,8 +14,9 @@ struct HomePlugin {
     let symbol: String
     let tab: PluginTab?
     let tile: PluginTile?
-    /// Whether the plugin has a page in the Settings window (`NotchPlugin.settingsView`), which the
-    /// gear on its screen opens, and 설정 열기 on the host's fallback screen (`DefaultScreen`).
+    /// Whether the plugin has something to set in the Settings window (`NotchPlugin.settingsView` or
+    /// declared settings items), which the gear on its screen opens, and 설정 열기 on the host's
+    /// fallback screen (`DefaultScreen`).
     var hasSettings = false
 
     /// The sizes its grid tile can take, the first being the one it starts at: its own tile's, or
