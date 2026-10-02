@@ -2,7 +2,7 @@ import NotchKit
 import Testing
 @testable import NotchTheRock
 
-/// A plugin that folds the notch right after the user answers its attention request (the Agents
+/// A plugin that folds the notch after the user answers its attention request (the Agents
 /// plugin's "터미널로 이동") leaves the notch folded for a moment before the rest of the queue shows.
 /// Nothing is dropped, and a fold without an answer works as before.
 @MainActor
@@ -109,20 +109,106 @@ struct NotchHostCollapseTests {
         #expect(host.state == .attention)
         #expect(host.attention?.request.title == "세션 1 작업을 마쳤어요")
 
-        // Another plugin folding right after the answer, or this one folding long after it, does
-        // not hold the next alert either.
+        // Another plugin folding right after the answer does not hold the next alert either.
         host.respond(.dismissed, to: try #require(host.attention).id)
         #expect(await first.value == .dismissed)
         host.collapse(from: "com.example.other")
-        #expect(host.state == .attention)
-        advance(by: NotchHostModel.answerCollapseWindow + .milliseconds(100))
-        host.collapse(from: agents)
         #expect(host.state == .attention)
         #expect(host.attention?.request.title == "세션 2 작업을 마쳤어요")
 
         advance(by: .seconds(5))
         #expect(await second.value == .timedOut)
         #expect(host.state == .collapsed)
+    }
+
+    @Test func R51__jump_that_takes_three_seconds_still_folds_the_notch_and_holds_the_next_alert() async throws {
+        let first = Task { await host.requestAttention(notice("세션 1 작업을 마쳤어요"), from: agents) }
+        await drain()
+        let second = Task { await host.requestAttention(notice("세션 2 작업을 마쳤어요"), from: agents) }
+        await drain()
+        host.setHovering(true)
+
+        try await pressJump(on: first)
+        // A slow terminal comes forward three seconds later; the second alert has been showing since.
+        advance(by: .seconds(3))
+        #expect(host.state == .attention)
+        #expect(host.attention?.request.title == "세션 2 작업을 마쳤어요")
+        host.collapse(from: agents)
+        #expect(host.state == .collapsed)
+
+        advance(by: hold - .milliseconds(100))
+        #expect(host.state == .collapsed)
+        advance(by: .milliseconds(100))
+        #expect(host.state == .attention)
+        #expect(host.attention?.request.title == "세션 2 작업을 마쳤어요")
+
+        // Hidden after three of its five seconds, it shows for all five again.
+        advance(by: .milliseconds(4900))
+        #expect(host.state == .attention)
+        advance(by: .milliseconds(100))
+        #expect(await second.value == .timedOut)
+        #expect(host.state == .collapsed)
+    }
+
+    @Test func R51__another_answer_ends_the_fold_of_the_earlier_one() async throws {
+        let first = Task { await host.requestAttention(notice("세션 1 작업을 마쳤어요"), from: agents) }
+        await drain()
+        let other = Task { await host.requestAttention(notice("배터리가 부족해요"), from: "com.example.other") }
+        await drain()
+        let next = Task { await host.requestAttention(notice("세션 2 작업을 마쳤어요"), from: agents) }
+        await drain()
+
+        try await pressJump(on: first)
+        host.respond(.dismissed, to: try #require(host.attention).id)
+        #expect(await other.value == .dismissed)
+        host.collapse(from: agents)
+        #expect(host.state == .attention)
+        #expect(host.attention?.request.title == "세션 2 작업을 마쳤어요")
+
+        host.respond(.dismissed, to: try #require(host.attention).id)
+        #expect(await next.value == .dismissed)
+    }
+
+    @Test func R51__another_alert_timing_out_ends_the_fold() async throws {
+        let first = Task { await host.requestAttention(notice("세션 1 작업을 마쳤어요"), from: agents) }
+        await drain()
+        let short = AttentionRequest(title: "배터리가 부족해요", message: "", buttons: [], timeout: .seconds(1))
+        let other = Task { await host.requestAttention(short, from: "com.example.other") }
+        await drain()
+        let next = Task { await host.requestAttention(notice("세션 2 작업을 마쳤어요"), from: agents) }
+        await drain()
+
+        try await pressJump(on: first)
+        advance(by: .seconds(1))
+        #expect(await other.value == .timedOut)
+        host.collapse(from: agents)
+        #expect(host.state == .attention)
+        #expect(host.attention?.request.title == "세션 2 작업을 마쳤어요")
+
+        // Shown since the answer, it is gone five seconds later; the withdraw only ends what is left.
+        advance(by: .seconds(5))
+        host.withdraw(from: agents)
+        #expect(await next.value == .timedOut)
+    }
+
+    @Test func R51__user_opening_the_notch_ends_the_fold() async throws {
+        let first = Task { await host.requestAttention(notice("세션 1 작업을 마쳤어요"), from: agents) }
+        await drain()
+        let next = Task { await host.requestAttention(notice("세션 2 작업을 마쳤어요"), from: agents) }
+        await drain()
+
+        try await pressJump(on: first)
+        // The user brings the pointer onto the folded notch before the plugin folds it.
+        host.setHovering(true)
+        host.collapse(from: agents)
+        #expect(host.isExpanded == false)
+        #expect(host.state == .attention)
+        #expect(host.attention?.request.title == "세션 2 작업을 마쳤어요")
+
+        // Shown since the answer, it is gone five seconds later; the withdraw only ends what is left.
+        advance(by: .seconds(5))
+        host.withdraw(from: agents)
+        #expect(await next.value == .timedOut)
     }
 
     @Test func R45__five_second_alert_is_gone_five_seconds_after_it_appears() async throws {

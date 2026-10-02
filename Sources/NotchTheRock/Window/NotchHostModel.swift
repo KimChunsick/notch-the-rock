@@ -31,9 +31,11 @@ enum NotchState: Equatable {
 /// full time; a request that waits for an answer keeps the timeout it was asked with. No notice is
 /// dropped before it is shown. The queue stays short because a plugin cancels a source's older
 /// notice when that source sends a newer one, and a cancelled request leaves the queue by its id.
-/// A plugin that collapses the notch right after the user answered one of its requests (a jump to a
-/// terminal) folds it fully: the rest of the queue is held for `collapseHold` before the next request
-/// shows, with the same timing rules as behind a takeover.
+/// A plugin that collapses the notch after the user answered one of its requests (a jump to a
+/// terminal, however long it takes) folds it fully: the rest of the queue, including a notice that
+/// already shows, is held for `collapseHold` before the next request shows, with the same timing rules
+/// as behind a takeover. The answer allows one such collapse until another request is answered or
+/// times out, or the folded notch is opened again (the pointer, the hotkey, a link or a plugin).
 ///
 /// The expanded notch shows the home (`screen`): plugin tiles and a strip of icons, see `HomeModel`. API for
 /// the keyboard and URL plans (P17, P18): `showHome()`, `open(pluginID:)`, `back()`, `escape()` and
@@ -127,11 +129,8 @@ final class NotchHostModel: NotchHost {
     /// The home in the order it is shown, grid tiles then strip icons, with each plugin's name.
     var homeEntries: [HomeEntry] { home.entries }
 
-    /// How soon after the user answers one of a plugin's attention requests that plugin's
-    /// `collapse()` still belongs to the answer. Generous enough for a jump that holds the main actor
-    /// for a moment before it collapses, like selecting a Terminal tab with AppleScript.
-    static let answerCollapseWindow: Duration = .seconds(2)
-    /// How long the queue stays hidden after such a collapse before the next request shows.
+    /// How long the queue stays hidden after a plugin collapsed the notch on its own answer before
+    /// the next request shows.
     static let collapseHold: Duration = .milliseconds(1500)
 
     private var activities: [ActivityKey: PostedActivity] = [:]
@@ -139,8 +138,9 @@ final class NotchHostModel: NotchHost {
     private var attentions: [PendingAttention] = []
     /// Until when the queue stays hidden after a plugin collapsed the notch on its own answer.
     private var queueHeldUntil: ContinuousClock.Instant?
-    /// The plugin whose request the user answered last, and when.
-    @ObservationIgnored private var lastAnswer: (pluginID: String, at: ContinuousClock.Instant)?
+    /// The plugin whose request the user answered last, while its `collapse()` still belongs to that
+    /// answer: until it collapses, another request is answered or times out, or the notch opens.
+    @ObservationIgnored private var answeredPluginID: String?
     private var postCount = 0
     private var attentionCount = 0
 
@@ -273,7 +273,11 @@ final class NotchHostModel: NotchHost {
     func respond(_ response: AttentionResponse, to id: PendingAttention.ID) {
         guard let index = attentions.firstIndex(where: { $0.id == id }) else { return }
         let pending = attentions.remove(at: index)
-        if response != .timedOut && response != .cancelled { lastAnswer = (pending.pluginID, now()) }
+        if response == .timedOut {
+            answeredPluginID = nil
+        } else if response != .cancelled {
+            answeredPluginID = pending.pluginID
+        }
         pending.continuation.resume(returning: response)
         startShownNotice()
         scheduleExpiry()
@@ -308,6 +312,7 @@ final class NotchHostModel: NotchHost {
 
     private func setExpanded(_ expanded: Bool) {
         guard pinnedExpansion == nil else { return }
+        if expanded && !isExpanded { answeredPluginID = nil }
         isExpanded = expanded
         if !expanded {
             screen = .home
@@ -399,14 +404,14 @@ final class NotchHostModel: NotchHost {
         open(pluginID: pluginID)
     }
 
-    /// Within `answerCollapseWindow` of the user answering one of this plugin's requests, the collapse
-    /// also holds the rest of the queue for `collapseHold`, so the notch is left folded instead of
-    /// showing the next request at once. Nothing leaves the queue.
+    /// The first collapse after the user answered one of this plugin's requests, however late it
+    /// comes, also holds the rest of the queue for `collapseHold`, so the notch is left folded instead
+    /// of showing the next request at once. A notice already showing is hidden and gets its full time
+    /// when it shows again; nothing leaves the queue.
     func collapse(from pluginID: String) {
         setExpanded(false)
-        guard let answer = lastAnswer, answer.pluginID == pluginID,
-              now() - answer.at <= Self.answerCollapseWindow else { return }
-        lastAnswer = nil
+        guard answeredPluginID == pluginID else { return }
+        answeredPluginID = nil
         queueHeldUntil = now() + Self.collapseHold
         startShownNotice()
         scheduleExpiry()
