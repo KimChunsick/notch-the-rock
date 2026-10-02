@@ -63,32 +63,35 @@ final class DStackModel {
     }
 
     /// Scans off the main actor and publishes the result, unless a later refresh already did.
-    /// `retryDiscovery` tries every Claude Code project that has not decoded to a store again;
-    /// otherwise that happens at most once a minute.
-    func refresh(retryDiscovery: Bool = false) async {
+    /// `retry` tries every Claude Code project that has not decoded to a store again and rereads
+    /// every store that could not be read; otherwise that happens at most once a minute.
+    func refresh(retry: Bool = false) async {
         requested += 1
         let generation = requested
         let date = now()
-        let next = await scanner.scan(added: folders.added, removed: folders.removed, retryMisses: retryDiscovery, now: date)
+        let next = await scanner.scan(added: folders.added, removed: folders.removed, retry: retry, now: date)
         guard generation > published else { return }
         published = generation
         checkedAt = date
         if next != projects { projects = next }
     }
 
+    /// Resolves the folder's symlinks off the main actor, then keeps the result in settings.
     func add(_ url: URL) async {
-        folders.add(url)
+        let path = await scanner.key(url)
+        folders.add(path)
         await refresh()
     }
 
     func remove(_ url: URL) async {
-        folders.remove(url)
+        let path = await scanner.key(url)
+        folders.remove(path)
         await refresh()
     }
 
     func activate() {
         isActive = true
-        Task { await refresh(retryDiscovery: true) }
+        Task { await refresh(retry: true) }
         updatePolling()
     }
 
@@ -126,11 +129,12 @@ final class DStackModel {
     }
 }
 
-/// Does the plugin's file system work off the main actor: decodes Claude Code's project folders,
-/// stats the stores and rereads only those whose files changed modification time.
+/// Does the plugin's file system work off the main actor: resolves the folders picked in settings,
+/// decodes Claude Code's project folders, stats the stores and rereads those whose files changed
+/// modification time.
 actor DStackScanner {
-    /// How long a Claude Code project that did not decode to a store waits before the next try,
-    /// unless an activation asks sooner.
+    /// How long a Claude Code project that did not decode to a store, or a store that could not be
+    /// read, waits before the next try, unless an activation asks sooner.
     static let retryInterval: TimeInterval = 60
 
     private let discovery: ProjectDiscovery
@@ -138,18 +142,27 @@ actor DStackScanner {
     /// that appears or becomes readable later is found on a retry.
     private var found: [String: URL] = [:]
     private var retriedAt: Date?
+    /// The last reading of each folder and the signature of the files it came from. A reading is
+    /// reused while the signature stays the same, except that a store that could not be read is
+    /// read again on every retry: access can come back without a modification time changing.
     private var readings: [String: (signature: String, reading: StoreReading)] = [:]
 
     init(discovery: ProjectDiscovery) {
         self.discovery = discovery
     }
 
-    func scan(added: [String], removed: [String], retryMisses: Bool, now: Date) -> [DStackModel.Project] {
+    /// The path settings keep for a folder; resolving its symlinks touches the file system.
+    func key(_ url: URL) -> String {
+        ProjectFolders.key(url)
+    }
+
+    func scan(added: [String], removed: [String], retry requested: Bool, now: Date) -> [DStackModel.Project] {
         let entries = discovery.entries()
         let listed = Set(entries)
         // A found folder that vanished or lost its store is dropped and becomes a miss again.
         found = found.filter { listed.contains($0.key) && DStackStore.hasStore($0.value) }
-        if retryMisses || retriedAt.map({ now.timeIntervalSince($0) >= Self.retryInterval }) ?? true {
+        let retry = requested || retriedAt.map { now.timeIntervalSince($0) >= Self.retryInterval } ?? true
+        if retry {
             retriedAt = now
             for entry in entries where found[entry] == nil {
                 found[entry] = discovery.candidates(for: entry).first(where: DStackStore.hasStore)
@@ -161,7 +174,9 @@ actor DStackScanner {
         let projects = ProjectFolders.resolve(discovered: discovered, added: added, removed: removed).map { url in
             let store = DStackStore(project: url)
             let signature = store.signature()
-            let reading = readings[url.path].flatMap { $0.signature == signature ? $0.reading : nil } ?? store.read()
+            var cached = readings[url.path].flatMap { $0.signature == signature ? $0.reading : nil }
+            if retry, case .unsupported = cached { cached = nil }
+            let reading = cached ?? store.read()
             fresh[url.path] = (signature, reading)
             return DStackModel.Project(url: url, reading: reading, isDiscovered: discoveredKeys.contains(url.path), hasStore: DStackStore.hasStore(url))
         }

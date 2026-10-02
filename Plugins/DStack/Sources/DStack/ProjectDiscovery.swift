@@ -64,14 +64,14 @@ struct ProjectFolders {
     var added: [String] { defaults.stringArray(forKey: Self.addedKey) ?? [] }
     var removed: [String] { defaults.stringArray(forKey: Self.removedKey) ?? [] }
 
-    func add(_ url: URL) {
-        let path = Self.key(url)
+    /// Adds the folder at `path`, already resolved by `key(_:)`.
+    func add(_ path: String) {
         defaults.set(removed.filter { $0 != path }, forKey: Self.removedKey)
         if !added.contains(path) { defaults.set(added + [path], forKey: Self.addedKey) }
     }
 
-    func remove(_ url: URL) {
-        let path = Self.key(url)
+    /// Removes the folder at `path`, already resolved by `key(_:)`.
+    func remove(_ path: String) {
         defaults.set(added.filter { $0 != path }, forKey: Self.addedKey)
         if !removed.contains(path) { defaults.set(removed + [path], forKey: Self.removedKey) }
     }

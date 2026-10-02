@@ -7,7 +7,7 @@ import Testing
 
 /// The goal title, the milestone, plan, task and requirement counts, the plans in progress and the
 /// latest activity all come from the store's files.
-@Test func R50__reader_counts_the_open_run() throws {
+@Test func R53__reader_counts_the_open_run() throws {
     let temp = try TempDir()
     let project = temp.url.appendingPathComponent("sample-app")
     try writeStore(at: project)
@@ -39,7 +39,7 @@ import Testing
 
 /// The latest activity is whichever is newest: a committed task, a sealed review round or added
 /// evidence.
-@Test func R50__latest_activity_is_the_newest_of_task_review_and_evidence() throws {
+@Test func R53__latest_activity_is_the_newest_of_task_review_and_evidence() throws {
     let cases: [(task: String, review: String, evidence: String, expected: Activity)] = [
         ("2026-10-02T09:50:00Z", "2026-10-02T09:55:00Z", "2026-10-02T09:40:00Z",
          Activity(date: iso("2026-10-02T09:55:00Z"), text: "P3 리뷰 2 봉인")),
@@ -59,7 +59,7 @@ import Testing
 
 /// Another store version reads as unsupported; a missing or empty pointer or a closed run reads as
 /// no open run.
-@Test func R50__unsupported_version_and_no_open_run_are_told_apart() throws {
+@Test func R53__unsupported_version_and_no_open_run_are_told_apart() throws {
     let temp = try TempDir()
     let old = temp.url.appendingPathComponent("old")
     try writeStore(at: old, version: "1")
@@ -83,7 +83,7 @@ import Testing
 /// Files not in the shape dstack writes read as unsupported with a short reason, never as no open
 /// run or as an empty open run. An empty plan and a run without cases or review rounds yet stay
 /// valid open runs.
-@Test func R50__malformed_stores_read_as_unsupported_with_a_reason() throws {
+@Test func R53__malformed_stores_read_as_unsupported_with_a_reason() throws {
     let temp = try TempDir()
     let run = "runs/20261001T090000Z_sample-app"
     let broken: [(path: String, text: String?, reason: String)] = [
@@ -130,7 +130,7 @@ import Testing
 /// Claude Code turns every character other than a letter or digit into '-', so a hyphenated
 /// folder name decodes only by looking at what exists: the candidate with a store wins.
 @MainActor
-@Test func R50__discovery_decodes_hyphenated_folder_names() async throws {
+@Test func R53__discovery_decodes_hyphenated_folder_names() async throws {
     let temp = try TempDir()
     #expect(ProjectDiscovery.encode("/work/my-app.v2/.cfg") == "-work-my-app-v2--cfg")
     let hyphenated = try addClaudeProject("work/my-app", root: temp.url)
@@ -158,7 +158,7 @@ import Testing
 /// are tried again on each activation and at most once a minute while shown, and a found folder
 /// that vanished is dropped, so a restored folder is found again without restarting the app.
 @MainActor
-@Test func R50__discovery_retries_misses_and_drops_vanished_folders() async throws {
+@Test func R53__discovery_retries_misses_and_drops_vanished_folders() async throws {
     let temp = try TempDir()
     let clock = Clock(iso("2026-10-02T10:00:00Z"))
     let (plugin, _) = try makePlugin(root: temp.url, now: clock.date)
@@ -195,7 +195,7 @@ import Testing
 /// Folders added in settings join the discovered ones, removed ones leave, and both choices are
 /// kept in the plugin's own defaults.
 @MainActor
-@Test func R50__settings_add_and_remove_folders() async throws {
+@Test func R53__settings_add_and_remove_folders() async throws {
     let temp = try TempDir()
     let discovered = try addClaudeProject("work/found", root: temp.url)
     try writeStore(at: discovered)
@@ -219,31 +219,40 @@ import Testing
     await model.add(discovered)
     await model.remove(manual)
     #expect(model.projects.map(\.name) == ["found"])
+
+    // A folder picked through a symlink is kept by its resolved path.
+    let link = temp.url.appendingPathComponent("manual-link")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: manual)
+    await model.add(link)
+    #expect(defaults.stringArray(forKey: ProjectFolders.addedKey) == [discovered.path, manual.path])
+    #expect(model.projects.map(\.name).sorted() == ["found", "manual"])
 }
 
 /// No file in D-STACK stores or project folders is written: reading, discovering, refreshing,
-/// adding and removing folders in settings and rendering leave every fixture project, its .dstack
-/// tree and Claude Code's project folders byte for byte and mtime for mtime unchanged, even though
-/// they are read-only. The plugin's own settings live in the app's plugin storage (`storage/` and
-/// the defaults suite here), outside those trees.
+/// adding and removing folders in settings and rendering create, change or remove nothing under the
+/// test's root (the read-only fixture projects with their .dstack trees, Claude Code's project
+/// folders and the plugin's storage directory), byte for byte, mode for mode and mtime for mtime.
+/// The settings changes land in the plugin's own defaults suite and nowhere else.
 @MainActor
-@Test func R50__no_file_in_dstack_stores_or_project_folders_is_written() async throws {
+@Test func R54__no_file_in_dstack_stores_or_project_folders_is_written() async throws {
     let temp = try TempDir()
     let project = try addClaudeProject("work/sample", root: temp.url)
     try writeStore(at: project)
     let manual = temp.url.appendingPathComponent("fs/elsewhere/manual")
     try writeStore(at: manual, status: "closed")
     let (plugin, defaults) = try makePlugin(root: temp.url, now: iso("2026-10-02T10:00:00Z"))
-    let trees = ["fs", "claude"].map { temp.url.appendingPathComponent($0) }
-    let chmod = try Process.run(URL(fileURLWithPath: "/bin/chmod"), arguments: ["-R", "a-w"] + trees.map(\.path))
+    let suite = "dstack-tests.\(temp.url.lastPathComponent)"
+    let trees = ["fs", "claude"].map { temp.url.appendingPathComponent($0).path }
+    let chmod = try Process.run(URL(fileURLWithPath: "/bin/chmod"), arguments: ["-R", "a-w"] + trees)
     chmod.waitUntilExit()
-    let before = try trees.map(snapshot)
-    #expect(before[0].count > 16 && before[1].count >= 2)
+    let before = try snapshot(temp.url)
+    #expect(before.count > 20 && before.keys.contains { $0.hasSuffix("/\(temp.url.lastPathComponent)/storage") }, "\(before.keys.sorted())")
+    #expect((defaults.persistentDomain(forName: suite) ?? [:]).isEmpty)
 
     _ = DStackStore(project: project).read()
     _ = DStackStore(project: project).signature()
     plugin.activate()
-    await plugin.model.refresh(retryDiscovery: true)
+    await plugin.model.refresh(retry: true)
     #expect(plugin.model.screenProjects.count == 1)
     await plugin.model.add(manual)
     await plugin.model.remove(project)
@@ -251,34 +260,68 @@ import Testing
     await plugin.model.add(project)
     await plugin.model.remove(manual)
     #expect(plugin.model.projects.map(\.name) == ["sample"])
-    _ = try render(try #require(plugin.expandedTab).content, named: "R50-render-readonly-screen-T150")
-    _ = try render(try #require(plugin.tile).content(.wide), named: "R50-render-readonly-wide-T150")
-    _ = try render(try #require(plugin.tile).content(.small), named: "R50-render-readonly-small-T150")
-    _ = try render(DStackSettingsView(model: plugin.model), named: "R50-render-readonly-settings-T150")
+    _ = try render(try #require(plugin.expandedTab).content, named: "R54-render-readonly-screen-T151")
+    _ = try render(try #require(plugin.tile).content(.wide), named: "R54-render-readonly-wide-T151")
+    _ = try render(try #require(plugin.tile).content(.small), named: "R54-render-readonly-small-T151")
+    _ = try render(DStackSettingsView(model: plugin.model), named: "R54-render-readonly-settings-T151")
     plugin.deactivate()
 
-    #expect(try trees.map(snapshot) == before)
-    // The settings changes went to the plugin's storage.
-    #expect(defaults.stringArray(forKey: ProjectFolders.removedKey) == [manual.path])
+    #expect(try snapshot(temp.url) == before)
+    // The plugin's defaults suite holds the settings and only them; the process's own defaults
+    // hold neither list.
+    let domain = defaults.persistentDomain(forName: suite) ?? [:]
+    #expect(Set(domain.keys) == [ProjectFolders.addedKey, ProjectFolders.removedKey], "\(domain)")
+    #expect(domain[ProjectFolders.addedKey] as? [String] == [project.path])
+    #expect(domain[ProjectFolders.removedKey] as? [String] == [manual.path])
+    #expect(UserDefaults.standard.object(forKey: ProjectFolders.addedKey) == nil)
+    #expect(UserDefaults.standard.object(forKey: ProjectFolders.removedKey) == nil)
+}
+
+/// The plugin's code launches no process and calls nothing that creates, changes, moves or removes a
+/// file: no Process, NSTask or posix_spawn, no FileManager call that writes, no write(to:) on Data or
+/// String and no file handle for writing, anywhere in its sources, comments included.
+@Test func R54__plugin_code_launches_no_process_and_writes_no_file() throws {
+    let sources = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("Sources")
+    let files = try #require(FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil))
+        .compactMap { $0 as? URL }
+        .filter { $0.pathExtension == "swift" }
+    #expect(files.count >= 5, "\(sources.path)")
+    let forbidden: [(String, Regex<Substring>)] = [
+        ("a process launch", /\bProcess\b|\bNSTask\b|posix_spawn/),
+        ("a FileManager write", /\b(?:createDirectory|createFile|removeItem|trashItem|moveItem|copyItem|replaceItem|linkItem|createSymbolicLink|setAttributes)\b/),
+        ("write(to:)", /\.write\s*\(\s*(?:to|toFile|toURL)\s*:/),
+        ("a file handle for writing", /FileHandle\s*\(\s*for(?:Writing|Updating)/),
+    ]
+    for file in files {
+        let text = try String(contentsOf: file, encoding: .utf8)
+        for (name, pattern) in forbidden {
+            // Simple word boundaries: the default Unicode ones join `Process.run` into one word.
+            for match in text.matches(of: pattern.wordBoundaryKind(.simple)) {
+                Issue.record("\(file.lastPathComponent): \(name) — \(match.output)")
+            }
+        }
+    }
 }
 
 /// The screen draws to its edges, fills a wider offer and fits the notch with one or two projects;
 /// with none it says how to add a folder.
 @MainActor
-@Test func R50__screen_renders_one_two_and_no_projects() async throws {
+@Test func R53__screen_renders_one_two_and_no_projects() async throws {
     let temp = try TempDir()
     let (plugin, _) = try makePlugin(root: temp.url, now: iso("2026-10-02T09:53:20Z"))
     let tab = try #require(plugin.expandedTab)
     #expect(tab.title == "D-STACK")
 
     await plugin.model.refresh()
-    let empty = try render(tab.content, named: "R50-render-empty-T150")
+    let empty = try render(tab.content, named: "R53-render-empty-T151")
     #expect(empty.width > 0 && empty.width <= 390 && empty.height > 0 && empty.height <= 400, "\(empty)")
 
     let first = temp.url.appendingPathComponent("fs/sample-app")
     try writeStore(at: first)
     await plugin.model.add(first)
-    let one = try render(tab.content, named: "R50-render-one-T150")
+    let one = try render(tab.content, named: "R53-render-one-T151")
     #expect(one.width > 0 && one.width <= 390 && one.height > empty.height && one.height <= 400, "\(one)")
     let insets = try inkInsets(tab.content)
     for (side, inset) in [("left", insets.left), ("right", insets.right), ("bottom", insets.bottom)] {
@@ -291,17 +334,19 @@ import Testing
     try writeStore(at: second, lastTaskAt: "2026-10-02T09:52:00Z")
     await plugin.model.add(second)
     #expect(plugin.model.screenProjects.map(\.name) == ["other-app", "sample-app"])
-    let two = try render(tab.content, named: "R50-render-screen-T150")
+    let two = try render(tab.content, named: "R53-render-screen-T151")
     #expect(two.width <= 390 && two.height > one.height, "\(two)")
     #expect(NSHostingView(rootView: tab.content.frame(width: 360, height: 400)).fittingSize.height <= 400)
 }
 
-/// The wide tile shows the goal title, the plans bar with done/total, a milestone strip, task and
-/// requirement counts, the plans in progress and the latest activity; the small one a ring with
-/// the percentage, the project name, the plan in progress and the task count. Without any project
-/// the tile says so and draws no progress. Every state fits the home's 190×90 and 90×90 frames.
+/// The screen shows every value. The wide tile shows the goal title, the plans bar with done/total,
+/// a strip with a segment per milestone (labeled with its id and done/total, filled by its share),
+/// task and requirement counts, the plans in progress and the latest activity; the small one a ring
+/// with the percentage, the project name, the plan in progress and the task count. Without any
+/// project the tile says so and draws no progress. Every state fits the home's 190×90 and 90×90
+/// frames.
 @MainActor
-@Test func R50__widget_renders_show_their_content() async throws {
+@Test func R53__screen_and_widget_renders_show_their_values() async throws {
     let temp = try TempDir()
     let (plugin, _) = try makePlugin(root: temp.url, now: iso("2026-10-02T09:53:20Z"))
     let tile = try #require(plugin.tile)
@@ -312,33 +357,93 @@ import Testing
     }
 
     await plugin.model.refresh()
-    let emptyWide = try look(tile.content(.wide), named: "R50-render-wide-empty-T150")
+    let emptyWide = try look(tile.content(.wide), named: "R53-render-wide-empty-T151")
     #expect(emptyWide.text.contains("열린D-STACK실행이없어요"), "\(emptyWide.text)")
     #expect(emptyWide.greenBands == 0 && fits(.wide, emptyWide.size), "\(emptyWide)")
-    let emptySmall = try look(tile.content(.small), named: "R50-render-small-empty-T150")
+    let emptySmall = try look(tile.content(.small), named: "R53-render-small-empty-T151")
     #expect(emptySmall.text.contains("D-STACK"), "\(emptySmall.text)")
     #expect(emptySmall.greenBands == 0 && fits(.small, emptySmall.size), "\(emptySmall)")
 
     let project = temp.url.appendingPathComponent("fs/sample-app")
     try writeStore(at: project)
+    try splitMilestones(in: project)
     await plugin.model.add(project)
-    let wide = try look(tile.content(.wide), named: "R50-render-wide-T150")
-    for token in ["샘플목표", "계획2/6", "작업4/7", "요구사항2/3", "P3", "P4", "3분전", "P3작업T4커밋"] {
+    let wide = try look(tile.content(.wide), named: "R53-render-wide-T151")
+    for token in ["샘플목표", "계획3/6", "작업4/7", "요구사항2/3", "P3", "P4", "3분전", "P3작업T4커밋", "M12/2", "M21/3", "M30/1"] {
         #expect(wide.text.contains(token), "\(token) missing from the wide tile: \(wide.text)")
     }
-    // The plans bar and, below it, the milestone strip.
+    // The plans bar and, below it, the milestone strip: one bar per milestone, each filled by its
+    // share of done plans.
     #expect(wide.greenBands == 2 && fits(.wide, wide.size), "\(wide)")
-    let small = try look(tile.content(.small), named: "R50-render-small-T150")
-    for token in ["33%", "sample-app", "P3", "4/7"] {
+    let strip = wide.shares.count == 2 ? wide.shares[1] : []
+    #expect(strip.count == 3, "\(wide.shares)")
+    for (share, expected) in zip(strip, [1.0, 1.0 / 3, 0]) {
+        #expect(abs(share - expected) < 0.04, "\(strip)")
+    }
+    let small = try look(tile.content(.small), named: "R53-render-small-T151")
+    for token in ["50%", "sample-app", "P3", "4/7"] {
         #expect(small.text.contains(token), "\(token) missing from the small tile: \(small.text)")
     }
     #expect(small.greenBands == 1 && fits(.small, small.size), "\(small)")
+    let screen = try look(try #require(plugin.expandedTab).content, named: "R53-render-screen-values-T151")
+    for token in ["sample-app", "샘플목표", "계획3/6", "50%", "작업4/7커밋", "요구사항2/3충족", "M1base", "M2extras", "M3later", "P3widget", "P4sync", "3분전", "P3작업T4커밋"] {
+        #expect(screen.text.contains(token), "\(token) missing from the screen: \(screen.text)")
+    }
+}
+
+/// A store it could not read is never trusted across a retry. When access comes back without any
+/// modification time changing, the once-a-minute retry and the next activation read it again; a
+/// poll before then still reports it unreadable.
+@MainActor
+@Test func R53__a_store_that_becomes_readable_again_is_read_on_the_next_retry() async throws {
+    let temp = try TempDir()
+    let clock = Clock(iso("2026-10-02T10:00:00Z"))
+    let (plugin, _) = try makePlugin(root: temp.url, now: clock.date)
+    let model = plugin.model
+    let project = temp.url.appendingPathComponent("fs/sample-app")
+    try writeStore(at: project)
+    let run = project.appendingPathComponent(".dstack/runs/20261001T090000Z_sample-app")
+    func access(_ file: String, _ mode: Int, touch: Date? = nil) throws {
+        var attributes: [FileAttributeKey: Any] = [.posixPermissions: mode]
+        if let touch { attributes[.modificationDate] = touch }
+        try FileManager.default.setAttributes(attributes, ofItemAtPath: run.appendingPathComponent(file).path)
+    }
+    func isOpen() -> Bool {
+        if case .open = model.projects.first?.reading { true } else { false }
+    }
+
+    try access("meta.tsv", 0o000)
+    await model.add(project)
+    #expect(model.projects.map(\.reading) == [.unsupported("meta.tsv가 없어요")])
+    let signature = DStackStore(project: project).signature()
+    try access("meta.tsv", 0o644)
+    #expect(DStackStore(project: project).signature() == signature)
+    clock.date += 30
+    await model.refresh()
+    #expect(!isOpen(), "an unreadable store was read again within a minute")
+    clock.date += 31
+    await model.refresh()
+    #expect(isOpen(), "not read again a minute later: \(model.projects.map(\.reading))")
+
+    // A file that goes unreadable with a new modification time is read at once.
+    try access("cases.tsv", 0o000, touch: iso("2026-10-02T10:05:00Z"))
+    await model.refresh()
+    #expect(model.projects.map(\.reading) == [.unsupported("cases.tsv 줄 형식이 달라요")])
+    try access("cases.tsv", 0o644)
+    await model.refresh()
+    #expect(!isOpen(), "an unreadable store was read again within a minute")
+    plugin.activate()
+    for _ in 0..<100 where !isOpen() {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(isOpen(), "not read again on activation: \(model.projects.map(\.reading))")
+    plugin.deactivate()
 }
 
 /// With nothing but a store it cannot read, the tiles and the screen say the format could not be
 /// read and why, instead of claiming there is no open run.
 @MainActor
-@Test func R50__tiles_and_screen_show_a_store_they_cannot_read() async throws {
+@Test func R53__tiles_and_screen_show_a_store_they_cannot_read() async throws {
     let temp = try TempDir()
     let (plugin, _) = try makePlugin(root: temp.url, now: iso("2026-10-02T09:53:20Z"))
     let project = temp.url.appendingPathComponent("fs/odd-app")
@@ -352,14 +457,14 @@ import Testing
 
     let tile = try #require(plugin.tile)
     for (size, limit) in [(TileSize.wide, CGSize(width: 190, height: 90)), (.small, CGSize(width: 90, height: 90))] {
-        let shown = try look(tile.content(size), named: size == .wide ? "R50-render-unsupported-T150" : "R50-render-unsupported-small-T150")
+        let shown = try look(tile.content(size), named: size == .wide ? "R53-render-unsupported-T151" : "R53-render-unsupported-small-T151")
         for token in ["형식을읽지못했어요", "plan.json", "odd-app"] {
             #expect(shown.text.contains(token), "\(token) missing from the \(size) tile: \(shown.text)")
         }
         #expect(!shown.text.contains("실행이없어요"), "\(size): \(shown.text)")
         #expect(shown.greenBands == 0 && shown.size.width <= limit.width && shown.size.height <= limit.height, "\(size) \(shown)")
     }
-    let screen = try look(try #require(plugin.expandedTab).content, named: "R50-render-unsupported-screen-T150")
+    let screen = try look(try #require(plugin.expandedTab).content, named: "R53-render-unsupported-screen-T151")
     for token in ["odd-app", "형식을읽지못했어요", "plan.json구조가달라요"] {
         #expect(screen.text.contains(token), "\(token) missing from the screen: \(screen.text)")
     }
@@ -368,7 +473,7 @@ import Testing
 /// While the screen or tile is shown the plugin rereads changed files on its interval, and stops
 /// once nothing shows it.
 @MainActor
-@Test func R50__polls_while_shown_and_stops_when_hidden() async throws {
+@Test func R53__polls_while_shown_and_stops_when_hidden() async throws {
     let temp = try TempDir()
     let project = temp.url.appendingPathComponent("fs/sample-app")
     try writeStore(at: project)

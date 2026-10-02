@@ -14,7 +14,7 @@ final class TempDir {
 
     init() throws {
         url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("P59-T150-\(UUID().uuidString)")
+            .appendingPathComponent("P59-T151-\(UUID().uuidString)")
             .resolvingSymlinksInPath()
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }
@@ -120,6 +120,22 @@ func writeStore(
     002\tplan\tP3\tcodex-review-002.md\t\(lastReviewAt)\t0\t2\t0
 
     """, "runs/\(id)/review/index.tsv")
+}
+
+/// Makes the sample store's two milestones three, with 2/2, 1/3 and 0/1 plans done: P5 is done and
+/// P6 moves to a new M3, so three plans of six are done.
+func splitMilestones(in project: URL) throws {
+    let path = "runs/20261001T090000Z_sample-app/plan.json"
+    var plan = try String(contentsOf: project.appendingPathComponent(".dstack/\(path)"), encoding: .utf8)
+    for (old, new) in [
+        (#"{"id": "M1", "slug": "base", "order": 1}]"#, #"{"id": "M1", "slug": "base", "order": 1}, {"id": "M3", "slug": "later", "order": 3}]"#),
+        (#""slug": "docs", "status": "pending""#, #""slug": "docs", "status": "done""#),
+        (#"{"id": "P6", "milestone": "M2""#, #"{"id": "P6", "milestone": "M3""#),
+    ] {
+        try #require(plan.contains(old), "\(old)")
+        plan = plan.replacingOccurrences(of: old, with: new)
+    }
+    try replace(path, in: project, with: plan)
 }
 
 /// Every file and directory under `root` with its mode, modification time and content hash.
@@ -242,10 +258,11 @@ func render(_ view: some View, named name: String) throws -> CGSize {
 
 /// What a render of `view` on black at 4x shows: the text Vision reads in it, top to bottom without
 /// spaces or middle dots, how many separate bands of rows hold green (the plans bar, the milestone
-/// strip, the ring) and its size in points. Writes the render to `$DSTACK_CAPTURE_DIR/<name>.png`
-/// when that variable is set.
+/// strip, the ring), for each band the green share of every separate bar crossing its middle row
+/// (left to right; a bar is a run of non-black pixels) and its size in points. Writes the render to
+/// `$DSTACK_CAPTURE_DIR/<name>.png` when that variable is set.
 @MainActor
-func look(_ view: some View, named name: String) throws -> (text: String, greenBands: Int, size: CGSize) {
+func look(_ view: some View, named name: String) throws -> (text: String, greenBands: Int, shares: [[Double]], size: CGSize) {
     let renderer = ImageRenderer(content: view.background(.black).environment(\.colorScheme, .dark))
     renderer.scale = 4
     let image = try #require(renderer.cgImage)
@@ -272,15 +289,33 @@ func look(_ view: some View, named name: String) throws -> (text: String, greenB
         space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
     ))
     context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-    var bands = 0, previous = false
-    for y in 0..<height {
-        let green = (0..<width).contains { x in
-            let i = (y * width + x) * 4
-            let (r, g, b) = (Int(pixels[i]), Int(pixels[i + 1]), Int(pixels[i + 2]))
-            return g >= 120 && g > r + 60 && g > b + 40
-        }
-        if green, !previous { bands += 1 }
-        previous = green
+    func isGreen(_ x: Int, _ y: Int) -> Bool {
+        let i = (y * width + x) * 4
+        let (r, g, b) = (Int(pixels[i]), Int(pixels[i + 1]), Int(pixels[i + 2]))
+        return g >= 120 && g > r + 60 && g > b + 40
     }
-    return (text, bands, CGSize(width: CGFloat(width) / 4, height: CGFloat(height) / 4))
+    var bands: [ClosedRange<Int>] = []
+    for y in 0..<height where (0..<width).contains(where: { isGreen($0, y) }) {
+        if let last = bands.last, last.upperBound == y - 1 {
+            bands[bands.count - 1] = last.lowerBound...y
+        } else {
+            bands.append(y...y)
+        }
+    }
+    let shares = bands.map { band -> [Double] in
+        let y = (band.lowerBound + band.upperBound) / 2
+        var result: [Double] = [], inked = 0, green = 0
+        for x in 0...width {
+            let i = (y * width + min(x, width - 1)) * 4
+            if x < width, max(pixels[i], pixels[i + 1], pixels[i + 2]) >= 14 {
+                inked += 1
+                if isGreen(x, y) { green += 1 }
+            } else if inked > 0 {
+                result.append(Double(green) / Double(inked))
+                (inked, green) = (0, 0)
+            }
+        }
+        return result
+    }
+    return (text, bands.count, shares, CGSize(width: CGFloat(width) / 4, height: CGFloat(height) / 4))
 }

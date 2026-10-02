@@ -135,8 +135,9 @@ struct ProjectCard: View {
 }
 
 /// The home tile: the most recently active open run, else a store this plugin cannot read, else a
-/// note that there is none. Wide: goal title, the plans bar with done/total, a strip with a segment
-/// per milestone, task and requirement counts with the plans in progress, and the latest activity.
+/// note that there is none. Wide: goal title, the plans bar with done/total, a strip with a labeled
+/// segment per milestone, task and requirement counts with the plans in progress, and the latest
+/// activity.
 /// Small: a ring with the percentage, the project name, the first plan in progress and the tasks.
 struct DStackTile: View {
     static let shownPlans = 3
@@ -161,7 +162,7 @@ struct DStackTile: View {
                 }
                 .frame(width: 70)
             case (.open(let run), _):
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(run.title)
                         .font(.system(size: 11, weight: .semibold))
                         .lineLimit(1)
@@ -173,7 +174,6 @@ struct DStackTile: View {
                             .fixedSize()
                     }
                     MilestoneStrip(milestones: run.milestones)
-                        .frame(height: 3)
                     HStack(spacing: 6) {
                         Text("작업 \(run.tasksCommitted)/\(run.tasksTotal) · 요구사항 \(run.requirementsMet)/\(run.requirementsLive)")
                             .foregroundStyle(.secondary)
@@ -259,14 +259,24 @@ struct DStackTile: View {
     }
 }
 
-/// One segment per milestone, each filled by its share of done plans.
+/// One segment per milestone, all as wide: its id and done/total plans, e.g. `M1 5/5`, above a bar
+/// filled by its share of done plans. A label longer than its segment shrinks a little first.
 struct MilestoneStrip: View {
     let milestones: [MilestoneProgress]
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 4) {
             ForEach(milestones, id: \.id) { milestone in
-                ProgressBar(fraction: milestone.total == 0 ? 0 : Double(milestone.done) / Double(milestone.total))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(milestone.id) \(milestone.done)/\(milestone.total)")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                    ProgressBar(fraction: milestone.total == 0 ? 0 : Double(milestone.done) / Double(milestone.total))
+                        .frame(height: 3)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
