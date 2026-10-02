@@ -451,6 +451,109 @@ private func openTwice(
     #expect(try contents(of: directory) == before)
 }
 
+// MARK: - Resetting a history that could not be read
+
+/// This session could not read the history when it opened it. Then another opening read the same
+/// folder, after access came back or with a key file it replaced, and saved a copy there. The
+/// reset this session asks for next finds a history it can read with the key in the key file, so
+/// it deletes nothing: it keeps that history, adds this session's copy and saves both with that key.
+@MainActor
+@Test(arguments: ["access came back", "the key file was replaced"])
+func R57__a_reset_never_deletes_a_history_another_opening_saved(_ change: String) throws {
+    let directory = try makeDirectory()
+    let list = directory.appendingPathComponent(ClipboardStore.listFileName)
+    defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: list.path) }
+    let opened = try ClipboardStore.open(in: directory)
+    let history = ClipboardHistory(logError: { _ in })
+    var expected: [ClipItem.Content] = [.text("copied in this session"), .text("saved by the other opening")]
+    func otherOpeningSaves() throws {
+        let other = ClipboardHistory(logError: { _ in })
+        other.open(try ClipboardStore.open(in: directory).store)
+        other.record(.text("saved by the other opening"))
+        other.flush()
+    }
+    if change == "access came back" {
+        writeHistory(in: directory, key: opened.key, text: "saved before the read failed")
+        expected.append(.text("saved before the read failed"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: list.path)
+        history.open(opened.store)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: list.path)
+        try otherOpeningSaves()
+    } else {
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: keyFile(in: directory).path)
+        try otherOpeningSaves()
+        history.open(opened.store)
+    }
+    #expect(history.isStoreUnreadable)
+    let keyBytes = try Data(contentsOf: keyFile(in: directory))
+    history.record(.text("copied in this session"))
+
+    history.resetUnreadableStore()
+    history.flush()
+
+    #expect(!history.isStoreUnreadable)
+    #expect(history.items.map(\.content) == expected)
+    #expect(try Data(contentsOf: keyFile(in: directory)) == keyBytes)
+    #expect(try storedContents(in: directory) == expected)
+}
+
+/// A reset holds the opening lock from finding the list unreadable to deleting it: an opening that
+/// starts in between waits until the reset is done, so what that opening saves stays.
+@MainActor
+@Test func R57__an_opening_waits_until_a_reset_has_deleted() throws {
+    let directory = try makeDirectory()
+    let store = try ClipboardStore.open(in: directory).store
+    writeHistory(in: directory, key: makeKey(), text: "sealed with another key")
+    let openingWaits = DispatchSemaphore(value: 0)
+    let openingSaved = DispatchSemaphore(value: 0)
+    let failure = OSAllocatedUnfairLock<String?>(initialState: nil)
+
+    let reset = try store.resetIfUnreadable { step in
+        guard step == .unreadableHistoryChecked else { return }
+        Thread.detachNewThread {
+            defer { openingSaved.signal() }
+            do {
+                let opened = try ClipboardStore.open(in: directory) {
+                    if $0 == .waitingForLock { openingWaits.signal() }
+                }
+                try opened.store.saveList([ClipItem(id: UUID(), content: .text("saved by the opening"), date: .now, isPinned: false)])
+            } catch {
+                failure.withLock { $0 = "\(error)" }
+            }
+        }
+        #expect(openingWaits.wait(timeout: .now() + 60) == .success, "the opening did not wait for the reset")
+    }
+
+    #expect(openingSaved.wait(timeout: .now() + 60) == .success)
+    #expect(failure.withLock { $0 } == nil)
+    guard case .deleted = reset else {
+        Issue.record("the reset found the list sealed with another key readable")
+        return
+    }
+    #expect(try storedContents(in: directory) == [.text("saved by the opening")])
+}
+
+/// While another opening holds the lock longer than a reset waits, the reset fails and deletes
+/// nothing.
+@MainActor
+@Test func R57__a_reset_that_cannot_take_the_lock_deletes_nothing() throws {
+    let directory = try makeDirectory()
+    let store = try ClipboardStore.open(in: directory).store
+    writeHistory(in: directory, key: makeKey(), text: "sealed with another key")
+    let holder = open(directory.appendingPathComponent(ClipboardStore.openingLockName).path, O_RDWR | O_CLOEXEC)
+    try #require(holder >= 0)
+    defer { close(holder) }
+    try #require(flock(holder, LOCK_EX | LOCK_NB) == 0)
+    let before = try contents(of: directory)
+
+    let error = #expect(throws: POSIXError.self) {
+        try store.resetIfUnreadable(waitingAtMost: .milliseconds(200))
+    }
+
+    #expect(error?.code == .ETIMEDOUT)
+    #expect(try contents(of: directory) == before)
+}
+
 /// The plugin's sources make no keychain call of any kind: no Security framework keychain symbol
 /// and none of NotchKit's keychain methods.
 @Test func R57__the_clipboard_sources_make_no_keychain_calls() throws {

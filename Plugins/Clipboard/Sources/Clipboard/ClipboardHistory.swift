@@ -201,11 +201,22 @@ final class ClipboardHistory {
 
     /// Deletes the unreadable stored history, image files first and the list last, and saves the
     /// entries of this session in its place; an image whose file cannot be written stays in memory
-    /// only. When a deletion fails the list is still there, so the store stays unreadable.
+    /// only. The store decides again under the opening lock (`ClipboardStore.resetIfUnreadable()`):
+    /// a history that can be read by then, saved by another opening or reachable again, is not
+    /// deleted but opened as `open(_:)` opens one, with this session's entries and edits kept. When
+    /// the lock cannot be taken in time or a deletion fails, the list is still there, so the store
+    /// stays unreadable.
     func resetUnreadableStore() {
-        guard let store = unreadableStore else { return }
+        guard let unreadable = unreadableStore else { return }
+        let store: ClipboardStore
         do {
-            try store.deleteAll()
+            switch try unreadable.resetIfUnreadable() {
+            case .readable(let readable):
+                open(readable)
+                return
+            case .deleted(let emptied):
+                store = emptied
+            }
         } catch {
             logError("could not delete the unreadable clipboard history: \(error)")
             return

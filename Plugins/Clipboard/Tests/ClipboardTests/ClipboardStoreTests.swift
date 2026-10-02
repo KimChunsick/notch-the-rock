@@ -190,7 +190,7 @@ import Testing
     #expect(!history.isStoreUnreadable)
     history.flush()
     let names = try files(in: directory).map(\.lastPathComponent)
-    #expect(names.count == 2)  // the new list and the new image
+    #expect(names.count == 3)  // the new list, the new image and the lock file the reset took
     #expect(!names.contains("\(oldImage.id.uuidString).\(ClipboardStore.imageExtension)"))
 
     let errors = ErrorLog()
@@ -246,7 +246,7 @@ import Testing
     history.resetUnreadableStore()
     #expect(!history.isStoreUnreadable)
     history.flush()
-    #expect(try files(in: directory).map(\.lastPathComponent) == [ClipboardStore.listFileName])
+    #expect(Set(try files(in: directory).map(\.lastPathComponent)) == [ClipboardStore.listFileName, ClipboardStore.openingLockName])
     #expect(makeHistory(directory: directory, key: key).items.map(\.content) == [.text("this session")])
 }
 

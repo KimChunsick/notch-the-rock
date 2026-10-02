@@ -113,9 +113,9 @@ extension ClipboardStore {
     /// is deleted.
     static let oldHistoryMarkerName = "old-history-to-delete"
 
-    /// An empty file in the directory that every opening holds an exclusive `flock` on while it
-    /// inspects and changes the key file and the history beside it, so that openings in this
-    /// process and in any other run one at a time. It holds no secret and is never removed: an
+    /// An empty file in the directory that every opening and every reset holds an exclusive `flock`
+    /// on while it inspects and changes the key file and the history beside it, so that they run
+    /// one at a time, in this process and in any other. It holds no secret and is never removed: an
     /// opening that removed it could let a later one lock a new file while an earlier one still
     /// holds the old.
     static let openingLockName = "history.lock"
@@ -123,14 +123,28 @@ extension ClipboardStore {
     /// How long an opening waits for another one to finish.
     static let openingLockTimeout: Duration = .seconds(30)
 
-    /// The points in `open(in:)` where tests stop an opening, to run another one meanwhile.
+    /// The points in `open(in:)` and `resetIfUnreadable()` where tests stop one, to run an opening
+    /// meanwhile.
     enum OpeningStep: Sendable {
-        /// Another opening holds the lock, and this one starts waiting for it.
+        /// Another opening or reset holds the lock, and this one starts waiting for it.
         case waitingForLock
         /// The key file is missing or not trusted; nothing is created or removed yet.
         case keyInspected
         /// The list does not open with the key; nothing is deleted yet.
         case oldHistoryChecked
+        /// On a reset, the list still cannot be read with the key in the key file; nothing is
+        /// deleted yet.
+        case unreadableHistoryChecked
+    }
+
+    /// What `resetIfUnreadable()` found under the opening lock, with the store to use from then on:
+    /// this one's folder and the key in the key file.
+    enum Reset {
+        /// The list can be read with that key, saved by another opening or reachable again, so
+        /// nothing was deleted.
+        case readable(ClipboardStore)
+        /// The list still could not be read, and its files and every image file were deleted.
+        case deleted(ClipboardStore)
     }
 
     /// What `open(in:)` returns: the store, the key it seals with, how that key was got, and
@@ -177,6 +191,30 @@ extension ClipboardStore {
             try store.removeIfPresent(marker)
         }
         return (store, key, origin, removedOldHistory)
+    }
+
+    /// Deletes the history in this store's folder, image files first and the list last, unless it
+    /// can be read now. That this store could not read it is a finding of the past: another opening
+    /// may have saved a history there since, with this key or with a key file it replaced, or access
+    /// may have come back. So under the opening lock this reads the key file again and tries the
+    /// list with its key, and deletes only when the list still cannot be read. Without a trusted key
+    /// file (a store made with a given key, as the tests do) the store's own key is tried. Nothing
+    /// is created or deleted besides: the key file is only read, and one that cannot be read is
+    /// thrown. When another opening holds the lock for longer than `timeout`, this throws
+    /// `ETIMEDOUT` with nothing deleted. `step` is called at the points `OpeningStep` names.
+    func resetIfUnreadable(
+        waitingAtMost timeout: Duration = Self.openingLockTimeout,
+        at step: (OpeningStep) -> Void = { _ in }
+    ) throws -> Reset {
+        let lock = try Self.lockOpening(in: directory, waitingAtMost: timeout, at: step)
+        defer { close(lock) }
+        let current = ClipboardStore(directory: directory, key: try HistoryKey.stored(in: directory) ?? key, writeFile: writeFile)
+        if (try? current.loadList()) != nil {
+            return .readable(current)
+        }
+        step(.unreadableHistoryChecked)
+        try current.deleteAll()
+        return .deleted(current)
     }
 
     /// Takes the opening lock in `directory` and returns the descriptor that holds it; closing it
@@ -288,6 +326,14 @@ enum HistoryKey {
             throw CocoaError(.fileReadCorruptFile, userInfo: [NSFilePathErrorKey: url.path])
         }
         return (key, .stored)
+    }
+
+    /// The key in the key file, nil when there is none or it is not trusted, the cases
+    /// `load(in:willCreate:)` replaces. Creates and changes nothing; a key file that cannot be read
+    /// for another reason is thrown.
+    static func stored(in directory: URL) throws -> SymmetricKey? {
+        guard case .key(let key) = try read(directory.appendingPathComponent(fileName)) else { return nil }
+        return key
     }
 
     /// The key in the file at `url` when that is a regular file of this user with mode 0600 holding
