@@ -75,7 +75,7 @@ enum Transcript {
         let bridge = CodexBridge(context: context, activator: FakeActivator(), terminal: { _ in nil })
         let watcher = CodexRollouts(
             root: tree.root, context: context, bridge: bridge, activator: FakeActivator(), terminal: { _ in nil },
-            processes: FakeCodexProcesses(tree: tree).snapshot
+            processTerminal: { _ in nil }, processes: FakeCodexProcesses(tree: tree).snapshot
         )
         bridge.open { _ in }
         bridge.receive(try codexFixture("initializeResponse"))

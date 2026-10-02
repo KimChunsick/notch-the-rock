@@ -26,7 +26,10 @@ import SwiftUI
 /// again the sessions a process has open but the list dropped, whether or not their files changed. What
 /// each session's records tell is kept whether or not it is listed, a process has its file open or the
 /// bridge follows it, so a session listed again shows its turn as it is; a session given to another
-/// process takes that process's terminal, for its row and its alerts.
+/// process takes that process's terminal, for its row and its alerts. That terminal is the app the
+/// process runs under, traced through its ancestors, so another TUI in the same folder does not hide it;
+/// the folder's TUI is looked up only when the ancestors lead to no terminal, and a session whose
+/// terminal was not found is looked up again every pass.
 @MainActor
 final class CodexRollouts {
     static let interval: Duration = .seconds(2)
@@ -41,8 +44,11 @@ final class CodexRollouts {
     private let context: NotchContext
     private let bridge: CodexBridge
     private let activator: any TerminalActivating
-    /// The terminal of the `codex` TUI working in a folder; looked up once per session.
+    /// The terminal of the `codex` TUI working in a folder: where a session goes when its process's own
+    /// terminal is not found.
     private let terminal: @MainActor (String?) -> TerminalLocation?
+    /// The terminal app a process runs under, found through its ancestors (`TerminalFinder`).
+    private let processTerminal: @MainActor (pid_t) -> TerminalLocation?
     private let logos: (any AgentLogoProviding)?
     private let now: () -> Date
     private let processes: @MainActor () -> CodexProcesses
@@ -92,6 +98,7 @@ final class CodexRollouts {
         bridge: CodexBridge,
         activator: any TerminalActivating,
         terminal: @escaping @MainActor (String?) -> TerminalLocation?,
+        processTerminal: @escaping @MainActor (pid_t) -> TerminalLocation? = { TerminalFinder.system.find(startingAt: $0) },
         logos: (any AgentLogoProviding)? = nil,
         now: @escaping () -> Date = { .now },
         processes: @escaping @MainActor () -> CodexProcesses = CodexProcesses.system
@@ -101,6 +108,7 @@ final class CodexRollouts {
         self.bridge = bridge
         self.activator = activator
         self.terminal = terminal
+        self.processTerminal = processTerminal
         self.logos = logos
         self.now = now
         self.processes = processes
@@ -289,23 +297,29 @@ final class CodexRollouts {
 
     /// Gives `meta`'s session to `pid`, the process that has its rollout open now: lists it as its records
     /// tell it when it is not listed, or moves its row when another process had it. Either way its row and
-    /// its alerts take the user to that process's terminal from then on, looked up as for a new session.
+    /// its alerts take the user to that process's terminal from then on. While that terminal is not found,
+    /// every pass looks for it again, and its row and alerts go there once it is.
     private func hold(_ meta: RolloutMeta, by pid: pid_t) {
         let key = AgentSession.Key(agent: .codex, id: meta.id)
         if let row = list[key] {
-            guard row.pid != pid else { return }
-            list.setProcess(key, pid, terminal: retarget(meta))
+            if row.pid != pid {
+                list.setProcess(key, pid, terminal: retarget(meta, for: pid))
+            } else if (targets[meta.id] ?? nil) == nil, let found = retarget(meta, for: pid) {
+                list.setProcess(key, pid, terminal: found)
+            }
             return
         }
         let told = told[meta.id]
-        list.update(key, folder: meta.folder, state: told?.state, terminal: retarget(meta), pid: pid, changed: told?.changed)
+        list.update(key, folder: meta.folder, state: told?.state, terminal: retarget(meta, for: pid), pid: pid, changed: told?.changed)
         list.setContext(key, told?.contextPercent)
         listed.insert(meta.id)
     }
 
-    /// Looks up again where the session's row and alerts take the user, for the process that has it now.
-    private func retarget(_ meta: RolloutMeta) -> TerminalLocation? {
-        let target = meta.desktop ? Self.desktopApp : terminal(meta.cwd)
+    /// Looks up again where the session's row and alerts take the user, for `pid`, the process that has it
+    /// now: the desktop app for its sessions, otherwise the terminal app that process runs under, or, when
+    /// its ancestors lead to none, the one terminal of the TUIs working in the session's folder.
+    private func retarget(_ meta: RolloutMeta, for pid: pid_t) -> TerminalLocation? {
+        let target = meta.desktop ? Self.desktopApp : processTerminal(pid) ?? terminal(meta.cwd)
         targets[meta.id] = .some(target)
         return target
     }
