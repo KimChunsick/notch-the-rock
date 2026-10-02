@@ -9,7 +9,8 @@ import SwiftUI
 /// or denied, and AskUserQuestion answered, in the notch; "터미널에서 답하기" or the end of the wait
 /// hands them back to the terminal. An operation too long for the notch, and typed answers to several
 /// questions, are shown in full on the plugin's screen and answered there. The settings page
-/// installs and removes the hooks in `~/.claude/settings.json` and sets the wait.
+/// installs and removes the hooks in `~/.claude/settings.json` and sets the wait; the onboarding's
+/// setup step connects the same way (`AgentSetup`).
 @MainActor
 public final class AgentsPlugin: NotchPlugin {
     public static let manifest = PluginManifest(
@@ -26,6 +27,8 @@ public final class AgentsPlugin: NotchPlugin {
     let codexLink: CodexLink
     let codex: CodexModel
     private let context: NotchContext
+    /// Whether a `claude` executable was found at launch; without one the onboarding card says so.
+    private let claudeInstalled: Bool
     private let socketPath: String
     private let activator: any TerminalActivating
     private let logos: InstalledAppLogos
@@ -39,9 +42,14 @@ public final class AgentsPlugin: NotchPlugin {
             context: context,
             socketPath: HookSocket.defaultPath(home: home),
             settingsURL: home.appendingPathComponent(".claude/settings.json"),
+            claudeExecutable: ToolSearch.find(candidates: ToolSearch.candidates(
+                named: "claude",
+                home: home,
+                extraFolders: [home.appendingPathComponent(".claude/local").path]
+            )),
             activator: SystemTerminalActivator(log: { [log = context.log] in log.error($0) }),
             codexEndpoint: .current(home: home),
-            codexExecutable: CodexInstall.find(candidates: CodexInstall.candidates(home: home)),
+            codexExecutable: ToolSearch.find(candidates: ToolSearch.candidates(named: "codex", home: home)),
             codexLauncher: SystemCodexLauncher(),
             codexTerminal: CodexTerminals.systemTerminal(forCwd:)
         )
@@ -51,6 +59,7 @@ public final class AgentsPlugin: NotchPlugin {
         context: NotchContext,
         socketPath: String,
         settingsURL: URL,
+        claudeExecutable: URL?,
         activator: any TerminalActivating,
         codexEndpoint: CodexEndpoint,
         codexExecutable: URL?,
@@ -59,6 +68,7 @@ public final class AgentsPlugin: NotchPlugin {
     ) {
         self.context = context
         self.socketPath = socketPath
+        claudeInstalled = claudeExecutable != nil
         self.activator = activator
         let logos = InstalledAppLogos()
         self.logos = logos
@@ -145,6 +155,10 @@ public final class AgentsPlugin: NotchPlugin {
 
     public var settingsView: AnyView? {
         AnyView(AgentsSettingsView(model: hooks, codex: codex, defaults: context.storage.defaults))
+    }
+
+    public var setup: PluginSetup? {
+        AgentSetup.make(hooks: hooks, claudeInstalled: claudeInstalled, codex: codex, logos: logos)
     }
 }
 

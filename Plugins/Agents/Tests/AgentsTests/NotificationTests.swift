@@ -114,6 +114,7 @@ import Testing
             context: try makeContext(host: host, directory: directory),
             socketPath: paths.socket,
             settingsURL: directory.appendingPathComponent("settings.json"),
+            claudeExecutable: nil,
             activator: activator,
             codexEndpoint: CodexEndpoint(home: directory),
             codexExecutable: nil,

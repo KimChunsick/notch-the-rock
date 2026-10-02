@@ -811,8 +811,8 @@ func listen(at path: String, folderMode: mode_t = 0o700) throws -> Int32 {
         let script = directory.appendingPathComponent("codex")
         try "#!/bin/sh\necho 'codex-cli 0.150.0'\n".write(to: script, atomically: true, encoding: .utf8)
         chmod(script.path, 0o755)
-        #expect(CodexInstall.find(candidates: [directory.appendingPathComponent("missing").path, script.path]) == script)
-        #expect(CodexInstall.find(candidates: [directory.appendingPathComponent("missing").path]) == nil)
+        #expect(ToolSearch.find(candidates: [directory.appendingPathComponent("missing").path, script.path]) == script)
+        #expect(ToolSearch.find(candidates: [directory.appendingPathComponent("missing").path]) == nil)
         #expect(await CodexInstall.readVersion(script) == "0.150.0")
     }
 }
