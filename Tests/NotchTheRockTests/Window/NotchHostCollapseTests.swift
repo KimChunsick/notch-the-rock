@@ -264,6 +264,57 @@ struct NotchHostCollapseTests {
         #expect(host.state == .collapsed)
     }
 
+    @Test func R51__hover_intent_from_before_a_fast_collapse_keeps_the_notch_folded() async throws {
+        let first = Task { await host.requestAttention(notice("세션 1 작업을 마쳤어요"), from: agents) }
+        await drain()
+        let second = Task { await host.requestAttention(notice("세션 2 작업을 마쳤어요"), from: agents) }
+        await drain()
+
+        // The pointer enters the folded notch's alert, the user presses the jump button and the
+        // terminal comes forward within the open intent; the hover scheduled on entering comes last.
+        let entered = clock.now
+        advance(by: .milliseconds(80))
+        try await pressJump(on: first)
+        host.collapse(from: agents)
+        advance(by: .milliseconds(40))
+        host.setHovering(true, intentBegan: entered)
+        #expect(host.isExpanded == false)
+        #expect(host.state == .collapsed)
+
+        advance(by: hold - .milliseconds(40) - .milliseconds(100))
+        #expect(host.state == .collapsed)
+        advance(by: .milliseconds(100))
+        #expect(host.state == .attention)
+        #expect(host.attention?.request.title == "세션 2 작업을 마쳤어요")
+
+        advance(by: .milliseconds(4900))
+        #expect(host.state == .attention)
+        advance(by: .milliseconds(100))
+        #expect(await second.value == .timedOut)
+        #expect(host.state == .collapsed)
+    }
+
+    @Test func R51__pointer_entering_after_a_fast_collapse_opens_the_notch() async throws {
+        let first = Task { await host.requestAttention(notice("세션 1 작업을 마쳤어요"), from: agents) }
+        await drain()
+
+        let entered = clock.now
+        advance(by: .milliseconds(80))
+        try await pressJump(on: first)
+        host.collapse(from: agents)
+        advance(by: .milliseconds(40))
+        host.setHovering(true, intentBegan: entered)
+        #expect(host.state == .collapsed)
+
+        // The pointer leaves and enters again after the collapse: the notch opens as usual.
+        host.pointerLeft()
+        advance(by: .milliseconds(100))
+        let reentered = clock.now
+        advance(by: .milliseconds(120))
+        host.setHovering(true, intentBegan: reentered)
+        #expect(host.state == .expanded)
+    }
+
     @Test func R51__user_opening_the_notch_with_no_alert_showing_ends_the_fold() async throws {
         let first = Task { await host.requestAttention(notice("세션 1 작업을 마쳤어요"), from: agents) }
         await drain()

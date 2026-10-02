@@ -38,7 +38,8 @@ enum NotchState: Equatable {
 /// the folded notch is opened while no request shows (the pointer, the hotkey, a link or a plugin).
 /// A request timing out does not end it, nor does an opening under a shown request, nor a hover
 /// whose open intent began (the pointer entered) before the answer, even if nothing shows when it
-/// opens the notch.
+/// opens the notch. A hover whose open intent began before such a collapse does not open the notch
+/// at all: the user has not reopened it since, and the pointer has to enter it again.
 ///
 /// The expanded notch shows the home (`screen`): plugin tiles and a strip of icons, see `HomeModel`. API for
 /// the keyboard and URL plans (P17, P18): `showHome()`, `open(pluginID:)`, `back()`, `escape()` and
@@ -141,6 +142,9 @@ final class NotchHostModel: NotchHost {
     private var attentions: [PendingAttention] = []
     /// Until when the queue stays hidden after a plugin collapsed the notch on its own answer.
     private var queueHeldUntil: ContinuousClock.Instant?
+    /// When a plugin last collapsed the notch on its own answer; a hover intent that began by then
+    /// does not open the notch.
+    @ObservationIgnored private var answerCollapsedAt: ContinuousClock.Instant?
     /// The plugin whose request the user answered last and when, while its `collapse()` still belongs
     /// to that answer: until it collapses, another request is answered, or the notch opens while no
     /// request shows, other than by a hover whose intent began before the answer.
@@ -189,10 +193,12 @@ final class NotchHostModel: NotchHost {
     /// Hovering starts or ends. Ending collapses the notch however it was opened; the window reports
     /// a pointer leaving through `pointerLeft()`, which keeps a held notch open.
     /// - Parameter intentBegan: when the pointer entered the notch for this hover, on `now`; a hover
-    ///   that began before the last answer does not end its collapse.
+    ///   that began before the last answer does not end its collapse, and one that began before the
+    ///   collapse itself does not open the notch.
     func setHovering(_ hovering: Bool, intentBegan: ContinuousClock.Instant? = nil) {
         isHovering = hovering
         if hovering { isHeldOpen = false }
+        if hovering, let intentBegan, let answerCollapsedAt, intentBegan <= answerCollapsedAt { return }
         setExpanded(hovering, intentBegan: intentBegan)
     }
 
@@ -422,7 +428,9 @@ final class NotchHostModel: NotchHost {
         setExpanded(false)
         guard lastAnswer?.pluginID == pluginID else { return }
         lastAnswer = nil
-        queueHeldUntil = now() + Self.collapseHold
+        let collapsedAt = now()
+        answerCollapsedAt = collapsedAt
+        queueHeldUntil = collapsedAt + Self.collapseHold
         startShownNotice()
         scheduleExpiry()
     }
