@@ -177,6 +177,9 @@ struct AgentSessionRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 10)
+                if let percent = session.contextPercent {
+                    ContextMeter(percent: percent)
+                }
                 Circle()
                     .fill(session.state.color)
                     .frame(width: 6, height: 6)
@@ -218,6 +221,34 @@ struct AgentSessionRow: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+/// How full a session's context window is: the percent and a thin bar, warm above `warmAbove`. As
+/// tall as the row's smaller text, so a row is as tall with it as without.
+struct ContextMeter: View {
+    static let warmAbove = 80
+    static let width: CGFloat = 20
+    let percent: Int
+
+    var body: some View {
+        let warm = percent > Self.warmAbove
+        HStack(spacing: 3) {
+            Text("\(percent)%")
+                .font(.system(size: 10, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(warm ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.15))
+                Capsule()
+                    .fill(warm ? Color.orange : Color.secondary)
+                    .frame(width: Self.width * CGFloat(min(100, max(0, percent))) / 100)
+            }
+            .frame(width: Self.width, height: 3)
+        }
+        .fixedSize()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("context 창 \(percent)% 사용")
     }
 }
 

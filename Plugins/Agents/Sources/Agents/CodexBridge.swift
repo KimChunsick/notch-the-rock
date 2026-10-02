@@ -333,6 +333,12 @@ final class CodexBridge {
             if let thread = params["threadId"]?.string {
                 endWait(params["requestId"], of: thread)
             }
+        case "thread/tokenUsage/updated":
+            if let thread = params["threadId"]?.string {
+                let usage = params["tokenUsage"]
+                let percent = ContextUsage.codex(lastTotal: usage?["last"]?["totalTokens"], window: usage?["modelContextWindow"])
+                screen.sessions.setContext(AgentSession.Key(agent: .codex, id: thread), percent)
+            }
         case "turn/started":
             if let thread = params["threadId"]?.string { track(thread, .working) }
         case "thread/closed":

@@ -9,7 +9,8 @@ import SwiftUI
 /// app-server over a private pipe, and a TUI may run without the shared one. Read only. codex appends
 /// one JSON record per line; the watcher keeps each file's identity and the offset after its last
 /// complete line, so a line still being written is read once it ends. Only what codex persists is
-/// known: a turn starting (working), finishing (idle, with an alert) and being stopped (idle).
+/// known: a turn starting (working), finishing (idle, with an alert) and being stopped (idle), and the
+/// context use codex counted (`token_count`).
 /// Requests for approval or input, errors and the session's end are not persisted, so these rows
 /// never wait and leave the list only by staying silent (`AgentSessionList.silenceLimit`).
 ///
@@ -154,6 +155,8 @@ final class CodexRollouts {
         case .ended:
             list.remove(AgentSession.Key(agent: .codex, id: meta.id))
             listed.remove(meta.id)
+        case .context(let percent):
+            list.setContext(AgentSession.Key(agent: .codex, id: meta.id), percent)
         }
         return nil
     }
@@ -231,6 +234,8 @@ enum RolloutRecord: Equatable, Sendable {
     case completed(turn: String?)
     case aborted(turn: String?)
     case ended
+    /// How full the context window is, in percent (`token_count`).
+    case context(Int)
 }
 
 /// Where the watcher stopped reading a file.
@@ -255,7 +260,7 @@ struct RolloutRead: Sendable {
 enum RolloutReader {
     static let originatorDesktop = "Codex Desktop"
     /// Lines without any of these are not decoded.
-    static let markers = ["\"session_meta\"", "\"task_started\"", "\"task_complete\"", "\"turn_aborted\"", "\"shutdown_complete\""]
+    static let markers = ["\"session_meta\"", "\"task_started\"", "\"task_complete\"", "\"turn_aborted\"", "\"shutdown_complete\"", "\"token_count\""]
         .map { Data($0.utf8) }
 
     /// The rollout files under `root` that changed since `known`. With `since` (the indexing pass), a
@@ -334,6 +339,10 @@ enum RolloutReader {
             case "task_complete": return .completed(turn: turn)
             case "turn_aborted": return .aborted(turn: turn)
             case "shutdown_complete": return .ended
+            case "token_count":
+                // Without `info` (a rate-limit update) the use is unknown, and the row keeps its percent.
+                let info = payload["info"]
+                return ContextUsage.codex(lastTotal: info?["last_token_usage"]?["total_tokens"], window: info?["model_context_window"]).map(RolloutRecord.context)
             default: return nil
             }
         default:

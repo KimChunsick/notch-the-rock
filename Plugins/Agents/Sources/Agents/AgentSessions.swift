@@ -67,6 +67,8 @@ struct AgentSession: Identifiable, Hashable {
     var terminal: TerminalLocation?
     /// The agent's process, when known; the session is over once it is gone.
     var pid: pid_t?
+    /// How full the session's context window is, in percent; nil when unknown.
+    var contextPercent: Int?
 
     var agent: AgentKind { id.agent }
 
@@ -128,6 +130,13 @@ final class AgentSessionList {
         guard let state = byKey[key]?.state, state == .awaitingApproval || state == .awaitingAnswer else { return }
         byKey[key]?.state = waiting ?? .working
         byKey[key]?.changed = now()
+    }
+
+    /// Sets how full the context window of `key`'s session is. Not an event: the row keeps its place
+    /// and its time, and a session not on the list stays off it.
+    func setContext(_ key: AgentSession.Key, _ percent: Int?) {
+        guard byKey[key] != nil else { return }
+        byKey[key]?.contextPercent = percent
     }
 
     func remove(_ key: AgentSession.Key) {
