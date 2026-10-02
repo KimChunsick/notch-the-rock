@@ -22,7 +22,8 @@ import SwiftUI
 /// the row always takes the state the records tell. A thread the bridge closed stays closed whatever
 /// is read of it later; a rollout that ended comes back only with a new turn. A session is listed only
 /// while a process has its rollout open (`CodexProcesses`), the desktop app's threads too: every pass
-/// gives each row the process that has its file open now and takes away the rows none has open.
+/// gives each row the process that has its file open now, takes away the rows none has open and lists
+/// again the sessions a process has open but the list dropped, whether or not their files changed.
 @MainActor
 final class CodexRollouts {
     static let interval: Duration = .seconds(2)
@@ -48,8 +49,9 @@ final class CodexRollouts {
     private var files: [String: Watched] = [:]
     /// Where each session's row and alerts take the user, by session id; nil when nothing was found.
     private var targets: [String: TerminalLocation?] = [:]
-    /// The sessions this watcher put on the list.
-    private var listed: Set<String> = []
+    /// The sessions this watcher put on the list, each with its row as last seen: one the list dropped
+    /// comes back as it was once a process has its rollout open.
+    private var listed: [String: AgentSession] = [:]
     /// Sessions whose rollout ended (`shutdown_complete`): only a new turn brings one back.
     private var ended = RecentIDs(capacity: CodexBridge.remembered)
     private var indexed = false
@@ -113,7 +115,7 @@ final class CodexRollouts {
         discovered = nil
         files.removeAll()
         ended = RecentIDs(capacity: CodexBridge.remembered)
-        for session in listed where !bridge.owns(session) {
+        for session in listed.keys where !bridge.owns(session) {
             list.remove(AgentSession.Key(agent: .codex, id: session))
         }
         listed.removeAll()
@@ -183,35 +185,41 @@ final class CodexRollouts {
         return alerts
     }
 
-    /// Checks this watcher's rows against the processes that have their rollouts open now: a row moves
-    /// to the process that has its file open (a session resumed in another process), and leaves at once
-    /// when none has it (a TUI that moved on to a new session, a desktop thread the app unloaded), even
-    /// while the process that had it runs on. A row the bridge follows or closed is the bridge's; one the
-    /// list already dropped is forgotten.
+    /// Makes this watcher's rows the sessions whose rollouts processes have open now, whichever ran first,
+    /// this pass or the list's liveness check, and whether or not the files changed. A row moves to the
+    /// process that has its file open (a session resumed in another process), and leaves at once when
+    /// none has it (a TUI that moved on to a new session, a desktop thread the app unloaded), even while
+    /// the process that had it runs on. A session a process has open without a row is listed again: as
+    /// its row was when this watcher last saw it (the liveness check dropped it before a pass saw its new
+    /// process), or else waiting since its file was last written, with no alert either way. A session the
+    /// bridge follows or closed is the bridge's; one that ended comes back only with a new turn.
     private func reconcile() {
-        var rows: Set<String> = []
-        for session in listed where !bridge.owns(session) && !bridge.isClosed(session) {
-            if list[AgentSession.Key(agent: .codex, id: session)] == nil {
-                listed.remove(session)
-            } else {
-                rows.insert(session)
-            }
-        }
-        guard !rows.isEmpty else { return }
+        let candidates = files.values.filter { $0.meta.map { follows($0) && !ended.contains($0.id) } ?? false }
+        let rows = listed.keys.filter { !bridge.owns($0) && !bridge.isClosed($0) }
+        guard !candidates.isEmpty || !rows.isEmpty else { return }
         if running == nil { running = processes() }
-        var holders: [String: pid_t] = [:]
-        for watched in files.values {
-            guard let session = watched.meta?.id, rows.contains(session), let pid = running?.holder(of: watched.file) else { continue }
-            holders[session] = pid
+        var holders: [String: (pid: pid_t, watched: Watched)] = [:]
+        for watched in candidates {
+            guard let session = watched.meta?.id, holders[session] == nil, let pid = running?.holder(of: watched.file) else { continue }
+            holders[session] = (pid, watched)
         }
-        for session in rows {
+        for session in rows where holders[session] == nil {
             let key = AgentSession.Key(agent: .codex, id: session)
-            if let pid = holders[session] {
-                list.setProcess(key, pid)
-            } else {
-                list.remove(key)
-                listed.remove(session)
+            guard let row = list[key] else { continue }
+            listed[session] = row
+            list.remove(key)
+        }
+        for (session, holder) in holders {
+            let key = AgentSession.Key(agent: .codex, id: session)
+            if list[key] != nil {
+                list.setProcess(key, holder.pid)
+            } else if let row = listed[session] {
+                list.update(key, folder: row.folder, state: row.state, terminal: row.terminal, pid: holder.pid, changed: row.changed)
+                list.setContext(key, row.contextPercent)
+            } else if let meta = holder.watched.meta {
+                show(meta, nil, at: holder.watched.modified, in: holder.watched.file)
             }
+            listed[session] = list[key]
         }
     }
 
@@ -237,7 +245,7 @@ final class CodexRollouts {
         case .ended:
             ended.insert(meta.id)
             list.remove(AgentSession.Key(agent: .codex, id: meta.id))
-            listed.remove(meta.id)
+            listed[meta.id] = nil
         case .context(let percent):
             list.setContext(AgentSession.Key(agent: .codex, id: meta.id), percent)
         }
@@ -259,8 +267,8 @@ final class CodexRollouts {
         if targets[meta.id] == nil {
             targets[meta.id] = .some(meta.desktop ? Self.desktopApp : terminal(meta.cwd))
         }
-        listed.insert(meta.id)
         list.update(key, folder: meta.folder, state: state, terminal: targets[meta.id] ?? nil, pid: pid, changed: date)
+        listed[meta.id] = list[key]
     }
 
     /// A session this watcher keeps: not an exec run or subagent, not followed by the bridge and not
@@ -346,7 +354,8 @@ struct RolloutFile: Equatable, Sendable {
 
 /// The processes that have rollouts open now. A row takes the process that has its session's rollout
 /// open and leaves the list once that process is gone (`AgentSessionList.prune`) or has closed the file
-/// (`CodexRollouts`); a session no process has open is history, not an open session, and gets no row.
+/// (`CodexRollouts`), until a process has the file open again; a session no process has open is history,
+/// not an open session, and gets no row.
 /// The desktop app running is not enough: its app-server has open only the threads it has loaded.
 struct CodexProcesses {
     /// A file by its device and inode, as `stat` and the kernel's table of open files give them: the

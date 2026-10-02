@@ -336,6 +336,65 @@ final class FakeCodexProcesses {
         #expect(list.sessions.isEmpty)
     }
 
+    /// The liveness check may drop a resumed session before a pass sees its new process: the next pass
+    /// lists it again as it was, with the new process, though its file did not change, and it stays.
+    @Test func R33__a_session_pruned_before_a_pass_sees_its_new_process_comes_back() async throws {
+        let first: pid_t = 5001, second: pid_t = 5002
+        let resumed = "019b0000-0000-7000-8000-00000000f008"
+        processes.cli = nil
+        processes.others = [first]
+        processes.owners[resumed] = first
+        await scan()
+        try tree.write(resumed, Self.cli(resumed, "rock-garden") + [ContextTests.tokenCount(last: 50_000, total: 50_000, window: "200000")])
+        await scan()
+        let row = try #require(session(resumed))
+        #expect(row.pid == first && row.state == .working && row.contextPercent != nil)
+
+        // The first process exits, the second opens the file, and the liveness check runs first.
+        processes.others = [second]
+        processes.owners[resumed] = second
+        list.prune()
+        #expect(list.sessions.isEmpty)
+        for _ in 0..<3 {
+            await scan()
+            let back = try #require(session(resumed))
+            #expect(back.pid == second && back.state == row.state && back.changed == row.changed)
+            #expect(back.folder == row.folder && back.terminal == row.terminal && back.contextPercent == row.contextPercent)
+            list.prune()
+        }
+        #expect(host.requests.isEmpty)
+
+        // Once no process has it open, no pass brings it back.
+        processes.others = []
+        list.prune()
+        for _ in 0..<3 {
+            await scan()
+            #expect(list.sessions.isEmpty)
+        }
+    }
+
+    /// A session no process has open is not listed however many passes look at it; once a process opens
+    /// it without writing to it, it lists as waiting since its file was last written, whatever turn its
+    /// records left open, and without an alert.
+    @Test func R33__a_rollout_nobody_has_open_is_listed_only_once_a_process_opens_it() async throws {
+        let unheld = "019b0000-0000-7000-8000-00000000f009"
+        let written = Date(timeIntervalSinceNow: -600).rounded
+        processes.closed = [unheld]
+        await scan()
+        try tree.write(unheld, Self.cli(unheld, "tide-pool"), modified: written)
+        for _ in 0..<3 {
+            await scan()
+            list.prune()
+            #expect(list.sessions.isEmpty)
+        }
+
+        processes.closed = []
+        await scan()
+        let row = try #require(session(unheld))
+        #expect(row.pid == 4001 && row.state == .idle && row.changed == written && row.folder == "tide-pool")
+        #expect(host.requests.isEmpty)
+    }
+
     static func cli(_ id: String, _ folder: String) -> [String] {
         [RolloutTree.meta(id, cwd: "/Users/me/\(folder)", originator: "codex_cli_rs", source: #""cli""#), RolloutTree.event("task_started", turn: "t1")]
     }
