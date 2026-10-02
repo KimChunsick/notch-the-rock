@@ -3,11 +3,18 @@ import Testing
 @testable import SystemStats
 
 /// Scripted SMC answers. A key without a lookup is one the SMC does not have; a key without a value
-/// cannot be read. Counts the lookups of each key.
-private final class FakeSMC: SMCReading {
+/// cannot be read. `names` is the SMC's key list, an index in `failedIndexes` a request that failed.
+/// Counts the lookups of each key. Unchecked: the tests that hand it to a discovery run its attempts at once.
+private final class FakeSMC: SMCReading, @unchecked Sendable {
     var lookups: [String: SMCLookup] = [:]
     var values: [String: Double] = [:]
+    var names: [String] = []
+    var failedIndexes: Set<UInt32> = []
     private(set) var asked: [String: Int] = [:]
+
+    func key(at index: UInt32) -> String? {
+        failedIndexes.contains(index) || Int(index) >= names.count ? nil : names[Int(index)]
+    }
 
     func key(_ name: String) -> SMCLookup {
         asked[name, default: 0] += 1
@@ -98,6 +105,41 @@ private final class KeyListings: Sendable {
 
 private func floatKey(_ name: String) -> SMCKey {
     SMCKey(code: SMCConnection.code(name), size: 4, type: SMCConnection.code("flt "))
+}
+
+/// The P20 finding: once `#KEY` is read, a key name or metadata request that fails makes the whole
+/// listing a failure, tried again 30 s later, not a partial or empty list kept for the process.
+@MainActor
+@Test func R11__a_failed_key_request_after_the_count_is_tried_again_not_kept() {
+    var time = 100.0
+    let smc = FakeSMC()
+    smc.names = ["Tp01", "FNum", "Tp02", "Tg05"]
+    smc.add("#KEY", type: "ui32", value: Double(smc.names.count))
+    smc.add("Tp01", value: 50)
+    smc.add("Tp02", value: 60)
+    smc.add("Tg05", value: 41)
+    let prefixes = [SMCSensorSampler.cpuPrefix, SMCSensorSampler.gpuPrefix]
+
+    // One index request fails, then one metadata lookup: neither is a list of this SMC's keys.
+    smc.failedIndexes = [2]
+    #expect(smc.floatKeys(withPrefixes: prefixes) == nil)
+    smc.failedIndexes = []
+    smc.lookups["Tg05"] = .failed
+    #expect(smc.floatKeys(withPrefixes: prefixes) == nil)
+
+    // Through the discovery: nothing is kept from the failed pass, and 30 s later the full set is found.
+    smc.failedIndexes = [2]
+    smc.add("Tg05", value: 41)
+    let discovery = TemperatureKeyDiscovery(start: { $0() }, listKeys: { smc.floatKeys(withPrefixes: prefixes) })
+    let sampler = SMCSensorSampler(smc: smc, discovery: discovery, now: { time })
+    #expect(sampler.sensors()?.cpuTemperature == nil)
+    smc.failedIndexes = []
+    time += 29
+    #expect(sampler.sensors()?.cpuTemperature == nil)
+    time += 1
+    let reading = sampler.sensors()
+    #expect(reading?.cpuTemperature == 55 && reading?.gpuTemperature == 41)
+    #expect(smc.floatKeys(withPrefixes: prefixes)?.map(\.name) == ["Tp01", "Tp02", "Tg05"])
 }
 
 /// The P11 finding: a failed temperature key listing (no connection, an unreadable `#KEY`) is not

@@ -24,6 +24,34 @@ protocol SMCReading: AnyObject {
     func key(_ name: String) -> SMCLookup
     /// The key's value as a number, or nil when it cannot be read.
     func value(_ key: SMCKey) -> Double?
+    /// The name of the key at `index` of the SMC's key list, or nil when the request failed.
+    func key(at index: UInt32) -> String?
+}
+
+extension SMCReading {
+    /// Every `flt ` key whose name starts with one of `prefixes`, or nil when the SMC could not list
+    /// them: `#KEY` could not be read, or a key's name or metadata request failed, so the keys found
+    /// would be a part of the list. A listed key the SMC then says it does not have is its answer and
+    /// left out. Walks all keys the SMC has — about 1,600 on an M2, roughly 0.4 s — so call it off the
+    /// main thread.
+    func floatKeys(withPrefixes prefixes: [String]) -> [SMCKey]? {
+        guard case .found(let countKey) = key("#KEY"), let count = value(countKey) else { return nil }
+        let floatType = SMCConnection.code("flt ")
+        var keys: [SMCKey] = []
+        for index in 0..<UInt32(count) {
+            guard let name = key(at: index) else { return nil }
+            guard prefixes.contains(where: name.hasPrefix) else { continue }
+            switch key(name) {
+            case .found(let key):
+                if key.type == floatType, key.size == 4 { keys.append(key) }
+            case .notFound:
+                continue
+            case .failed:
+                return nil
+            }
+        }
+        return keys
+    }
 }
 
 /// A user-client connection to the AppleSMC driver. Every request and reply is one 80-byte
@@ -107,20 +135,9 @@ final class SMCConnection: SMCReading {
         }
     }
 
-    /// Every `flt ` key whose name starts with one of `prefixes`, or nil when the SMC could not say
-    /// how many keys it has. Walks all keys the SMC has — about 1,600 on an M2, roughly 0.4 s — so
-    /// call it off the main thread.
-    func floatKeys(withPrefixes prefixes: [String]) -> [SMCKey]? {
-        guard case .found(let countKey) = key("#KEY"), let count = value(countKey) else { return nil }
-        let floatType = Self.code("flt ")
-        return (0..<UInt32(count)).compactMap { index in
-            guard case .data(let reply) = call(.keyAtIndex, index: index) else { return nil }
-            let name = Self.string(reply.load(at: Offset.key))
-            guard prefixes.contains(where: name.hasPrefix), case .found(let key) = self.key(name), key.type == floatType,
-                  key.size == 4
-            else { return nil }
-            return key
-        }
+    func key(at index: UInt32) -> String? {
+        guard case .data(let reply) = call(.keyAtIndex, index: index) else { return nil }
+        return Self.string(reply.load(at: Offset.key))
     }
 
     private func call(_ command: Command, key: UInt32 = 0, dataSize: UInt32 = 0, index: UInt32 = 0) -> Reply {
@@ -154,8 +171,8 @@ private extension [UInt8] {
 
 /// Finds the SMC's temperature keys off the main thread. The key list of an SMC does not change, so
 /// a list once found is kept for the process. An attempt that could not list the keys (no
-/// connection, an unreadable key count) is not an answer about this Mac: it is tried again
-/// `retryInterval` seconds later.
+/// connection, an unreadable key count, a failed key request) is not an answer about this Mac: it is
+/// tried again `retryInterval` seconds later.
 final class TemperatureKeyDiscovery: Sendable {
     static let retryInterval = 30.0
     /// The discovery every live sampler shares.
