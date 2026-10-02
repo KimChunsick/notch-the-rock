@@ -260,10 +260,12 @@ final class NotchWindowController {
         case .leave: (hovering, delay) = (false, Self.closeDelay)
         case .hold: return
         }
+        // The open intent begins as the pointer enters; a click in the meantime answers before it.
+        let intentBegan = host.now()
         hoverTask = Task { [weak self] in
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
-            if hovering { self?.host.setHovering(true) } else { self?.host.pointerLeft() }
+            if hovering { self?.host.setHovering(true, intentBegan: intentBegan) } else { self?.host.pointerLeft() }
         }
     }
 }
