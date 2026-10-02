@@ -14,8 +14,7 @@ import Testing
     nonisolated static let notch = NotchPaddingRenderTests.notch
     /// Blue like the menu bar around the shape (`NotchPaddingRenderTests.backdrop`).
     static let backdrop = Color(red: 0, green: 0.2, blue: 1)
-    /// Blue, so the countdown is told from the white title and close button and the glow around
-    /// the shape reads as backdrop to `NotchPaddingRenderTests.inkGaps`.
+    /// Blue, so the countdown is told from the white title and close button.
     static let accent = Color(red: 0.1, green: 0.35, blue: 1)
     /// The agent notice's shape height as the host drew it before the title and the countdown moved
     /// beside the camera (f1d2e40).
@@ -80,9 +79,12 @@ import Testing
         }
     }
 
-    /// Asks the host for `request` and draws the root view until the shape and its contents settle.
-    /// Writes `R46-render-<name>-T139.png` when NOTCH_RENDER_DIR is set.
-    func draw(_ name: String, _ request: AttentionRequest) async throws -> (image: CGImage, scale: CGFloat, metrics: NotchLayout.Metrics) {
+    /// Asks the host for `request` and draws the root view over `backdrop` until the shape and its
+    /// contents settle. Writes `<file>.png`, `R46-render-<name>-T139.png` by default, when
+    /// NOTCH_RENDER_DIR is set.
+    func draw(
+        _ name: String, _ request: AttentionRequest, backdrop: Color = Self.backdrop, file: String? = nil
+    ) async throws -> (image: CGImage, scale: CGFloat, metrics: NotchLayout.Metrics) {
         let host = NotchHostModel()
         let answer = Task { await host.requestAttention(request, from: "com.example.agents") }
         defer { answer.cancel() }
@@ -93,13 +95,12 @@ import Testing
         let root = NotchRootView(host: host, notchSize: Self.notch, openSettings: { _ in },
                                  metricsChanged: { targets.append($0) }, shapeDrawn: { drawn = $0 })
         let size = NotchLayout.canvasSize
-        let hosting = NSHostingView(rootView: root.background(Self.backdrop).environment(\.colorScheme, .dark))
+        let hosting = NSHostingView(rootView: root.background(backdrop).environment(\.colorScheme, .dark))
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: true)
         window.appearance = NSAppearance(named: .darkAqua)
         window.contentView = hosting
         hosting.frame = NSRect(origin: .zero, size: size)
-        // The glow around the shape pulses and the countdown ticks, so only the shape's inside away
-        // from the countdown's second is compared between captures.
+        // The countdown ticks, so only the shape's inside away from it is compared between captures.
         var previous: [UInt8]?
         var settled: (CGImage, NotchLayout.Metrics)?
         for _ in 0..<60 {
@@ -118,7 +119,7 @@ import Testing
         let (image, metrics) = try #require(settled, "the attention did not settle: \(targets.count) targets, drawn \(String(describing: drawn))")
         if let directory = ProcessInfo.processInfo.environment["NOTCH_RENDER_DIR"] {
             let data = try #require(NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))
-            try data.write(to: URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent("R46-render-\(name)-T139.png"))
+            try data.write(to: URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent("\(file ?? "R46-render-\(name)-T139").png"))
         }
         return (image, CGFloat(image.width) / size.width, metrics)
     }
@@ -254,5 +255,37 @@ import Testing
                 #expect(abs(gap - NotchPaddingRenderTests.edgePadding) <= 2, "\(name) \(side) gap \(gap) pt: \(gaps)")
             }
         }
+    }
+
+    /// Pixels outside the shape, more than 2 px past its edges, whose red runs more than 20 above
+    /// their blue: the warm accent tinting the light grey backdrop.
+    nonisolated static func tinted(_ image: CGImage, scale: CGFloat, shape: CGSize) -> Int {
+        let width = image.width, height = image.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(
+            data: &pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return -1 }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let center = CGFloat(width) / 2
+        let left = Int(center - shape.width / 2 * scale) - 2, right = Int(center + shape.width / 2 * scale) + 2
+        let bottom = Int(shape.height * scale) + 2
+        var count = 0
+        for y in 0..<height {
+            for x in 0..<width where x < left || x > right || y > bottom {
+                let i = (y * width + x) * 4
+                if Int(pixels[i]) - Int(pixels[i + 2]) > 20 { count += 1 }
+            }
+        }
+        return count
+    }
+
+    @Test func R47__an_agent_notice_draws_nothing_outside_the_notch_shape() async throws {
+        var notice = Self.agentNotice
+        notice.accent = Color(red: 0.85, green: 0.47, blue: 0.34)
+        let (image, scale, metrics) = try await draw("agent-notice", notice, backdrop: Color(white: 0.92), file: "R47-render-after-T141")
+        let tinted = await Task.detached { Self.tinted(image, scale: scale, shape: metrics.size) }.value
+        print("R47 agent notice over light grey: shape \(metrics.size), \(tinted) accent-tinted pixels outside it")
+        #expect(tinted == 0, "\(tinted) accent-tinted pixels outside the shape")
     }
 }

@@ -59,8 +59,7 @@ struct NotchRootView: View {
             content: contentSize,
             minWidth: bandWidth
         )
-        let glow = state == .attention ? host.attention?.request.accent : nil
-        NotchSurface(metrics: metrics, glow: glow) {
+        NotchSurface(metrics: metrics) {
             content(for: state, screenWidth: detail == nil && attention == nil ? 0 : NotchSizing.contentWidth(filling: bandWidth))
         } band: {
             if state == .expanded {
@@ -179,7 +178,6 @@ struct NotchRootView: View {
 /// content adds none of its own.
 struct NotchSurface<Content: View, Band: View>: View {
     let metrics: NotchLayout.Metrics
-    var glow: Color?
     @ViewBuilder let content: Content
     @ViewBuilder let band: Band
 
@@ -187,7 +185,6 @@ struct NotchSurface<Content: View, Band: View>: View {
         ZStack(alignment: .top) {
             metrics.shape
                 .fill(Color.black)
-                .background(AttentionGlow(color: glow, shape: metrics.shape))
             ZStack(alignment: .topLeading) {
                 content
                     .offset(x: metrics.content.minX, y: metrics.content.minY)
@@ -217,24 +214,6 @@ private struct DrawnShapeReporter: ViewModifier, Animatable {
 
     func body(content: Content) -> some View {
         content.onChange(of: metrics, initial: true) { _, drawn in report(drawn) }
-    }
-}
-
-/// Pulsing accent glow behind the shape while an attention request is shown.
-private struct AttentionGlow: View {
-    let color: Color?
-    let shape: NotchShape
-    @State private var bright = false
-
-    var body: some View {
-        if let color {
-            shape
-                .fill(color)
-                .shadow(color: color.opacity(bright ? 0.95 : 0.5), radius: bright ? 16 : 9)
-                .onAppear {
-                    withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) { bright = true }
-                }
-        }
     }
 }
 
