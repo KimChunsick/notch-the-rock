@@ -139,10 +139,10 @@ public final class AgentsPlugin: NotchPlugin {
         bridge.screen.sessions.removeAll()
     }
 
-    /// Brings the terminal of a session on the Agents screen forward; a session without a known
-    /// terminal stays where it is.
+    /// Brings the terminal of a session on the Agents screen forward and folds the notch; a session
+    /// without a known or running terminal leaves the notch as it is.
     func open(_ session: AgentSession) {
-        guard let terminal = session.terminal, !activator.activate(terminal) else { return }
+        guard let terminal = session.terminal, !activator.jump(to: terminal, collapsing: context) else { return }
         context.log.error("The terminal of \(session.agent.name) session \(session.folder) is not running.")
     }
 

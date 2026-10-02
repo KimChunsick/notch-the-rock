@@ -463,9 +463,10 @@ final class ClaudeBridge {
         return task
     }
 
-    /// Brings the session's terminal forward, or opens the notch when the terminal is unknown or gone.
+    /// Brings the session's terminal forward and folds the notch, or opens the notch on the Agents
+    /// screen when the terminal is unknown or gone.
     private func jump(to sessionID: String) {
-        if let terminal = sessions[sessionID]?.terminal, activator.activate(terminal) {
+        if let terminal = sessions[sessionID]?.terminal, activator.jump(to: terminal, collapsing: context) {
             return
         }
         context.expand()

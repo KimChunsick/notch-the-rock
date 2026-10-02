@@ -254,6 +254,53 @@ final class FolderTerminals {
         #expect(host.requests.last?.timeout == wait)
     }
 
+    /// 터미널로 이동 in an alert of either agent brings the session's terminal forward once and folds
+    /// the notch. 노치 열기, offered when no terminal is known, and a terminal that quit open the
+    /// Agents screen instead and leave the notch open.
+    @Test func R51__the_alerts_jump_brings_the_terminal_forward_and_collapses_the_notch() async throws {
+        host.responses = [Self.jump]
+        let claudeAlert = await alerts(try hook(.stop))
+        #expect(claudeAlert.first?.buttons.map(\.title) == ["터미널로 이동"])
+        #expect(activator.activated == [ghostty])
+        #expect(host.collapses == 1)
+
+        let codex = CodexBridge(
+            context: try makeContext(host: host, directory: try makeDirectory()),
+            activator: activator,
+            terminal: { _ in ghostty },
+            logos: logos
+        )
+        let outbox = Outbox()
+        codex.open { [outbox] in outbox.messages.append($0) }
+        codex.receive(try codexFixture("initializeResponse"))
+        codex.receive(try codexFixture("loadedListPage1"))
+        codex.receive(try codexFixture("resumeResponse"))
+        host.responses = [Self.jump]
+        await codex.receive(try codexFixture("turnCompleted"))?.value
+        #expect(host.requests.last?.buttons.map(\.title) == ["터미널로 이동"])
+        #expect(activator.activated == [ghostty, ghostty])
+        #expect(host.collapses == 2)
+        #expect(host.expansions == 0)
+
+        // No terminal known: 노치 열기 opens the screen.
+        let unknown = HookMessage(
+            event: .stop,
+            payload: try json(#"{"session_id":"s9","cwd":"/Users/me/work/deep-sea","hook_event_name":"Stop"}"#),
+            context: HookContext(terminal: nil, projectDir: nil, claudePID: nil)
+        )
+        host.responses = [Self.jump]
+        #expect(await alerts(unknown).first?.buttons.map(\.title) == ["노치 열기"])
+        #expect(activator.activated.count == 2)
+        #expect(host.expansions == 1)
+        // The terminal quit meanwhile: the screen opens too.
+        activator.succeeds = false
+        host.responses = [Self.jump]
+        _ = await alerts(try hook(.sessionEnd, #","reason":"logout""#))
+        #expect(activator.activated.count == 3)
+        #expect(host.expansions == 2)
+        #expect(host.collapses == 2)
+    }
+
     @Test func R45__the_settings_note_says_alerts_last_five_seconds_from_when_they_appear() {
         let note = AgentsSettingsView.alertNote
         #expect(note.contains("뜬 뒤 5초가 지나면 사라져요"))

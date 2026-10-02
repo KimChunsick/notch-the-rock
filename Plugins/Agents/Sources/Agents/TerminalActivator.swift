@@ -1,11 +1,23 @@
 import AppKit
 import HookBridge
+import NotchKit
 
 /// Brings a session's terminal to the front.
 @MainActor
 protocol TerminalActivating: AnyObject {
     /// False when the terminal app is not running.
     func activate(_ terminal: TerminalLocation) -> Bool
+}
+
+extension TerminalActivating {
+    /// Every jump to a session's terminal, from an alert or a row: brings `terminal` forward and folds
+    /// the notch at once, so the terminal is left in view. False when the terminal app is not running;
+    /// the notch then stays as it is and the caller decides what to show instead.
+    func jump(to terminal: TerminalLocation, collapsing context: NotchContext) -> Bool {
+        guard activate(terminal) else { return false }
+        context.collapse()
+        return true
+    }
 }
 
 /// Terminal.app: selects the tab whose tty matches with AppleScript, then activates the app.
