@@ -106,6 +106,8 @@ struct AgentsSettingsView: View {
     static let waitNote = "권한 요청과 질문에 이 시간 안에 답하지 않으면 터미널에서 이어서 답해요. Claude Code의 질문은 기다리는 동안 터미널에 나타나지 않아요."
 
     /// When the notch glows for a session, and every case where it intentionally does not.
+    /// What the rollout watcher cannot give the desktop app's sessions, and how to get it.
+    static let rolloutNote = "Codex 데스크톱 앱의 세션과 app-server가 뜨기 전에 시작한 codex 세션은 $CODEX_HOME/sessions의 기록 파일로 따라가요. 목록과 작업 완료 알림은 보이지만 승인·입력 대기 알림, 노치에서 답하기, 세션 종료 알림은 없어요. 데스크톱 앱이 CODEX_APP_SERVER_USE_LOCAL_DAEMON=1로 공유 app-server를 쓰면 이 기능을 모두 쓸 수 있어요."
     static let alertNote = "Claude Code가 입력을 기다리거나 작업을 마치거나 세션이 끝날 때, Codex가 작업을 마치거나 오류로 멈추거나 세션이 끝날 때 노치에 알림이 떠요. 작업을 마쳤다고 알린 뒤 같은 멈춤에서 다시 오는 입력 대기 알림, 권한 요청 알림(요청이 노치에 바로 떠요), 터미널에서 직접 멈춘 Codex 작업은 따로 알리지 않아요. 한 세션에 새 알림이 오면 이전 알림을 대신해요. 알림은 노치에 뜬 뒤 5초가 지나면 사라져요. 다른 요청이 노치에 떠 있어 뒤에서 기다린 알림도 뜬 때부터 5초를 세요."
 
     let model: ClaudeHooksModel
@@ -188,7 +190,10 @@ struct AgentsSettingsView: View {
             Text("codex를 찾지 못했어요. codex를 설치한 뒤 앱을 다시 열어 주세요.")
                 .foregroundStyle(.orange)
         }
-        Text("연결하면 $CODEX_HOME/app-server-control/app-server-control.sock에 떠 있는 공유 app-server를 쓰고, 없으면 노치가 직접 띄워요. app-server가 뜨기 전에 시작한 codex 세션은 노치에 보이지 않아요. 해제하면 노치가 띄운 app-server만 멈춰요.")
+        Text("연결하면 $CODEX_HOME/app-server-control/app-server-control.sock에 떠 있는 공유 app-server를 쓰고, 없으면 노치가 직접 띄워요. 해제하면 노치가 띄운 app-server만 멈춰요.")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+        Text(Self.rolloutNote)
             .font(.callout)
             .foregroundStyle(.secondary)
     }

@@ -195,7 +195,8 @@ struct AgentSessionRow: View {
         .buttonStyle(.plain)
         .disabled(session.terminal == nil)
         .opacity(session.terminal == nil ? 0.5 : 1)
-        .help(session.terminal == nil ? "이 세션의 터미널을 찾지 못했어요." : "세션이 열린 터미널로 가요.")
+        .help(session.terminal == nil ? "이 세션의 터미널을 찾지 못했어요."
+            : session.terminal == CodexRollouts.desktopApp ? "Codex 앱으로 가요." : "세션이 열린 터미널로 가요.")
     }
 
     @ViewBuilder private var mark: some View {

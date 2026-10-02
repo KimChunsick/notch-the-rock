@@ -52,6 +52,11 @@ final class CodexBridge {
     /// closed. The Agents screen's list may drop a silent thread's row; this does not, so the
     /// thread's end still alerts, once.
     private var joined: Set<String> = []
+    /// The threads this connection put on the Agents screen. `close()` takes only their rows away: the
+    /// rollout watcher's stay.
+    private var listed: Set<String> = []
+    /// Turns whose end alerted already, here or in the rollout watcher, as "thread/turn".
+    private var alertedTurns: Set<String> = []
 
     // One connection's state; `close()` clears it.
     private var send: (@MainActor (JSONValue) -> Void)?
@@ -157,7 +162,23 @@ final class CodexBridge {
         }
         pending.removeAll()
         // Without a connection nothing tells how the sessions go on; the next one lists them again.
-        screen.sessions.removeAll(.codex)
+        for thread in listed {
+            screen.sessions.remove(AgentSession.Key(agent: .codex, id: thread))
+        }
+        listed.removeAll()
+    }
+
+    /// Whether this connection follows `thread`; the rollout watcher leaves such a thread to the bridge.
+    func owns(_ thread: String) -> Bool {
+        joined.contains(thread)
+    }
+
+    /// True the first time the end of `turn` of `thread` asks to alert, from the bridge or the rollout
+    /// watcher, so a turn both see alerts once. A turn without an id always alerts.
+    func claimTurnAlert(_ thread: String, turn: String?) -> Bool {
+        guard let turn else { return true }
+        if alertedTurns.count >= 1024 { alertedTurns.removeAll() }
+        return alertedTurns.insert(thread + "/" + turn).inserted
     }
 
     /// Closes the connection's state, then tells the link why it should drop the connection.
@@ -318,6 +339,7 @@ final class CodexBridge {
             guard let thread = params["threadId"]?.string else { return nil }
             waits.removeAll { $0.thread == thread }
             screen.sessions.remove(AgentSession.Key(agent: .codex, id: thread))
+            listed.remove(thread)
             // One alert per thread that joined, whether or not the list still shows it. The TUI may
             // be gone already; the alert takes the user to the terminal the thread joined in.
             guard joined.remove(thread) != nil else { return nil }
@@ -326,6 +348,7 @@ final class CodexBridge {
             guard let thread = params["threadId"]?.string else { return nil }
             waits.removeAll { $0.thread == thread }
             track(thread, .idle)
+            guard claimTurnAlert(thread, turn: params["turn"]?["id"]?.string) else { return nil }
             switch params["turn"]?["status"]?.string {
             case "completed": return notify(thread, message: "Codex가 작업을 마쳤어요.", saved: terminals[thread])
             case "failed": return notify(thread, message: "Codex 작업이 오류로 멈췄어요.", saved: terminals[thread])
@@ -547,6 +570,7 @@ final class CodexBridge {
     /// terminal the thread joined in.
     private func track(_ thread: String, _ state: AgentSessionState) {
         let folder = threads[thread].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0).lastPathComponent } ?? "Codex"
+        listed.insert(thread)
         screen.sessions.update(AgentSession.Key(agent: .codex, id: thread), folder: folder, state: state, terminal: terminals[thread])
     }
 

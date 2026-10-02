@@ -109,12 +109,14 @@ final class AgentSessionList {
     subscript(key: AgentSession.Key) -> AgentSession? { byKey[key] }
 
     /// Records an event of `key`'s session. A nil `state`, `terminal` or `pid` keeps what the list
-    /// knows; a session seen for the first time without a state is idle.
-    func update(_ key: AgentSession.Key, folder: String, state: AgentSessionState?, terminal: TerminalLocation? = nil, pid: pid_t? = nil) {
-        var session = byKey[key] ?? AgentSession(id: key, folder: folder, state: state ?? .idle, changed: now())
+    /// knows; a session seen for the first time without a state is idle. `changed` is when the event
+    /// happened, when that was not just now (a rollout indexed at launch).
+    func update(_ key: AgentSession.Key, folder: String, state: AgentSessionState?, terminal: TerminalLocation? = nil, pid: pid_t? = nil, changed: Date? = nil) {
+        let changed = changed ?? now()
+        var session = byKey[key] ?? AgentSession(id: key, folder: folder, state: state ?? .idle, changed: changed)
         session.folder = folder
         session.state = state ?? session.state
-        session.changed = now()
+        session.changed = changed
         session.terminal = terminal ?? session.terminal
         session.pid = pid ?? session.pid
         byKey[key] = session
