@@ -111,21 +111,10 @@ enum CodexTerminals {
         return terminal(forCwd: cwd, processes: systemProcesses()) { finder.find(startingAt: $0) }
     }
 
-    /// Every process of the user's named `codex`, read with `proc_listallpids`, `proc_pidpath` and
+    /// Every process of the user's named `codex` with its working folder, read with
     /// `PROC_PIDVNODEPATHINFO`.
     static func systemProcesses() -> [CodexProcess] {
-        let count = proc_listallpids(nil, 0)
-        guard count > 0 else { return [] }
-        var pids = [pid_t](repeating: 0, count: Int(count) + 64)
-        let listed = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
-        guard listed > 0 else { return [] }
-        return pids.prefix(Int(listed)).compactMap { pid -> CodexProcess? in
-            guard pid > 0 else { return nil }
-            var path = [CChar](repeating: 0, count: Int(4 * MAXPATHLEN))
-            let length = proc_pidpath(pid, &path, UInt32(path.count))
-            guard length > 0 else { return nil }
-            let executable = String(decoding: path.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
-            guard (executable as NSString).lastPathComponent == "codex" else { return nil }
+        CodexProcesses.systemPIDs().compactMap { pid -> CodexProcess? in
             var info = proc_vnodepathinfo()
             let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
             guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
