@@ -138,6 +138,15 @@ func splitMilestones(in project: URL) throws {
     try replace(path, in: project, with: plan)
 }
 
+/// Marks every plan of the sample store done, so all six of its plans are.
+func finishPlans(in project: URL) throws {
+    let path = "runs/20261001T090000Z_sample-app/plan.json"
+    let plan = try String(contentsOf: project.appendingPathComponent(".dstack/\(path)"), encoding: .utf8)
+    let finished = plan.replacing(/"status": "(?:in-progress|pending|ready)"/, with: #""status": "done""#)
+    try #require(finished != plan)
+    try replace(path, in: project, with: finished)
+}
+
 /// Every file and directory under `root` with its mode, modification time and content hash.
 func snapshot(_ root: URL) throws -> [String: String] {
     var result: [String: String] = [:]

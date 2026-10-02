@@ -341,7 +341,8 @@ import Testing
 }
 
 /// The screen shows every value. The wide tile shows the goal title, the plans bar with done/total,
-/// a strip with a segment per milestone (labeled with its id and done/total, filled by its share),
+/// a strip with a segment per milestone with plans left (labeled with its id and done/total, filled
+/// by its share; M1, whose plans are all done, is left out on both),
 /// task and requirement counts, the plans in progress and the latest activity; the small one a ring
 /// with the percentage, the project name, the plan in progress and the task count. Without any
 /// project the tile says so and draws no progress. Every state fits the home's 190×90 and 90×90
@@ -370,15 +371,15 @@ import Testing
     try splitMilestones(in: project)
     await plugin.model.add(project)
     let wide = try look(tile.content(.wide), named: "R53-render-wide-T151")
-    for token in ["샘플목표", "계획3/6", "작업4/7", "요구사항2/3", "P3", "P4", "3분전", "P3작업T4커밋", "M12/2", "M21/3", "M30/1"] {
+    for token in ["샘플목표", "계획3/6", "작업4/7", "요구사항2/3", "P3", "P4", "3분전", "P3작업T4커밋", "M21/3", "M30/1"] {
         #expect(wide.text.contains(token), "\(token) missing from the wide tile: \(wide.text)")
     }
-    // The plans bar and, below it, the milestone strip: one bar per milestone, each filled by its
-    // share of done plans.
+    // The plans bar and, below it, the milestone strip: one bar per milestone with plans left, each
+    // filled by its share of done plans.
     #expect(wide.greenBands == 2 && fits(.wide, wide.size), "\(wide)")
     let strip = wide.shares.count == 2 ? wide.shares[1] : []
-    #expect(strip.count == 3, "\(wide.shares)")
-    for (share, expected) in zip(strip, [1.0, 1.0 / 3, 0]) {
+    #expect(strip.count == 2, "\(wide.shares)")
+    for (share, expected) in zip(strip, [1.0 / 3, 0]) {
         #expect(abs(share - expected) < 0.04, "\(strip)")
     }
     let small = try look(tile.content(.small), named: "R53-render-small-T151")
@@ -387,7 +388,7 @@ import Testing
     }
     #expect(small.greenBands == 1 && fits(.small, small.size), "\(small)")
     let screen = try look(try #require(plugin.expandedTab).content, named: "R53-render-screen-values-T151")
-    for token in ["sample-app", "샘플목표", "계획3/6", "50%", "작업4/7커밋", "요구사항2/3충족", "M1base", "M2extras", "M3later", "P3widget", "P4sync", "3분전", "P3작업T4커밋"] {
+    for token in ["sample-app", "샘플목표", "계획3/6", "50%", "작업4/7커밋", "요구사항2/3충족", "M2extras", "M3later", "P3widget", "P4sync", "3분전", "P3작업T4커밋"] {
         #expect(screen.text.contains(token), "\(token) missing from the screen: \(screen.text)")
     }
 }
@@ -517,4 +518,108 @@ import Testing
     try await Task.sleep(for: .milliseconds(300))
     #expect(plugin.model.screenProjects.isEmpty)
     plugin.deactivate()
+}
+
+/// A milestone whose plans are all done leaves the screen card and the wide tile's strip; the other
+/// milestones keep their order and share the strip. The reader still counts every milestone. A card
+/// whose milestones are all done has no milestone section at all, so it is as tall as one without
+/// milestones.
+@MainActor
+@Test func R58__finished_milestone_bars_leave_the_screen_and_the_tile() async throws {
+    let temp = try TempDir()
+    let (plugin, _) = try makePlugin(root: temp.url, now: iso("2026-10-02T09:53:20Z"))
+    let project = temp.url.appendingPathComponent("fs/sample-app")
+    try writeStore(at: project)
+    try splitMilestones(in: project)
+    await plugin.model.add(project)
+    let shown = try #require(plugin.model.screenProjects.first)
+    guard case .open(let run) = shown.reading else {
+        Issue.record("\(shown.reading)")
+        return
+    }
+    #expect(run.milestones.map(\.id) == ["M1", "M2", "M3"] && run.plansDone == 3 && run.plansTotal == 6, "\(run)")
+
+    let screen = try look(try #require(plugin.expandedTab).content, named: "R58-render-T176")
+    #expect(!screen.text.contains("M1base"), "the finished milestone is on the screen: \(screen.text)")
+    for token in ["sample-app", "계획3/6", "M2extras", "M3later"] {
+        #expect(screen.text.contains(token), "\(token) missing from the screen: \(screen.text)")
+    }
+
+    let wide = try look(try #require(plugin.tile).content(.wide), named: "R58-render-wide-T176")
+    #expect(!wide.text.contains("M12/2"), "the finished milestone is on the tile: \(wide.text)")
+    for token in ["계획3/6", "M21/3", "M30/1"] {
+        #expect(wide.text.contains(token), "\(token) missing from the wide tile: \(wide.text)")
+    }
+    #expect(wide.greenBands == 2, "\(wide)")
+    let strip = wide.shares.count == 2 ? wide.shares[1] : []
+    #expect(strip.count == 2, "\(wide.shares)")
+    for (share, expected) in zip(strip, [1.0 / 3, 0]) {
+        #expect(abs(share - expected) < 0.04, "\(strip)")
+    }
+
+    var done = run
+    done.milestones = run.milestones.map { MilestoneProgress(id: $0.id, slug: $0.slug, done: $0.total, total: $0.total) }
+    var none = run
+    none.milestones = []
+    func card(_ run: RunProgress) -> ProjectCard {
+        ProjectCard(project: DStackModel.Project(url: project, reading: .open(run), isDiscovered: false, hasStore: true), now: iso("2026-10-02T09:53:20Z"))
+    }
+    let doneHeight = try render(card(done).frame(width: 360), named: "R58-render-card-all-done-T176").height
+    let noneHeight = try render(card(none).frame(width: 360), named: "R58-render-card-no-milestones-T176").height
+    #expect(abs(doneHeight - noneHeight) < 0.5, "all done \(doneHeight) pt, none \(noneHeight) pt")
+}
+
+/// An open run whose plans are all done leaves the screen and the tile, which show the run still in
+/// progress even though the finished one was active more recently. Settings still list both, and a
+/// run without any plan yet is not finished.
+@MainActor
+@Test func R58__finished_open_runs_leave_the_screen_and_the_tile() async throws {
+    let temp = try TempDir()
+    let (plugin, _) = try makePlugin(root: temp.url, now: iso("2026-10-02T09:53:20Z"))
+    let finished = temp.url.appendingPathComponent("fs/finished-app")
+    try writeStore(at: finished, lastTaskAt: "2026-10-02T09:52:00Z")
+    try finishPlans(in: finished)
+    let active = temp.url.appendingPathComponent("fs/active-app")
+    try writeStore(at: active)
+    await plugin.model.add(finished)
+    await plugin.model.add(active)
+    #expect(Set(plugin.model.projects.map(\.name)) == ["finished-app", "active-app"])
+    #expect(plugin.model.screenProjects.map(\.name) == ["active-app"])
+    #expect(plugin.model.tileProject?.name == "active-app")
+
+    let screen = try look(try #require(plugin.expandedTab).content, named: "R58-render-screen-T176")
+    #expect(screen.text.contains("active-app") && !screen.text.contains("finished-app"), "\(screen.text)")
+    let tile = try #require(plugin.tile)
+    let small = try look(tile.content(.small), named: "R58-render-small-T176")
+    #expect(small.text.contains("active-app") && !small.text.contains("finished-app"), "\(small.text)")
+    let wide = try look(tile.content(.wide), named: "R58-render-wide-active-T176")
+    #expect(wide.text.contains("계획2/6") && !wide.text.contains("계획6/6"), "\(wide.text)")
+
+    let fresh = temp.url.appendingPathComponent("fs/new-app")
+    try writeStore(at: fresh)
+    try replace("runs/20261001T090000Z_sample-app/plan.json", in: fresh, with: #"{"milestones": [], "plans": []}"#)
+    await plugin.model.add(fresh)
+    #expect(plugin.model.screenProjects.map(\.name) == ["active-app", "new-app"])
+}
+
+/// With every run closed or finished, the screen says there is no run to show and the tile that
+/// there is no open run, without drawing any progress.
+@MainActor
+@Test func R58__with_every_run_closed_or_finished_the_screen_shows_none() async throws {
+    let temp = try TempDir()
+    let (plugin, _) = try makePlugin(root: temp.url, now: iso("2026-10-02T09:53:20Z"))
+    let finished = temp.url.appendingPathComponent("fs/finished-app")
+    try writeStore(at: finished)
+    try finishPlans(in: finished)
+    let closed = temp.url.appendingPathComponent("fs/closed-app")
+    try writeStore(at: closed, status: "closed")
+    await plugin.model.add(finished)
+    await plugin.model.add(closed)
+    #expect(plugin.model.projects.count == 2)
+    #expect(plugin.model.screenProjects.isEmpty && plugin.model.tileProject == nil)
+
+    let screen = try look(try #require(plugin.expandedTab).content, named: "R58-render-empty-T176")
+    #expect(screen.text.contains("보여줄D-STACK실행이없어요") && screen.greenBands == 0, "\(screen)")
+    let wide = try look(try #require(plugin.tile).content(.wide), named: "R58-render-wide-empty-T176")
+    #expect(wide.text.contains("열린D-STACK실행이없어요") && wide.greenBands == 0, "\(wide)")
 }

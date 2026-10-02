@@ -2,8 +2,8 @@ import AppKit
 import NotchKit
 import SwiftUI
 
-/// The plugin's screen: a card per project with an open run, the most recently active first, in a
-/// scroll view when they do not fit. It has no outer padding (the host adds the notch's margin) and
+/// The plugin's screen: a card per project with an open run that still has plans left, the most
+/// recently active first, in a scroll view when they do not fit. It has no outer padding (the host adds the notch's margin) and
 /// fills a wider offer.
 struct DStackScreen: View {
     static let width: CGFloat = 360
@@ -16,7 +16,7 @@ struct DStackScreen: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("보여 줄 D-STACK 실행이 없어요.")
                         .font(.system(size: 13, weight: .semibold))
-                    Text("Claude Code에서 연 프로젝트는 저절로 찾아요. 다른 폴더는 설정의 D-STACK에서 더해 주세요.")
+                    Text("닫혔거나 계획을 모두 끝낸 실행은 빼요. Claude Code에서 연 프로젝트는 저절로 찾고, 다른 폴더는 설정의 D-STACK에서 더할 수 있어요.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -38,7 +38,8 @@ struct DStackScreen: View {
 }
 
 /// One project: folder name and state, goal title, overall plan bar, task and requirement counts,
-/// a thin bar per milestone, the plans in progress and the latest activity.
+/// a thin bar per milestone with plans left (none when every milestone is finished), the plans in
+/// progress and the latest activity.
 struct ProjectCard: View {
     static let shownPlans = 4
     let project: DStackModel.Project
@@ -97,9 +98,10 @@ struct ProjectCard: View {
             .font(.system(size: 11))
             .monospacedDigit()
             .foregroundStyle(.secondary)
-        if !run.milestones.isEmpty {
+        let milestones = run.remainingMilestones
+        if !milestones.isEmpty {
             Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 3) {
-                ForEach(run.milestones, id: \.id) { milestone in
+                ForEach(milestones, id: \.id) { milestone in
                     GridRow {
                         Text("\(milestone.id) \(milestone.slug)")
                             .lineLimit(1)
@@ -134,10 +136,10 @@ struct ProjectCard: View {
     }
 }
 
-/// The home tile: the most recently active open run, else a store this plugin cannot read, else a
-/// note that there is none. Wide: goal title, the plans bar with done/total, a strip with a labeled
-/// segment per milestone, task and requirement counts with the plans in progress, and the latest
-/// activity.
+/// The home tile: the most recently active open run with plans left, else a store this plugin cannot
+/// read, else a note that there is none. Wide: goal title, the plans bar with done/total, a strip
+/// with a labeled segment per milestone with plans left, task and requirement counts with the plans
+/// in progress, and the latest activity.
 /// Small: a ring with the percentage, the project name, the first plan in progress and the tasks.
 struct DStackTile: View {
     static let shownPlans = 3
@@ -173,7 +175,9 @@ struct DStackTile: View {
                             .font(.system(size: 9, weight: .medium))
                             .fixedSize()
                     }
-                    MilestoneStrip(milestones: run.milestones)
+                    if !run.remainingMilestones.isEmpty {
+                        MilestoneStrip(milestones: run.remainingMilestones)
+                    }
                     HStack(spacing: 6) {
                         Text("작업 \(run.tasksCommitted)/\(run.tasksTotal) · 요구사항 \(run.requirementsMet)/\(run.requirementsLive)")
                             .foregroundStyle(.secondary)
