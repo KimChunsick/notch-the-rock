@@ -61,6 +61,7 @@ private func onHome(_ tiles: [(AgentsTile, TileSize)]) -> some View {
     static func white(_ r: UInt8, _ g: UInt8, _ b: UInt8) -> Bool { min(r, g, b) > 200 }
     static func orange(_ r: UInt8, _ g: UInt8, _ b: UInt8) -> Bool { r > 200 && g > 100 && g < 190 && b < 90 }
     static func green(_ r: UInt8, _ g: UInt8, _ b: UInt8) -> Bool { g > 150 && r < 130 && b < 150 }
+    static func red(_ r: UInt8, _ g: UInt8, _ b: UInt8) -> Bool { r > 200 && g < 100 && b < 100 }
 
     @Test func R44__wide_tile_lists_waiting_then_working_then_idle_sessions_with_logo_folder_and_state() throws {
         addThree()

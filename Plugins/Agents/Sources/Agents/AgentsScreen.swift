@@ -227,24 +227,45 @@ struct AgentSessionRow: View {
     }
 }
 
-/// How full a session's context window is: the percent and a thin bar, warm above `warmAbove`. As
-/// tall as the row's smaller text, so a row is as tall with it as without.
+/// How full a context window is: below 50% low, below 80% mid, from 80% high (where Claude Code
+/// starts warning about compacting). The screen's rows and the home tile colour their meters by it.
+enum ContextLevel: Equatable {
+    case low, mid, high
+
+    init(percent: Int) {
+        switch percent {
+        case ..<50: self = .low
+        case ..<80: self = .mid
+        default: self = .high
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .low: .green
+        case .mid: .orange
+        case .high: .red
+        }
+    }
+}
+
+/// How full a session's context window is: the percent and a thin bar, in its `ContextLevel`'s
+/// colour. As tall as the row's smaller text, so a row is as tall with it as without.
 struct ContextMeter: View {
-    static let warmAbove = 80
     static let width: CGFloat = 20
     let percent: Int
 
     var body: some View {
-        let warm = percent > Self.warmAbove
+        let color = ContextLevel(percent: percent).color
         HStack(spacing: 3) {
             Text("\(percent)%")
                 .font(.system(size: 10, weight: .medium))
                 .monospacedDigit()
-                .foregroundStyle(warm ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                .foregroundStyle(color)
             ZStack(alignment: .leading) {
                 Capsule().fill(.white.opacity(0.15))
                 Capsule()
-                    .fill(warm ? Color.orange : Color.secondary)
+                    .fill(color)
                     .frame(width: Self.width * CGFloat(min(100, max(0, percent))) / 100)
             }
             .frame(width: Self.width, height: 3)
