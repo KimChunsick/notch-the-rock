@@ -57,7 +57,7 @@ struct VolumeView: View {
 /// volume keys do, and so does VoiceOver's adjust.
 struct VolumeSlider: View {
     /// Pale ice blue to a calm blue, as the notch's volume bar fills: keep it equal to
-    /// `HUDBar.volume` in the app's Sources/NotchTheRock/Window/NotchRootView.swift.
+    /// `HUDBar.volume` in the app's Sources/NotchTheRock/Window/HUDViews.swift.
     static let colors = [Color(red: 0.74, green: 0.87, blue: 1), Color(red: 0.36, green: 0.64, blue: 1)]
     static let height: CGFloat = 16
     static let thickness: CGFloat = 6
