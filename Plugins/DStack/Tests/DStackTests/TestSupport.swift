@@ -107,19 +107,39 @@ func writeStore(
      ]}
     """, "runs/\(id)/plan.json")
     try put("""
-    R\tcase\tkind\tstatus\tartifact\tsha256\tproduced_by\trecorded_at\tnote
-    R01\tc1\ttest\tmet\tartifacts/P1/R01-green.txt\tabc\tgeneral-dev\t2026-10-01T10:00:00Z\tgreen
-    R01\tc2\tcli\topen\t-\t-\t-\t-\t-
-    R02\tc1\ttest\topen\t-\t-\t-\t-\t-
-    R03\tc1\ttest\tmet\tartifacts/P1/R03-green.txt\tdef\tgeneral-dev\t2026-10-01T11:00:00Z\tgreen
-    R04\tc1\treview\tmet\treview/codex-review-002.md\tghi\treview\t\(lastEvidenceAt)\tsealed
-
-    """, "runs/\(id)/cases.tsv")
-    try put("""
     001\tplan\tP1\tcodex-review-001.md\t2026-10-01T10:30:00Z\t0\t1\t0
     002\tplan\tP3\tcodex-review-002.md\t\(lastReviewAt)\t0\t2\t0
 
     """, "runs/\(id)/review/index.tsv")
+    try put("| R | verdict (covered\\|partial\\|absent) | evidence |\n|---|---|---|\n| R01 | covered | tests pass |\n", "runs/\(id)/review/codex-review-001.md")
+    let review = "| R | verdict | evidence in the diff |\n|---|---|---|\n| R04 | covered | widget hunk |\n"
+    try put(review, "runs/\(id)/review/codex-review-002.md")
+    // Artifact paths are relative to the project root and carry the sha256 of what was recorded.
+    let r01 = try artifact(".dstack/runs/\(id)/artifacts/P1/R01-green.txt", "R01 green\n", in: project)
+    let r03 = try artifact(".dstack/runs/\(id)/artifacts/P1/R03-green.txt", "R03 green\n", in: project)
+    try put("""
+    R\tcase\tkind\tstatus\tartifact\tsha256\tproduced_by\trecorded_at\tnote
+    R01\tc1\ttest\tmet\t.dstack/runs/\(id)/artifacts/P1/R01-green.txt\t\(r01)\tgeneral-dev\t2026-10-01T10:00:00Z\tgreen
+    R01\tc2\tcli\topen\t-\t-\t-\t-\t-
+    R02\tc1\ttest\topen\t-\t-\t-\t-\t-
+    R03\tc1\ttest\tmet\t.dstack/runs/\(id)/artifacts/P1/R03-green.txt\t\(r03)\tgeneral-dev\t2026-10-01T11:00:00Z\tgreen
+    R04\tc1\treview\tmet\t.dstack/runs/\(id)/review/codex-review-002.md\t\(sha256(review))\treview\t\(lastEvidenceAt)\tsealed
+
+    """, "runs/\(id)/cases.tsv")
+}
+
+func sha256(_ text: String) -> String {
+    SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+}
+
+/// Writes an evidence artifact at `path` under the project root and returns its sha256 as the
+/// ledger records it.
+@discardableResult
+func artifact(_ path: String, _ text: String, in project: URL) throws -> String {
+    let file = project.appendingPathComponent(path)
+    try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try text.write(to: file, atomically: false, encoding: .utf8)
+    return sha256(text)
 }
 
 /// Makes the sample store's two milestones three, with 2/2, 1/3 and 0/1 plans done: P5 is done and
