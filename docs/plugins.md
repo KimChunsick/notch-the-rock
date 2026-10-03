@@ -328,6 +328,35 @@ case .dismissed, .timedOut, .cancelled: break
 요청을 거두고 `.cancelled`를 돌려줘요. 응답은 언제나 한 번만 와요. NotchKit의 열거형은 부 버전에서
 경우가 늘어날 수 있어서, `switch`에 `@unknown default`를 넣어야 컴파일돼요.
 
+선택 그룹(`AttentionChoices`)이 두 개 이상이면 앱이 한 번에 한 그룹씩 보여 줘요. 카드에는 지금 몇 번째
+질문인지(예: 2/4)가 나오고, 하나만 고르는 그룹에서 선택지를 누르면 다음 질문으로 넘어가요. 여러 개를
+고르는 그룹이나 직접 적은 답은 `다음`으로 넘기고, `이전`으로 돌아가도 앞에서 고른 답과 적은 글은 그대로
+남아요. 플러그인의 `buttons`와 요청 전체의 `textField`는 마지막 질문에서만 보이고, 버튼은 모든 그룹에
+답이 있어야 눌려요. `releaseTitle` 버튼은 어느 질문에서든 누를 수 있어요. 따로 켜는 설정은 없고 그룹
+수로 정해져요. 그룹이 하나뿐이거나 없으면 지금처럼 한 화면에 모두 나오고, 버튼도 입력란도 없는 단일 선택
+그룹 하나는 선택지를 누르는 순간 답이 가요.
+
+SDK 1.5부터 그룹마다 직접 입력란을 둘 수 있어요. `AttentionChoices(id:prompt:options:allowsMultiple:textField:)`에
+`AttentionTextField`를 주면 선택지 아래에 입력란이 생기고, 사용자가 적은 글은 `answer.texts`에 그 그룹의
+`id`로 담겨요. 비워 둔 그룹은 `texts`에 들어가지 않아요. 고른 선택지는 지금처럼 `answer.choices`에 오고,
+요청 전체의 `textField`와 `answer.text`도 달라지지 않았어요.
+
+```swift
+let response = await context.requestAttention(AttentionRequest(
+    title: "질문",
+    message: "",
+    choices: [
+        AttentionChoices(id: "scope", prompt: "어디까지 적용할까요?", options: ["이 파일만", "저장소 전체"]),
+        AttentionChoices(id: "branch", prompt: "어느 브랜치에 올릴까요?", options: ["main"],
+                         textField: AttentionTextField(placeholder: "직접 입력")),
+    ],
+    releaseTitle: "터미널에서 답하기"
+))
+if case .answered(let answer) = response {
+    print(answer.choices["scope"], answer.choices["branch"], answer.texts["branch"])
+}
+```
+
 ### 홈과 타일
 
 노치를 펼치면 플러그인 타일이 격자로 놓인 홈이 나와요. 격자는 가로 8칸이고, 한 줄의 높이는 2칸이며,

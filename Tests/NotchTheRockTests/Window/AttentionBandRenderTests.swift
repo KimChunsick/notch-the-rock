@@ -99,6 +99,14 @@ import Testing
         defer { answer.cancel() }
         for _ in 0..<100 where host.state != .attention { await Task.yield() }
         try #require(host.state == .attention)
+        return try await render(host, backdrop: backdrop, file: file ?? "R46-render-\(name)-T148")
+    }
+
+    /// Draws the root view of `host`, which shows an attention, over `backdrop` until the shape and
+    /// its contents settle. Writes `<file>.png` when `file` is given and NOTCH_RENDER_DIR is set.
+    func render(
+        _ host: NotchHostModel, backdrop: Color = Self.backdrop, file: String? = nil
+    ) async throws -> (image: CGImage, scale: CGFloat, metrics: NotchLayout.Metrics) {
         var targets: [NotchLayout.Metrics] = []
         var drawn: NotchLayout.Metrics?
         let root = NotchRootView(host: host, notchSize: Self.notch, openSettings: { _ in },
@@ -126,9 +134,9 @@ import Testing
             previous = inside
         }
         let (image, metrics) = try #require(settled, "the attention did not settle: \(targets.count) targets, drawn \(String(describing: drawn))")
-        if let directory = ProcessInfo.processInfo.environment["NOTCH_RENDER_DIR"] {
+        if let file, let directory = ProcessInfo.processInfo.environment["NOTCH_RENDER_DIR"] {
             let data = try #require(NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))
-            try data.write(to: URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent("\(file ?? "R46-render-\(name)-T148").png"))
+            try data.write(to: URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent("\(file).png"))
         }
         return (image, CGFloat(image.width) / size.width, metrics)
     }

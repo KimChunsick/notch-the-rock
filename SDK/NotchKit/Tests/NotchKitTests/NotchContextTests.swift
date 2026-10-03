@@ -134,6 +134,29 @@ func makeContext(_ host: RecordingHost, id: String = "com.example.sample") throw
         #expect(await context.requestAttention(request) == .timedOut)
     }
 
+    /// SDK 1.5 adds a text field per choice group and the text typed into each; the 1.4
+    /// initializers still build what they built before, with neither.
+    @Test func R62__sdk_1_5_adds_a_text_field_per_choice_group_and_its_typed_text() async throws {
+        #expect(NotchKitSDK.version == SDKVersion(major: 1, minor: 5))
+        #expect(NotchKitSDK.version.supports(SDKVersion(major: 1, minor: 4)))
+        #expect(AttentionChoices(id: "q1", prompt: "고르세요", options: ["A", "B"], allowsMultiple: true).textField == nil)
+        #expect(AttentionChoices(id: "q1", prompt: "고르세요", options: ["A", "B"]).textField == nil)
+        let old = AttentionAnswer(buttonID: nil, choices: ["q1": ["A"]], text: "메모")
+        #expect(old.texts.isEmpty)
+        #expect(old == AttentionAnswer(buttonID: nil, choices: ["q1": ["A"]], text: "메모", texts: [:]))
+
+        let host = RecordingHost()
+        let context = try makeContext(host)
+        let answer = AttentionAnswer(buttonID: nil, choices: ["q1": ["A"]], texts: ["q2": "직접 적은 답"])
+        host.attentionReply = .answered(answer)
+        let request = AttentionRequest(title: "질문", message: "", choices: [
+            AttentionChoices(id: "q1", prompt: "첫째", options: ["A", "B"]),
+            AttentionChoices(id: "q2", prompt: "둘째", options: ["C"], textField: AttentionTextField(placeholder: "직접 입력")),
+        ])
+        #expect(await context.requestAttention(request) == .answered(answer))
+        #expect(host.lastAttention?.choices.map(\.textField) == [nil, AttentionTextField(placeholder: "직접 입력")])
+    }
+
     @Test func R03__storage_creates_private_plugin_directory() throws {
         let host = RecordingHost()
         let context = try makeContext(host)

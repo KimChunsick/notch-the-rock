@@ -26,7 +26,7 @@ import Testing
     }
 
     @Test func R48__sdk_1_4_adds_the_description_and_a_plugin_without_one_reads_nil() throws {
-        #expect(NotchKitSDK.version == SDKVersion(major: 1, minor: 4))
+        #expect(NotchKitSDK.version >= SDKVersion(major: 1, minor: 4))
         #expect(NotchKitSDK.version.supports(SDKVersion(major: 1, minor: 3)))
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("PluginDescriptionTests-\(UUID().uuidString)")
         let suite = directory.appendingPathComponent("defaults").path

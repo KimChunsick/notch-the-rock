@@ -79,6 +79,8 @@ final class NotchHostModel: NotchHost {
         /// notice counts from when it is shown, and has none while it waits or a takeover covers it.
         fileprivate(set) var deadline: ContinuousClock.Instant?
         fileprivate let continuation: CheckedContinuation<AttentionResponse, Never>
+        /// What the user has filled in so far, kept while they step between its choice groups.
+        fileprivate(set) var form: AttentionForm
 
         /// A notice only tells the user something (title, message, buttons). A request that hands a
         /// question over from elsewhere (`releaseTitle`), offers choices or takes text waits for an
@@ -293,6 +295,27 @@ final class NotchHostModel: NotchHost {
         scheduleExpiry()
     }
 
+    /// Changes what the user has filled in on the attention request `id`: a step or typed text.
+    func editAttention(_ id: PendingAttention.ID, _ change: (inout AttentionForm) -> Void) {
+        guard let index = attentions.firstIndex(where: { $0.id == id }) else { return }
+        change(&attentions[index].form)
+    }
+
+    /// Picks `option` in `group` of the attention request `id`, which answers a lone single choice
+    /// with nothing else to fill in (`AttentionForm.pick(_:in:)`).
+    func pickAttention(_ option: String, in group: AttentionChoices, of id: PendingAttention.ID) {
+        guard let index = attentions.firstIndex(where: { $0.id == id }) else { return }
+        if attentions[index].form.pick(option, in: group) { sendAttention(buttonID: nil, of: id) }
+    }
+
+    /// Answers the attention request `id` with what the user filled in, as submitted by `buttonID`
+    /// (nil for the host's own 보내기, Return in a text field or a pick). A stepping request that
+    /// still has an unanswered group is not sent.
+    func sendAttention(buttonID: String?, of id: PendingAttention.ID) {
+        guard let pending = attentions.first(where: { $0.id == id }), pending.form.canSend else { return }
+        respond(.answered(pending.form.answer(buttonID: buttonID)), to: id)
+    }
+
     /// Removes every item whose time is up and answers timed-out requests with `.timedOut`.
     func expireDue() {
         let current = now()
@@ -404,7 +427,9 @@ final class NotchHostModel: NotchHost {
         let id = attentionCount
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
-                var pending = PendingAttention(id: id, pluginID: pluginID, request: request, deadline: nil, continuation: continuation)
+                var pending = PendingAttention(
+                    id: id, pluginID: pluginID, request: request, deadline: nil, continuation: continuation, form: AttentionForm(request)
+                )
                 // A notice's time starts when it is shown (`startShownNotice()`).
                 if !pending.isNotice { pending.deadline = request.timeout.map { now() + $0 } }
                 attentions.append(pending)
