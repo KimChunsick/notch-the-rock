@@ -43,7 +43,7 @@ struct BrightnessView: View {
 /// brightness keys do, and so does VoiceOver's adjust.
 struct BrightnessSlider: View {
     /// Warm beige to gold, as the notch's brightness bar fills: keep it equal to
-    /// `HUDBar.warm` in the app's Sources/NotchTheRock/Window/NotchRootView.swift.
+    /// `HUDBar.warm` in the app's Sources/NotchTheRock/Window/HUDViews.swift.
     static let colors = [Color(red: 0.95, green: 0.87, blue: 0.72), Color(red: 0.97, green: 0.73, blue: 0.28)]
     static let height: CGFloat = 16
     static let thickness: CGFloat = 6
