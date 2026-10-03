@@ -366,42 +366,57 @@ private struct ScreenItemView: View {
         }
     }
 
+    /// The questions, opened at the first one still without an answer (a send in the notch may
+    /// leave one below the fold), and 보내기, which stays off beside the questions still open.
     private func form(_ questions: [Question]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(question.text)
-                                .font(.system(size: 12, weight: .medium))
-                                .fixedSize(horizontal: false, vertical: true)
-                            ForEach(question.options, id: \.self) { option in
-                                Button {
-                                    draft.pick(option, at: index)
-                                } label: {
-                                    Label(option, systemImage: symbol(option, of: question, at: index))
-                                        .font(.system(size: 12))
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(question.text)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .fixedSize(horizontal: false, vertical: true)
+                                ForEach(question.options, id: \.self) { option in
+                                    Button {
+                                        draft.pick(option, at: index)
+                                    } label: {
+                                        Label(option, systemImage: symbol(option, of: question, at: index))
+                                            .font(.system(size: 12))
+                                    }
+                                    .buttonStyle(.plain)
                                 }
-                                .buttonStyle(.plain)
+                                if question.takesText {
+                                    TextField("직접 입력", text: Binding(
+                                        get: { draft.typed[index] ?? "" },
+                                        set: { draft.type($0, at: index) }
+                                    ))
+                                    .textFieldStyle(.roundedBorder)
+                                }
                             }
-                            if question.takesText {
-                                TextField("직접 입력", text: Binding(
-                                    get: { draft.typed[index] ?? "" },
-                                    set: { draft.type($0, at: index) }
-                                ))
-                                .textFieldStyle(.roundedBorder)
-                            }
+                            .id(index)
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(8)
+                .frame(minHeight: AgentsScreen.minimumBodyHeight, maxHeight: .infinity)
+                .onAppear {
+                    if let first = draft.unanswered.first { proxy.scrollTo(first, anchor: .top) }
+                }
             }
-            .frame(minHeight: AgentsScreen.minimumBodyHeight, maxHeight: .infinity)
             HStack(spacing: 8) {
                 Button(item.releaseTitle) { respond(.released) }
                     .buttonStyle(.bordered)
                 Spacer(minLength: 0)
+                if let note = draft.unansweredNote {
+                    Text(note)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
+                        .lineLimit(2)
+                }
                 Button("보내기") { respond(draft.response) }
                     .tint(item.accent)
                     .disabled(draft.answers == nil)

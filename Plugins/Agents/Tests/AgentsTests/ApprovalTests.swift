@@ -19,6 +19,18 @@ let singleQuestionInput = #"""
 {"session_id":"s1","cwd":"/Users/me/notch-the-rock","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_use_id":"toolu_03","tool_input":{"questions":[{"question":"How should I format the output?","header":"Format","options":[{"label":"Summary","description":"Brief overview"},{"label":"Detailed","description":"Full explanation"}],"multiSelect":false}]}}
 """#
 
+/// Claude Code's input for AskUserQuestion with four questions, the most it asks at once.
+let fourQuestionInput = #"""
+{"session_id":"s1","cwd":"/Users/me/notch-the-rock","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_use_id":"toolu_04","tool_input":{"questions":[
+{"question":"Which framework should I use?","header":"Framework","options":[{"label":"SwiftUI","description":"Declarative"},{"label":"AppKit","description":"Imperative"}],"multiSelect":false},
+{"question":"Which platforms should it run on?","header":"Platforms","options":[{"label":"macOS","description":"Mac"},{"label":"iOS","description":"Phone"}],"multiSelect":true},
+{"question":"Which test library should I use?","header":"Tests","options":[{"label":"swift-testing","description":"New"},{"label":"XCTest","description":"Old"}],"multiSelect":false},
+{"question":"How should I ship it?","header":"Ship","options":[{"label":"Notarized","description":"Signed"},{"label":"Unsigned","description":"Local"}],"multiSelect":false}]}}
+"""#
+
+/// Claude Code's PostToolUse for the four-question call above.
+let fourQuestionsEnded = #"{"session_id":"s1","cwd":"/Users/me/notch-the-rock","hook_event_name":"PostToolUse","tool_name":"AskUserQuestion","tool_use_id":"toolu_04","tool_input":{},"tool_response":{}}"#
+
 /// A PermissionRequest for `tool` with `toolInput`, as Claude Code sends it.
 func permissionInput(tool: String, _ toolInput: [String: Any]) -> String {
     let object: [String: Any] = [
@@ -90,6 +102,34 @@ func expectJSON(_ output: Data, _ expected: String, sourceLocation: SourceLocati
 @Suite struct ApprovalTests {
     static func answer(_ button: String?, choices: [String: [String]] = [:], text: String? = nil) -> AttentionResponse {
         .answered(AttentionAnswer(buttonID: button, choices: choices, text: text))
+    }
+
+    static let claudeSession = AgentSession.Key(agent: .claude, id: "s1")
+    /// The four questions' picks on the card, by question index.
+    static let fourPicks: [String: [String]] = ["0": ["SwiftUI"], "1": ["macOS", "iOS"], "2": ["swift-testing"], "3": ["Notarized"]]
+    static let fourAnswers: NSDictionary = [
+        "Which framework should I use?": "SwiftUI",
+        "Which platforms should it run on?": ["macOS", "iOS"],
+        "Which test library should I use?": "swift-testing",
+        "How should I ship it?": "Notarized",
+    ]
+
+    static func state(_ live: LivePlugin) -> AgentSessionState? {
+        live.plugin.bridge.screen.sessions[claudeSession]?.state
+    }
+
+    /// Waits up to three seconds until `condition` holds.
+    static func eventually(_ condition: () -> Bool) async throws {
+        for _ in 0..<300 where !condition() {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    /// Runs the PostToolUse of the four-question call and waits until the plugin has taken it.
+    static func endFourQuestionCall(_ live: LivePlugin) async throws {
+        let before = try #require(live.plugin.bridge.screen.sessions[claudeSession]?.changed)
+        _ = await live.hook(.postToolUse, fourQuestionsEnded)
+        try await eventually { (live.plugin.bridge.screen.sessions[claudeSession]?.changed ?? before) > before }
     }
 
     @Test func R06__allow_in_the_notch_prints_the_allow_decision() async throws {
@@ -211,12 +251,102 @@ func expectJSON(_ output: Data, _ expected: String, sourceLocation: SourceLocati
 
         let output = Task { await live.hook(.preToolUse, questionInput) }
         let item = try await live.screenItem()
-        if case .questions(_, let picked) = item.content {
-            #expect(picked == [0: ["Summary"]])
+        guard case .questions(let questions, let picked) = item.content else {
+            Issue.record("not a question form: \(item.content)")
+            return
         }
+        #expect(picked == [0: ["Summary"]])
+        // The form names the question the send left open.
+        #expect(AnswerDraft(questions, picked: picked).unansweredNote == "2번 질문에 아직 답하지 않았어요")
         live.plugin.bridge.screen.respond(to: item.id, with: .released)
         #expect(await output.value.isEmpty)
         #expect(live.plugin.bridge.screen.items.isEmpty)
+        // The user sent from the notch, so a notice says the answers went to the terminal.
+        try await Self.eventually { live.host.requests.count == 2 }
+        #expect(live.host.requests.count == 2)
+        #expect(live.host.requests.last?.message == "답을 다 받지 못해서 터미널에서 이어서 답해 주세요.")
+    }
+
+    @Test func R61__four_answers_sent_from_the_card_reach_claude_and_the_session_works_again() async throws {
+        let live = try LivePlugin()
+        defer { live.stop() }
+        live.host.responses = [Self.answer(ClaudeBridge.sendAnswersButtonID, choices: Self.fourPicks)]
+
+        let output = await live.hook(.preToolUse, fourQuestionInput)
+        let input = try #require(jsonObject(Data(fourQuestionInput.utf8))?["tool_input"] as? NSDictionary)
+        let hook = try #require(jsonObject(output)?["hookSpecificOutput"] as? NSDictionary, "printed \(String(decoding: output, as: UTF8.self))")
+        #expect(hook["hookEventName"] as? String == "PreToolUse")
+        #expect(hook["permissionDecision"] as? String == "allow")
+        let updated = try #require(hook["updatedInput"] as? NSDictionary)
+        #expect(updated["questions"] as? NSArray == input["questions"] as? NSArray)
+        #expect(updated["answers"] as? NSDictionary == Self.fourAnswers)
+        #expect(live.host.requests.first?.choices.count == 4)
+        // Answered: the row works at once, and nothing of the request is left in the notch or on the
+        // screen.
+        #expect(Self.state(live) == .working)
+        #expect(live.host.requests.count == 1)
+        #expect(live.plugin.bridge.screen.items.isEmpty)
+        #expect(live.plugin.bridge.sessions["s1"]?.waits.isEmpty == true)
+        // The call's own end comes later and changes nothing.
+        try await Self.endFourQuestionCall(live)
+        #expect(Self.state(live) == .working)
+        #expect(live.host.requests.count == 1)
+    }
+
+    @Test func R61__a_question_left_open_on_the_card_is_named_on_the_screen_and_answered_there() async throws {
+        let live = try LivePlugin()
+        defer { live.stop() }
+        var three = Self.fourPicks
+        three["3"] = nil
+        live.host.responses = [Self.answer(ClaudeBridge.sendAnswersButtonID, choices: three)]
+
+        let output = Task { await live.hook(.preToolUse, fourQuestionInput) }
+        let item = try await live.screenItem()
+        guard case .questions(let questions, let picked) = item.content else {
+            Issue.record("not a question form: \(item.content)")
+            return
+        }
+        #expect(questions.count == 4)
+        var draft = AnswerDraft(questions, picked: picked)
+        #expect(draft.unanswered == [3])
+        #expect(draft.unansweredNote == "4번 질문에 아직 답하지 않았어요")
+        #expect(draft.answers == nil)
+        #expect(Self.state(live) == .awaitingAnswer)
+        draft.pick("Notarized", at: 3)
+        #expect(draft.unansweredNote == nil)
+        live.plugin.bridge.screen.respond(to: item.id, with: draft.response)
+
+        let printed = await output.value
+        let answers = ((jsonObject(printed)?["hookSpecificOutput"] as? NSDictionary)?["updatedInput"] as? NSDictionary)?["answers"] as? NSDictionary
+        #expect(answers == Self.fourAnswers, "printed \(String(decoding: printed, as: UTF8.self))")
+        #expect(Self.state(live) == .working)
+        #expect(live.plugin.bridge.screen.items.isEmpty)
+        #expect(live.host.requests.count == 1)
+    }
+
+    @Test func R61__a_screen_that_runs_out_after_a_partial_send_says_so_and_the_terminal_answers() async throws {
+        let live = try LivePlugin()
+        defer { live.stop() }
+        var three = Self.fourPicks
+        three["3"] = nil
+        live.host.responses = [Self.answer(ClaudeBridge.sendAnswersButtonID, choices: three)]
+
+        let output = Task { await live.hook(.preToolUse, fourQuestionInput) }
+        let item = try await live.screenItem()
+        // What the screen's own timer does once the wait that began in the notch runs out.
+        live.plugin.bridge.screen.respond(to: item.id, with: .timedOut)
+        #expect(await output.value.isEmpty)
+        #expect(live.plugin.bridge.screen.items.isEmpty)
+        try await Self.eventually { live.host.requests.count == 2 }
+        let notice = try #require(live.host.requests.last)
+        #expect(live.host.requests.count == 2)
+        #expect(notice.title == "notch-the-rock")
+        #expect(notice.message == "답을 다 받지 못해서 터미널에서 이어서 답해 주세요.")
+        #expect(notice.buttons.map(\.id) == [ClaudeBridge.jumpButtonID])
+        // The terminal asks now: the row waits until the call ends.
+        #expect(Self.state(live) == .awaitingAnswer)
+        try await Self.endFourQuestionCall(live)
+        #expect(Self.state(live) == .working)
     }
 
     @Test func R06__typed_answers_never_copy_one_value_into_every_question() {
@@ -401,7 +531,14 @@ func expectJSON(_ output: Data, _ expected: String, sourceLocation: SourceLocati
         live.host.responses = [response, response]
         #expect(await live.hook(.permissionRequest, permissionInput).isEmpty)
         #expect(await live.hook(.preToolUse, questionInput).isEmpty)
-        #expect(live.host.requests.count == 2)
+        // A question whose wait ran out says it went to the terminal; one released or closed went
+        // there by the user's choice.
+        let notices = response == .timedOut ? 1 : 0
+        try await Self.eventually { live.host.requests.count >= 2 + notices }
+        #expect(live.host.requests.count == 2 + notices)
+        if notices == 1 {
+            #expect(live.host.requests.last?.message == "답을 다 받지 못해서 터미널에서 이어서 답해 주세요.")
+        }
     }
 
     @Test func R06__other_tools_before_use_are_not_asked() async throws {

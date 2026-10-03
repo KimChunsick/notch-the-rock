@@ -37,9 +37,13 @@ struct TestServer {
     }
 }
 
-/// Runs the blocking hook off the main actor, as the helper process would.
+/// Runs the blocking hook on its own thread, as the helper process would. Never on the cooperative
+/// pool: hooks that wait for an answer there at once can take every thread of it, and the tests that
+/// would answer them then never wake.
 func run(_ runner: HookRunner, _ arguments: [String]) async -> Data {
-    await Task.detached { runner.run(arguments: arguments) }.value
+    await withCheckedContinuation { continuation in
+        Thread.detachNewThread { continuation.resume(returning: runner.run(arguments: arguments)) }
+    }
 }
 
 @Suite struct HookBridgeTests {

@@ -109,22 +109,35 @@ struct Question: Equatable {
         return questions.count == items.count ? questions : nil
     }
 
-    /// Each question's answer by its text: the picked option (labels when several may be picked),
-    /// otherwise the text typed for a question that takes it. Nil while some question has neither.
+    /// Each question's answer by its text. Nil while some question has none.
     static func answers(_ questions: [Question], picked: [Int: [String]], typed: [Int: String]) -> [String: JSONValue]? {
         var answers: [String: JSONValue] = [:]
         for (index, question) in questions.enumerated() {
-            let picks = picked[index] ?? []
-            let text = typed[index]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if let first = picks.first {
-                answers[question.text] = question.multiple ? .array(picks.map(JSONValue.string)) : .string(first)
-            } else if !text.isEmpty, question.takesText {
-                answers[question.text] = .string(text)
-            } else {
-                return nil
-            }
+            guard let answer = question.answer(picked: picked[index] ?? [], typed: typed[index]) else { return nil }
+            answers[question.text] = answer
         }
         return answers
+    }
+
+    /// The indices of the questions that have no answer yet, in order.
+    static func unanswered(_ questions: [Question], picked: [Int: [String]], typed: [Int: String]) -> [Int] {
+        questions.indices.filter { questions[$0].answer(picked: picked[$0] ?? [], typed: typed[$0]) == nil }
+    }
+
+    /// Names the questions still open by their number, counted from 1; nil when none is.
+    static func unansweredNote(_ indices: [Int]) -> String? {
+        guard !indices.isEmpty else { return nil }
+        return indices.map { "\($0 + 1)번" }.joined(separator: ", ") + " 질문에 아직 답하지 않았어요"
+    }
+
+    /// The picked option (labels when several may be picked), otherwise the typed text when the
+    /// question takes it; nil when it has neither.
+    private func answer(picked picks: [String], typed: String?) -> JSONValue? {
+        let text = typed?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if let first = picks.first {
+            return multiple ? .array(picks.map(JSONValue.string)) : .string(first)
+        }
+        return !text.isEmpty && takesText ? .string(text) : nil
     }
 }
 
@@ -171,4 +184,10 @@ struct AnswerDraft: Equatable {
 
     /// Nil while some question has no answer yet.
     var answers: [String: JSONValue]? { Question.answers(questions, picked: picked, typed: typed) }
+
+    /// The indices of the questions still without an answer.
+    var unanswered: [Int] { Question.unanswered(questions, picked: picked, typed: typed) }
+
+    /// Why 보내기 cannot send yet: the questions still open; nil once every question is answered.
+    var unansweredNote: String? { Question.unansweredNote(unanswered) }
 }

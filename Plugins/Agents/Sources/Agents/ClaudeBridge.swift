@@ -1,6 +1,7 @@
 import AppKit
 import HookBridge
 import NotchKit
+import os
 import SwiftUI
 
 /// What the plugin knows about one Claude Code session.
@@ -58,6 +59,11 @@ final class ClaudeBridge {
     static let releaseTitle = "터미널에서 답하기"
     /// Sent to Claude when the user denies without writing a reason.
     static let defaultDenial = "사용자가 노치에서 거부했어요."
+    /// Shown when a question goes back to the terminal unanswered after the user sent from the notch,
+    /// or after its wait ran out.
+    static let unansweredNotice = "답을 다 받지 못해서 터미널에서 이어서 답해 주세요."
+    /// What the bridge does with questions: counts, indices and ids, never question or answer text.
+    private static let log = Logger(subsystem: "com.notchtherock.NotchTheRock", category: "agents")
     /// Claude's orange.
     static let accent = Color(red: 0.85, green: 0.47, blue: 0.34)
     /// How long a notice of either agent stays, counted by the host from when it is shown: one queued
@@ -277,10 +283,14 @@ final class ClaudeBridge {
 
     /// AskUserQuestion: each question's options (one or several). A single question also takes free
     /// text in the notch; several questions each get their own answer field on the Agents screen, so
-    /// one typed value never answers them all. A question left without an answer goes to the terminal.
+    /// one typed value never answers them all. A question left without an answer goes to the terminal;
+    /// when the user had sent from the notch, or the wait ran out, a notice says so.
     private func answerQuestions(_ message: HookMessage, title: String) async -> HookDecision? {
         guard message.payload["tool_name"]?.string == "AskUserQuestion",
               let questions = Question.parse(message.payload["tool_input"]) else { return nil }
+        let sessionID = message.payload["session_id"]?.string ?? ""
+        let call = message.payload["tool_use_id"]?.string ?? "-"
+        Self.log.info("question shown: session \(sessionID, privacy: .public), call \(call, privacy: .public), \(questions.count) questions")
         let single = questions.count == 1
         let wait = wait()
         let deadline = ContinuousClock.now + wait
@@ -301,20 +311,53 @@ final class ClaudeBridge {
             releaseTitle: Self.releaseTitle,
             timeout: wait
         ))
-        guard case .answered(let answer) = response else { return nil }
+        guard case .answered(let answer) = response else {
+            Self.log.info("question card: \(String(describing: response), privacy: .public), call \(call, privacy: .public)")
+            if response == .timedOut { noticeUnanswered(sessionID, title: title, call: call) }
+            return nil
+        }
+        Self.log.info("question card: answered with \(answer.buttonID ?? "the notch's 보내기", privacy: .public), call \(call, privacy: .public)")
+        // 직접 입력하기 asks for the screen; any other button sends what was picked.
+        let sent = answer.buttonID != Self.typeAnswersButtonID
         var picked: [Int: [String]] = [:]
         for index in questions.indices {
             if let options = answer.choices[String(index)], !options.isEmpty { picked[index] = options }
         }
         let typed = single ? [0: answer.text ?? ""] : [:]
-        if answer.buttonID != Self.typeAnswersButtonID, let answers = Question.answers(questions, picked: picked, typed: typed) {
-            return .answers(answers)
+        var answers = sent ? Question.answers(questions, picked: picked, typed: typed) : nil
+        if answers == nil, !single {
+            // Typed answers, or questions still open: one field per question on the Agents screen,
+            // which names the open ones beside its 보내기.
+            let open = Question.unanswered(questions, picked: picked, typed: [:])
+            Self.log.info("question to the screen: call \(call, privacy: .public), open questions \(open, privacy: .public)")
+            let result = await showOnScreen("\(title) · Claude의 질문", .questions(questions, picked: picked), until: deadline)
+            switch result {
+            case .answers(let screenPicked, let screenTyped):
+                answers = Question.answers(questions, picked: screenPicked, typed: screenTyped)
+            case .released, .timedOut, .cancelled:
+                Self.log.info("question screen: \(String(describing: result), privacy: .public), call \(call, privacy: .public)")
+            case .allow, .allowForSession, .deny:
+                break
+            }
+            // Gone to the terminal after a send in the notch, or once the wait ran out; a hook that
+            // went away was answered there.
+            if answers == nil, !Task.isCancelled, result == .timedOut || (sent && result != .cancelled) {
+                noticeUnanswered(sessionID, title: title, call: call)
+            }
+        } else if answers == nil, !Task.isCancelled {
+            // A single question sent from the notch with nothing picked or typed.
+            noticeUnanswered(sessionID, title: title, call: call)
         }
-        guard !single else { return nil }
-        // Typed answers, or questions still open: one field per question on the Agents screen.
-        let result = await showOnScreen("\(title) · Claude의 질문", .questions(questions, picked: picked), until: deadline)
-        guard case .answers(let screenPicked, let screenTyped) = result else { return nil }
-        return Question.answers(questions, picked: screenPicked, typed: screenTyped).map(HookDecision.answers)
+        guard let answers else { return nil }
+        let keys = questions.indices.filter { answers[questions[$0].text] != nil }
+        Self.log.info("question answered: call \(call, privacy: .public), answers for questions \(keys, privacy: .public) of \(questions.count)")
+        return .answers(answers)
+    }
+
+    /// The question goes back to the terminal without the user's answers: tells the user so.
+    private func noticeUnanswered(_ sessionID: String, title: String, call: String) {
+        Self.log.notice("question released to the terminal unanswered: session \(sessionID, privacy: .public), call \(call, privacy: .public)")
+        _ = notify(sessionID, title: title, message: Self.unansweredNotice)
     }
 
     /// Opens the Agents screen on the request and waits there until the user answers, hands it to the
