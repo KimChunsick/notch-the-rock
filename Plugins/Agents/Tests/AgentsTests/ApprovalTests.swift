@@ -57,17 +57,7 @@ final class LivePlugin {
         if let wait {
             context.storage.defaults.set(wait, forKey: ApprovalWait.defaultsKey)
         }
-        plugin = AgentsPlugin(
-            context: context,
-            socketPath: paths.socket,
-            settingsURL: directory.appendingPathComponent("settings.json"),
-            claudeExecutable: nil,
-            activator: FakeActivator(),
-            codexEndpoint: CodexEndpoint(home: directory),
-            codexExecutable: nil,
-            codexLauncher: FakeLauncher(socketPath: ""),
-            codexTerminal: { _ in nil }
-        )
+        plugin = makePlugin(context: context, directory: directory, socketPath: paths.socket)
         plugin.activate()
     }
 

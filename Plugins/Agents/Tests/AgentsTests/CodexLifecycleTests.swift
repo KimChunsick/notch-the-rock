@@ -33,7 +33,7 @@ extension WebSocketTests {
     }
 
     @Test func R07__a_server_that_never_answers_the_upgrade_times_out() async throws {
-        let folder = "/tmp/nk-\(UUID().uuidString.prefix(8))"
+        let folder = makeShortPath()
         defer { try? FileManager.default.removeItem(atPath: folder) }
         // Never accepts: the connection waits in the backlog and nobody answers the upgrade.
         let listener = try listen(at: folder + "/s.sock")
@@ -144,7 +144,7 @@ func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
 
 @MainActor
 @Suite struct CodexLinkTests {
-    let home = "/tmp/nk-\(UUID().uuidString.prefix(8))"
+    let home = makeShortPath()
     let host = FakeHost()
 
     /// A link to a listening user-only socket (reused, never started) whose connections are `connections`.
@@ -266,16 +266,11 @@ func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         let ran = directory.appendingPathComponent("ran")
         try "#!/bin/sh\ntouch '\(ran.path)'\necho 'codex-cli 0.150.0'\n".write(to: script, atomically: true, encoding: .utf8)
         chmod(script.path, 0o755)
-        let plugin = AgentsPlugin(
+        let plugin = makePlugin(
             context: try makeContext(host: FakeHost(), directory: directory),
+            directory: directory,
             socketPath: directory.appendingPathComponent("s").path,
-            settingsURL: directory.appendingPathComponent("settings.json"),
-            claudeExecutable: nil,
-            activator: FakeActivator(),
-            codexEndpoint: CodexEndpoint(home: directory),
-            codexExecutable: script,
-            codexLauncher: FakeLauncher(socketPath: ""),
-            codexTerminal: { _ in nil }
+            codexExecutable: script
         )
         #expect(!FileManager.default.fileExists(atPath: ran.path))
         #expect(plugin.codex.install == nil)
@@ -439,16 +434,10 @@ extension CodexLinkTests {
         weak var link: CodexLink?
         weak var model: CodexModel?
         do {
-            let plugin = AgentsPlugin(
+            let plugin = makePlugin(
                 context: try makeContext(host: FakeHost(), directory: directory),
-                socketPath: directory.appendingPathComponent("s").path,
-                settingsURL: directory.appendingPathComponent("settings.json"),
-                claudeExecutable: nil,
-                activator: FakeActivator(),
-                codexEndpoint: CodexEndpoint(home: directory),
-                codexExecutable: nil,
-                codexLauncher: FakeLauncher(socketPath: ""),
-                codexTerminal: { _ in nil }
+                directory: directory,
+                socketPath: directory.appendingPathComponent("s").path
             )
             link = plugin.codexLink
             model = plugin.codex

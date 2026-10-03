@@ -713,7 +713,7 @@ func listen(at path: String, folderMode: mode_t = 0o700) throws -> Int32 {
 
 @MainActor
 @Suite struct CodexSupervisorTests {
-    let home = "/tmp/nk-\(UUID().uuidString.prefix(8))"
+    let home = makeShortPath()
     var endpoint: CodexEndpoint { CodexEndpoint(home: URL(fileURLWithPath: home)) }
     let codex = URL(fileURLWithPath: "/opt/homebrew/bin/codex")
 

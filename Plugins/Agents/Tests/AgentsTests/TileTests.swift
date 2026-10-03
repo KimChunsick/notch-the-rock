@@ -155,16 +155,10 @@ private func onHome(_ tiles: [(AgentsTile, TileSize)]) -> some View {
         let paths = makeSocketPath()
         defer { try? FileManager.default.removeItem(atPath: paths.folder) }
         let directory = try makeDirectory()
-        let plugin = AgentsPlugin(
+        let plugin = makePlugin(
             context: try makeContext(host: host, directory: directory),
-            socketPath: paths.socket,
-            settingsURL: directory.appendingPathComponent("settings.json"),
-            claudeExecutable: nil,
-            activator: FakeActivator(),
-            codexEndpoint: CodexEndpoint(home: directory),
-            codexExecutable: nil,
-            codexLauncher: FakeLauncher(socketPath: ""),
-            codexTerminal: { _ in nil }
+            directory: directory,
+            socketPath: paths.socket
         )
         let tile = try #require(plugin.tile)
         #expect(tile.supportedSizes == [.wide, .small])

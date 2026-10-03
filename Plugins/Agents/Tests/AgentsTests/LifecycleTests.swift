@@ -13,7 +13,7 @@ import Testing
 @Suite struct LifecycleTests {
     let host = FakeHost()
     let paths = makeSocketPath()
-    let codexHome = URL(fileURLWithPath: "/tmp/nk-\(UUID().uuidString.prefix(8))")
+    let codexHome = URL(fileURLWithPath: makeShortPath())
     let directory: URL
     let launcher: FakeLauncher
 
@@ -26,16 +26,13 @@ import Testing
     private func plugin() throws -> AgentsPlugin {
         let context = try makeContext(host: host, directory: directory)
         context.storage.defaults.set(true, forKey: CodexModel.enabledKey)
-        return AgentsPlugin(
+        return makePlugin(
             context: context,
+            directory: directory,
             socketPath: paths.socket,
-            settingsURL: directory.appendingPathComponent("settings.json"),
-            claudeExecutable: nil,
-            activator: FakeActivator(),
             codexEndpoint: CodexEndpoint(home: codexHome),
             codexExecutable: codexHome.appendingPathComponent("codex"),
-            codexLauncher: launcher,
-            codexTerminal: { _ in nil }
+            codexLauncher: launcher
         )
     }
 

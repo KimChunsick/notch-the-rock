@@ -8,16 +8,12 @@ import Testing
 @MainActor
 @Suite struct SetupTests {
     private func plugin(in directory: URL, claude: URL?, codex: URL?) throws -> AgentsPlugin {
-        AgentsPlugin(
+        makePlugin(
             context: try makeContext(host: FakeHost(), directory: directory),
+            directory: directory,
             socketPath: directory.appendingPathComponent("s").path,
-            settingsURL: directory.appendingPathComponent("settings.json"),
             claudeExecutable: claude,
-            activator: FakeActivator(),
-            codexEndpoint: CodexEndpoint(home: directory),
-            codexExecutable: codex,
-            codexLauncher: FakeLauncher(socketPath: ""),
-            codexTerminal: { _ in nil }
+            codexExecutable: codex
         )
     }
 
