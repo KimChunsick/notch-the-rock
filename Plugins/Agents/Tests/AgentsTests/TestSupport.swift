@@ -86,10 +86,43 @@ func makeDirectory(_ name: String = "agents-tests") throws -> URL {
     return directory
 }
 
+/// A folder path in /tmp short enough for a Unix socket below it (`sockaddr_un` holds 104 bytes);
+/// nothing exists there yet.
+func makeShortPath() -> String {
+    "/tmp/nk-\(UUID().uuidString.prefix(8))"
+}
+
 /// A socket path short enough for `sockaddr_un` (104 bytes) in a folder that does not exist yet.
 func makeSocketPath() -> (folder: String, socket: String) {
-    let folder = "/tmp/nk-\(UUID().uuidString.prefix(8))"
+    let folder = makeShortPath()
     return (folder, folder + "/s")
+}
+
+/// The plugin with its storage in `context` and the Claude Code settings file and the codex home in
+/// `directory`. Terminals and codex are fakes: codex is not found unless `codexExecutable` says
+/// where, and nothing the plugin would launch runs.
+@MainActor
+func makePlugin(
+    context: NotchContext,
+    directory: URL,
+    socketPath: String,
+    claudeExecutable: URL? = nil,
+    activator: any TerminalActivating = FakeActivator(),
+    codexEndpoint: CodexEndpoint? = nil,
+    codexExecutable: URL? = nil,
+    codexLauncher: any CodexLaunching = FakeLauncher(socketPath: "")
+) -> AgentsPlugin {
+    AgentsPlugin(
+        context: context,
+        socketPath: socketPath,
+        settingsURL: directory.appendingPathComponent("settings.json"),
+        claudeExecutable: claudeExecutable,
+        activator: activator,
+        codexEndpoint: codexEndpoint ?? CodexEndpoint(home: directory),
+        codexExecutable: codexExecutable,
+        codexLauncher: codexLauncher,
+        codexTerminal: { _ in nil }
+    )
 }
 
 /// The package folder, found from this file's path.

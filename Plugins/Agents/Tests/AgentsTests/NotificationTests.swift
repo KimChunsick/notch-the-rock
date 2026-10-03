@@ -110,16 +110,11 @@ import Testing
         let paths = makeSocketPath()
         defer { try? FileManager.default.removeItem(atPath: paths.folder) }
         let directory = try makeDirectory()
-        let plugin = AgentsPlugin(
+        let plugin = makePlugin(
             context: try makeContext(host: host, directory: directory),
+            directory: directory,
             socketPath: paths.socket,
-            settingsURL: directory.appendingPathComponent("settings.json"),
-            claudeExecutable: nil,
-            activator: activator,
-            codexEndpoint: CodexEndpoint(home: directory),
-            codexExecutable: nil,
-            codexLauncher: FakeLauncher(socketPath: ""),
-            codexTerminal: { _ in nil }
+            activator: activator
         )
         plugin.activate()
         host.responses = [Self.jump]

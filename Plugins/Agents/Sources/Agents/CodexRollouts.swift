@@ -141,6 +141,9 @@ final class CodexRollouts {
 
     private var list: AgentSessionList { bridge.screen.sessions }
 
+    /// Whether the files are followed: from `start` until `stop`.
+    var isWatching: Bool { polling != nil }
+
     /// Indexes the files, then follows them every `interval`.
     func start() {
         guard polling == nil else { return }

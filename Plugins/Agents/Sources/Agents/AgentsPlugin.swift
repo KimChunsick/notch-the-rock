@@ -34,6 +34,7 @@ public final class AgentsPlugin: NotchPlugin {
     private let socketPath: String
     private let activator: any TerminalActivating
     private let logos: InstalledAppLogos
+    private var isActive = false
     private var server: HookServer?
     /// Drops ended sessions from the list while the plugin is active.
     private var pruning: Task<Void, Never>?
@@ -112,15 +113,14 @@ public final class AgentsPlugin: NotchPlugin {
     }
 
     public func activate() {
-        if pruning == nil {
-            pruning = Task { [sessions = bridge.screen.sessions] in
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: AgentSessionList.pruneInterval)
-                    sessions.prune()
-                }
+        guard !isActive else { return }
+        isActive = true
+        pruning = Task { [sessions = bridge.screen.sessions] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: AgentSessionList.pruneInterval)
+                sessions.prune()
             }
         }
-        guard server == nil else { return }
         let bridge = bridge
         let log = context.log
         let server = HookServer(
@@ -132,7 +132,8 @@ public final class AgentsPlugin: NotchPlugin {
             try server.start()
             self.server = server
         } catch {
-            // Hooks find no socket and leave Claude Code as it is; the next activation tries again.
+            // Hooks find no socket and leave Claude Code as it is; activating after the next
+            // deactivate() tries again.
             log.error("The Claude Code socket is not available: \(error)")
         }
         if codex.enabled {
@@ -142,16 +143,21 @@ public final class AgentsPlugin: NotchPlugin {
     }
 
     public func deactivate() {
-        server?.stop()
-        server = nil
-        pruning?.cancel()
-        pruning = nil
+        if isActive {
+            server?.stop()
+            server = nil
+            pruning?.cancel()
+            pruning = nil
+        }
         bridge.cancelAll()
+        // The settings page and the onboarding connect Codex without activate(), so its link and
+        // rollouts stop whether or not the plugin was activated.
         codexLink.stop()
         rollouts.stop()
         codexBridge.cancelAll()
         // Events stop while the plugin is off; each session returns with its next one.
         bridge.screen.sessions.removeAll()
+        isActive = false
     }
 
     /// Brings the terminal of a session on the Agents screen forward and folds the notch; a session
