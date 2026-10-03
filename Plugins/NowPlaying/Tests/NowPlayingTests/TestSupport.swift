@@ -93,6 +93,7 @@ final class FakeLauncher: HelperLauncher {
 
 /// A clock whose time moves only when told. Each sleep is recorded; it jumps straight to its
 /// deadline, or, while `parksSleeps` is on, waits in a real sleep until its task is cancelled.
+/// `parked` counts the sleeps waiting so.
 final class VirtualClock: Clock {
     struct Instant: InstantProtocol {
         var offset: Swift.Duration
@@ -106,6 +107,7 @@ final class VirtualClock: Clock {
         var now = Instant(offset: .zero)
         var sleeps: [Swift.Duration] = []
         var parksSleeps = false
+        var parked = 0
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
@@ -113,6 +115,7 @@ final class VirtualClock: Clock {
     var now: Instant { state.withLock { $0.now } }
     var minimumResolution: Swift.Duration { .zero }
     var sleeps: [Swift.Duration] { state.withLock { $0.sleeps } }
+    var parked: Int { state.withLock { $0.parked } }
 
     var parksSleeps: Bool {
         get { state.withLock { $0.parksSleeps } }
@@ -126,10 +129,12 @@ final class VirtualClock: Clock {
     func sleep(until deadline: Instant, tolerance: Swift.Duration?) async throws {
         let park = state.withLock { state in
             state.sleeps.append(state.now.duration(to: deadline))
-            if !state.parksSleeps { state.now = max(state.now, deadline) }
+            if state.parksSleeps { state.parked += 1 } else { state.now = max(state.now, deadline) }
             return state.parksSleeps
         }
-        if park { try await Task.sleep(for: .seconds(3600)) }
+        guard park else { return }
+        defer { state.withLock { $0.parked -= 1 } }
+        try await Task.sleep(for: .seconds(3600))
     }
 }
 

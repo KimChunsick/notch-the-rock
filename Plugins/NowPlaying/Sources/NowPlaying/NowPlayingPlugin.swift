@@ -72,14 +72,15 @@ public final class NowPlayingPlugin: NotchPlugin {
 
     public func deactivate() {
         guard isActive else { return }
-        isActive = false
         restartTask?.cancel()
         restartTask = nil
+        cancelPauseGrace()
         generation += 1
         stream?.stop()
         stream = nil
         model.reset()
         updateActivity()
+        isActive = false
     }
 
     public var expandedTab: PluginTab? {

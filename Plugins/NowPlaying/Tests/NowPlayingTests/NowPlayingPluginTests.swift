@@ -229,6 +229,60 @@ private func makePlugin(launcher: FakeLauncher, clock: VirtualClock = VirtualClo
     #expect(launcher.streams[10].isStopped)
 }
 
+/// Activating twice starts one helper. Deactivating stops it, ends a waiting pause grace and a
+/// waiting restart, and takes the wings down; deactivating again does nothing. Activated anew, the
+/// plugin starts a fresh helper whose wings come and go as the first one's did.
+@MainActor
+@Test func R64__activate_twice_starts_one_helper_and_deactivate_stops_everything_it_started() async throws {
+    let host = RecordingHost()
+    let launcher = FakeLauncher()
+    let clock = VirtualClock()
+    clock.parksSleeps = true
+    let plugin = try makePlugin(launcher: launcher, clock: clock, host: host)
+    plugin.activate()
+    plugin.activate()
+    #expect(launcher.streams.count == 1)
+
+    // A pause grace waits.
+    launcher.streams[0].emit(infoLine())
+    launcher.streams[0].emit(infoLine(rate: 0, playing: false))
+    await waitUntil { clock.parked == 1 }
+    try #require(clock.parked == 1)
+    plugin.deactivate()
+    #expect(launcher.streams[0].isStopped)
+    #expect(host.events == [.post(id: activityID, priority: 100), .clear(id: activityID)])
+    #expect(plugin.model.state == .nothing)
+    await waitUntil { clock.parked == 0 }
+    #expect(clock.parked == 0)
+
+    // A restart waits.
+    plugin.activate()
+    try #require(launcher.streams.count == 2)
+    launcher.streams[1].exit(1)
+    await waitUntil { clock.parked == 1 }
+    try #require(clock.parked == 1)
+    plugin.deactivate()
+    plugin.deactivate()
+    await waitUntil { clock.parked == 0 }
+    #expect(clock.parked == 0)
+    #expect(launcher.streams.count == 2)
+    #expect(host.events.count == 2)
+
+    // Activated anew: a fresh helper, and the wings follow it as before.
+    clock.parksSleeps = false
+    plugin.activate()
+    try #require(launcher.streams.count == 3)
+    let fresh = launcher.streams[2]
+    #expect(!fresh.isStopped)
+    fresh.emit(infoLine())
+    #expect(host.events.last == .post(id: activityID, priority: 100))
+    #expect(plugin.model.track?.title == "Blue in Green")
+    plugin.deactivate()
+    #expect(fresh.isStopped)
+    #expect(host.events.last == .clear(id: activityID))
+    #expect(host.events.count == 4)
+}
+
 /// A helper that reports MediaRemote unavailable, or a perl that cannot start, leaves the plugin
 /// in the quiet unavailable state with one error in the log, and nothing is started again until the
 /// plugin is activated anew.
