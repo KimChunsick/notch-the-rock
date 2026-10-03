@@ -24,10 +24,15 @@ struct PowerChangeActivityRenderTests {
         host = NotchHostModel(now: { clock.now })
     }
 
-    /// Battery's post while charging: a green bolt and the percentage.
-    func battery(_ id: String, priority: Int = 0, expiresAfter: Duration? = nil, percentage: String) -> LiveActivity {
+    /// Battery's post while charging: a green bolt and the percentage. Not charging, the level glyph
+    /// in the host's colour.
+    func battery(_ id: String, priority: Int = 0, expiresAfter: Duration? = nil, charging: Bool = true, percentage: String) -> LiveActivity {
         LiveActivity(id: id, priority: priority, expiresAfter: expiresAfter) {
-            Image(systemName: "battery.100percent.bolt").symbolRenderingMode(.hierarchical).foregroundStyle(.green)
+            if charging {
+                Image(systemName: "battery.100percent.bolt").symbolRenderingMode(.hierarchical).foregroundStyle(.green)
+            } else {
+                Image(systemName: "battery.75percent").symbolRenderingMode(.hierarchical)
+            }
         } trailing: {
             Text(percentage).monospacedDigit()
         }
@@ -103,6 +108,31 @@ struct PowerChangeActivityRenderTests {
         #expect(shown == "\(Self.nowPlaying) now-playing")
         let after = try await capture("now-playing-after-T184")
         #expect(after.left.white > 0 && after.left.green == 0, "the album art again: \(after)")
+    }
+
+    /// Charging starting 1 s after external power connected while music plays: Battery re-posts its
+    /// power change with the green bolt for the 1.5 s it has left. The refresh still wins over
+    /// NowPlaying and ends at the first post's expiry, not 2.5 s after the refresh.
+    @Test func R10__refreshed_power_change_stays_over_now_playing_until_its_first_expiry() async throws {
+        play()
+        host.post(battery("power-change", priority: 100, expiresAfter: .milliseconds(2500), charging: false, percentage: "80%"), from: Self.battery)
+        #expect(shown == "\(Self.battery) power-change")
+
+        clock.advance(by: .seconds(1))
+        host.expireDue()
+        host.post(battery("power-change", priority: 100, expiresAfter: .milliseconds(1500), percentage: "80%"), from: Self.battery)
+        host.post(battery("charging", percentage: "80%"), from: Self.battery)
+        #expect(shown == "\(Self.battery) power-change")
+        let refreshed = try await capture("refresh-T185")
+        #expect(refreshed.left.green > 0 && refreshed.left.white == 0, "the green bolt, not the album art: \(refreshed)")
+        #expect(refreshed.right.white > 0 && refreshed.right.green == 0, "the percentage: \(refreshed)")
+
+        clock.advance(by: .milliseconds(1499))
+        host.expireDue()
+        #expect(shown == "\(Self.battery) power-change")
+        clock.advance(by: .milliseconds(1))
+        host.expireDue()
+        #expect(shown == "\(Self.nowPlaying) now-playing")
     }
 
     /// Plugging in with nothing playing: once the power change expires, the always-on charging
