@@ -12,6 +12,10 @@ import Testing
 private final class FakeHost: NotchHost {
     var isAccessibilityTrusted = true
     var attentionResponse: AttentionResponse = .dismissed
+    /// When true, an attention request stays in the notch until its task is cancelled; the host then
+    /// withdraws it and answers `.cancelled`.
+    var holdsAttention = false
+    var withdrawnAttentions = 0
     var huds: [String] = []
     var attentions: [String] = []
     var accessibilityRequests = 0
@@ -24,7 +28,12 @@ private final class FakeHost: NotchHost {
     func present(_ takeover: Takeover, from pluginID: String) {}
     func requestAttention(_ request: AttentionRequest, from pluginID: String) async -> AttentionResponse {
         attentions.append("\(request.title) [\(request.buttons.map(\.title).joined(separator: ", "))]")
-        return attentionResponse
+        guard holdsAttention else { return attentionResponse }
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        withdrawnAttentions += 1
+        return .cancelled
     }
     func expand(toTabOf pluginID: String) {}
     func collapse(from pluginID: String) {}
@@ -594,6 +603,73 @@ func R12__the_slider_carries_an_accessibility_label() throws {
     try await Task.sleep(for: .milliseconds(200))
     #expect(refused.tap.installs == 1)
     #expect(refused.host.attentions.isEmpty)
+}
+@MainActor
+@Test func R64__activating_twice_starts_one_tap_one_guidance_and_one_permission_poll() async throws {
+    let h = try Harness()
+    h.plugin.activate()
+    h.plugin.activate()
+    #expect(h.tap.installs == 1)
+    #expect(h.send(0, down) == true)
+    #expect(h.volume.writes == ["level 0.5625"])
+    h.plugin.deactivate()
+
+    let waiting = try Harness(trusted: false)
+    waiting.plugin.activate()
+    waiting.plugin.activate()
+    #expect(await waitUntil { waiting.host.attentions.count == 1 })
+    waiting.host.isAccessibilityTrusted = true
+    #expect(await waitUntil { waiting.tap.isInstalled })
+    try await Task.sleep(for: .milliseconds(100))  // five poll intervals: a second poll would install again
+    #expect(waiting.tap.installs == 1)
+    #expect(waiting.host.attentions.count == 1)
+    waiting.plugin.deactivate()
+}
+
+@MainActor
+@Test func R64__deactivate_withdraws_the_guidance_stops_the_poll_removes_the_tap_and_forgets_held_keys() async throws {
+    let waiting = try Harness(trusted: false)
+    waiting.host.holdsAttention = true
+    waiting.plugin.activate()
+    #expect(await waitUntil { waiting.host.attentions.count == 1 })
+    waiting.plugin.deactivate()
+    #expect(await waitUntil { waiting.host.withdrawnAttentions == 1 })
+    waiting.host.isAccessibilityTrusted = true
+    try await Task.sleep(for: .milliseconds(200))  // ten poll intervals
+    #expect(waiting.tap.installs == 0)
+
+    let h = try Harness()
+    h.plugin.activate()
+    #expect(h.send(0, down) == true)
+    h.plugin.deactivate()
+    #expect(!h.tap.isInstalled && h.tap.removals == 1)
+    // The press held across `deactivate` is no longer the plugin's: its release goes to the system.
+    #expect(h.plugin.handle(SystemDefinedEvent(subtype: 8, data1: 0 << 16 | up << 8, flags: [])) == false)
+}
+
+@MainActor
+@Test func R64__activate_after_deactivate_starts_over_like_the_first_activation() async throws {
+    let h = try Harness()
+    h.plugin.activate()
+    h.plugin.deactivate()
+    h.plugin.activate()
+    #expect(h.tap.isInstalled && h.tap.installs == 2)
+    #expect([h.send(1, down), h.send(1, down, repeat: true), h.send(1, up)] == [true, true, true])
+    #expect(h.volume.writes == ["level 0.4375", "level 0.375"])
+    h.plugin.deactivate()
+
+    let waiting = try Harness(trusted: false)
+    waiting.plugin.activate()
+    #expect(await waitUntil { waiting.host.attentions.count == 1 })
+    waiting.plugin.deactivate()
+    waiting.plugin.activate()
+    #expect(await waitUntil { waiting.host.attentions.count == 2 })
+    waiting.host.isAccessibilityTrusted = true
+    #expect(await waitUntil { waiting.tap.isInstalled })
+    try await Task.sleep(for: .milliseconds(100))  // five poll intervals: the first poll stays stopped
+    #expect(waiting.tap.installs == 1)
+    #expect(waiting.send(0, down) == true)
+    waiting.plugin.deactivate()
 }
 @MainActor
 @Test func R12__tile_offers_small_and_wide_and_every_view_has_a_finite_size() throws {

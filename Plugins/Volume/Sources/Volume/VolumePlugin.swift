@@ -79,13 +79,13 @@ public final class VolumePlugin: NotchPlugin {
 
     public func deactivate() {
         guard isActive else { return }
-        isActive = false
         guidanceTask?.cancel()
         guidanceTask = nil
         permissionTask?.cancel()
         permissionTask = nil
         tap.remove()
         handledKeys.removeAll()
+        isActive = false
     }
 
     public var expandedTab: PluginTab? {
