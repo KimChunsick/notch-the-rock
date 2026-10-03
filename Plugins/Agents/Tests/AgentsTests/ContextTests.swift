@@ -123,9 +123,9 @@ enum Transcript {
         }
         let heights = list.sessions.map { NSHostingView(rootView: row($0)).fittingSize.height }
         #expect(Set(heights).count == 1, "\(heights)")
-        // Warm above 80%: only the 91% row has orange in it.
-        let warm = try share(of: CGRect(x: 0, y: 0, width: 390, height: 20), in: layOut(row(list.sessions[1]), in: CGSize(width: 390, height: 20)), where: TileTests.orange)
-        let calm = try share(of: CGRect(x: 0, y: 0, width: 390, height: 20), in: layOut(row(list.sessions[0]), in: CGSize(width: 390, height: 20)), where: TileTests.orange)
+        // Red from 80%: only the 91% row has red in it.
+        let warm = try share(of: CGRect(x: 0, y: 0, width: 390, height: 20), in: layOut(row(list.sessions[1]), in: CGSize(width: 390, height: 20)), where: TileTests.red)
+        let calm = try share(of: CGRect(x: 0, y: 0, width: 390, height: 20), in: layOut(row(list.sessions[0]), in: CGSize(width: 390, height: 20)), where: TileTests.red)
         #expect(warm > 0.002 && calm == 0, "\(warm) \(calm)")
         try capture(VStack(spacing: 6) { ForEach(list.sessions) { row($0) } }.frame(width: 390).padding(12).background(.black), named: "R49-render-rows-T143")
 
@@ -137,5 +137,60 @@ enum Transcript {
         for session in list.sessions.reversed() { bare.update(session.id, folder: session.folder, state: session.state) }
         #expect(NSHostingView(rootView: AgentsTile(sessions: bare, logos: logos, size: .wide)).fittingSize.height == ideal.height)
         try capture(tile.frame(width: 190, height: 90).background(Color(white: 0.11), in: RoundedRectangle(cornerRadius: 12)).padding(12).background(.black), named: "R49-render-tile-T143")
+    }
+
+    @Test func R59__the_meter_is_green_below_50_orange_below_80_and_red_from_80() {
+        let percents = [0, 49, 50, 79, 80, 100]
+        #expect(percents.map { ContextLevel(percent: $0) } == [.low, .low, .mid, .mid, .high, .high])
+        #expect(percents.map { ContextLevel(percent: $0).color } == [.green, .green, .orange, .orange, .red, .red])
+    }
+
+    @Test func R59__screen_rows_and_tile_rows_draw_the_meter_in_its_level_colour() throws {
+        let logos = FakeLogos()
+        logos.images[.claude] = solidLogo(.black, template: true)
+        // An idle Claude session: a gray state and a white mark, so the meter is the only colour in a row.
+        func list(_ percent: Int?) -> AgentSessionList {
+            let list = AgentSessionList()
+            world.attach(to: list)
+            let key = AgentSession.Key(agent: .claude, id: "c1")
+            list.update(key, folder: "tide-pool", state: .idle, terminal: ghostty)
+            list.setContext(key, percent)
+            return list
+        }
+        func row(_ list: AgentSessionList) -> AgentSessionRow {
+            AgentSessionRow(session: list.sessions[0], logo: logos.logo(for: .claude), open: { _ in })
+        }
+        func tile(_ list: AgentSessionList) -> AgentsTile { AgentsTile(sessions: list, logos: logos, size: .wide) }
+        let colours: [(UInt8, UInt8, UInt8) -> Bool] = [TileTests.green, TileTests.orange, TileTests.red]
+        func shares(_ view: NSView) throws -> [Double] {
+            try colours.map { try share(of: view.bounds, in: view, where: $0) }
+        }
+        // 30% green, 65% orange, 90% red; an unknown percent draws no meter, so none of the three.
+        let cases: [(percent: Int?, colour: Int?)] = [(30, 0), (65, 1), (90, 2), (nil, nil)]
+        for (percent, colour) in cases {
+            let list = list(percent)
+            let screen = try shares(layOut(row(list), in: CGSize(width: 390, height: 20)))
+            let home = try shares(layOut(tile(list), in: NSHostingView(rootView: tile(list)).fittingSize))
+            for (index, (onScreen, onHome)) in zip(screen, home).enumerated() {
+                if index == colour {
+                    #expect(onScreen > 0.002 && onHome > 0.002, "\(String(describing: percent)) \(screen) \(home)")
+                } else {
+                    #expect(onScreen == 0 && onHome == 0, "\(String(describing: percent)) \(screen) \(home)")
+                }
+            }
+        }
+        let lists = [30, 65, 90].map { list($0) }
+        try capture(
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(spacing: 6) { ForEach(0..<3, id: \.self) { row(lists[$0]) } }.frame(width: 390)
+                HStack(spacing: 10) {
+                    ForEach(0..<3, id: \.self) {
+                        tile(lists[$0]).frame(width: 190, height: 90).background(Color(white: 0.11), in: RoundedRectangle(cornerRadius: 12))
+                    }
+                }
+            }
+            .padding(12).background(.black),
+            named: "R59-render-T180"
+        )
     }
 }
