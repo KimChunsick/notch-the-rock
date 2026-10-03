@@ -140,9 +140,7 @@ struct NotchRootView: View {
         case .attention:
             if let pending = host.attention {
                 let showsTitle = !AttentionBand.titleFits(notch: notchSize, request: pending.request)
-                measured(AttentionContent(pending: pending, showsTitle: showsTitle) { response in
-                    host.respond(response, to: pending.id)
-                }, minWidth: screenWidth)
+                measured(AttentionContent(host: host, pending: pending, showsTitle: showsTitle), minWidth: screenWidth)
                 .id(pending.id)
                 .transition(Self.contentTransition)
             }
@@ -456,30 +454,19 @@ private struct HUDBar: View {
 /// (`AttentionBand`), which holds the icon, the title, the countdown and the close button.
 /// A title the band cuts short also opens the details here, whole, so nothing of it is lost.
 /// At least `minWidth` wide, so text fields and buttons have room; long text wraps at the widest
-/// the notch gets.
+/// the notch gets. What the user fills in lives in the host model (`AttentionForm`); a request with
+/// several choice groups shows one per step, with its place among them, 이전 and 다음, and its
+/// buttons and its own text field on the last step.
 private struct AttentionContent: View {
     static let minWidth: CGFloat = 280
 
+    let host: NotchHostModel
     let pending: NotchHostModel.PendingAttention
     /// Whether the title is shown above the message: when it does not fit the band.
     let showsTitle: Bool
-    let respond: (AttentionResponse) -> Void
-    @State private var selections: [String: [String]] = [:]
-    @State private var text: String
-
-    init(pending: NotchHostModel.PendingAttention, showsTitle: Bool, respond: @escaping (AttentionResponse) -> Void) {
-        self.pending = pending
-        self.showsTitle = showsTitle
-        self.respond = respond
-        _text = State(initialValue: pending.request.textField?.initialText ?? "")
-    }
 
     private var request: AttentionRequest { pending.request }
-
-    /// A lone single choice with nothing else to fill in is answered by picking an option.
-    private var picksAnswerDirectly: Bool {
-        request.buttons.isEmpty && request.textField == nil && request.choices.count == 1 && !request.choices[0].allowsMultiple
-    }
+    private var form: AttentionForm { pending.form }
 
     /// Whether anything shows above the buttons: the title, a message, choices or a text field.
     private var hasDetails: Bool {
@@ -490,27 +477,46 @@ private struct AttentionContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if hasDetails {
-                // A plain stack in the usual case; long requests scroll instead of being cut off.
+                // A plain stack in the usual case; long requests scroll instead of being cut off,
+                // with a cue that more is below.
                 ViewThatFits(in: .vertical) {
                     details
-                    ScrollView { details }
-                        .scrollIndicators(.never)
+                    ScrollView { details.padding(.bottom, MoreBelow.height) }
+                        .scrollIndicators(.visible)
+                        .overlay(alignment: .bottom) { MoreBelow() }
                 }
             }
 
             HStack(spacing: 8) {
                 if let releaseTitle = request.releaseTitle {
-                    Button(releaseTitle) { respond(.released) }
+                    Button(releaseTitle) { host.respond(.released, to: pending.id) }
                         .buttonStyle(AttentionButtonStyle(fill: .white.opacity(0.12)))
                 }
                 Spacer(minLength: 0)
-                ForEach(request.buttons, id: \.id) { button in
-                    Button(button.title) { submit(buttonID: button.id) }
-                        .buttonStyle(AttentionButtonStyle(fill: fill(for: button.role)))
+                if let progress = form.progress {
+                    Text(progress)
+                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.6))
+                        .accessibilityLabel("질문 \(form.groups.count)개 중 \(progress.prefix { $0 != "/" })번째")
+                    Button("이전") { host.editAttention(pending.id) { $0.back() } }
+                        .buttonStyle(AttentionButtonStyle(fill: .white.opacity(0.12)))
+                        .disabled(form.isFirstStep)
                 }
-                if request.buttons.isEmpty && !picksAnswerDirectly {
-                    Button("보내기") { submit(buttonID: nil) }
+                if form.isLastStep {
+                    ForEach(request.buttons, id: \.id) { button in
+                        Button(button.title) { host.sendAttention(buttonID: button.id, of: pending.id) }
+                            .buttonStyle(AttentionButtonStyle(fill: fill(for: button.role)))
+                            .disabled(!form.canSend)
+                    }
+                    if request.buttons.isEmpty && !form.picksAnswerDirectly {
+                        Button("보내기") { host.sendAttention(buttonID: nil, of: pending.id) }
+                            .buttonStyle(AttentionButtonStyle(fill: request.accent))
+                            .disabled(!form.canSend)
+                    }
+                } else {
+                    Button("다음") { host.editAttention(pending.id) { $0.advance() } }
                         .buttonStyle(AttentionButtonStyle(fill: request.accent))
+                        .disabled(!form.canAdvance)
                 }
             }
         }
@@ -529,18 +535,43 @@ private struct AttentionContent: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.75))
             }
-            ForEach(request.choices, id: \.id) { group in
-                ChoiceGroup(group: group, accent: request.accent, selected: selections[group.id] ?? []) { option in
-                    pick(option, in: group)
+            ForEach(form.shownGroups, id: \.id) { group in
+                ChoiceGroup(group: group, accent: request.accent, selected: form.selections[group.id] ?? []) { option in
+                    host.pickAttention(option, in: group, of: pending.id)
+                }
+                if let field = group.textField {
+                    TextField(field.placeholder, text: text(of: group))
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { submitText(of: group) }
                 }
             }
-            if let field = request.textField {
-                TextField(field.placeholder, text: $text)
+            if form.isLastStep, let field = request.textField {
+                TextField(field.placeholder, text: requestText)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { submit(buttonID: nil) }
+                    .onSubmit { host.sendAttention(buttonID: nil, of: pending.id) }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func text(of group: AttentionChoices) -> Binding<String> {
+        let id = pending.id
+        return Binding { form.texts[group.id] ?? "" } set: { text in host.editAttention(id) { $0.texts[group.id] = text } }
+    }
+
+    private var requestText: Binding<String> {
+        let id = pending.id
+        return Binding { form.text } set: { text in host.editAttention(id) { $0.text = text } }
+    }
+
+    /// Return in a group's own field moves to the next question, or on the last one sends what the
+    /// host's 보내기 would.
+    private func submitText(of group: AttentionChoices) {
+        if !form.isLastStep {
+            host.editAttention(pending.id) { $0.advance() }
+        } else if request.buttons.isEmpty {
+            host.sendAttention(buttonID: nil, of: pending.id)
+        }
     }
 
     private func fill(for role: AttentionButton.Role) -> Color {
@@ -551,26 +582,20 @@ private struct AttentionContent: View {
         @unknown default: .white.opacity(0.12)
         }
     }
+}
 
-    private func pick(_ option: String, in group: AttentionChoices) {
-        var chosen = selections[group.id] ?? []
-        if group.allowsMultiple {
-            if let index = chosen.firstIndex(of: option) { chosen.remove(at: index) } else { chosen.append(option) }
-            chosen.sort { group.options.firstIndex(of: $0) ?? 0 < group.options.firstIndex(of: $1) ?? 0 }
-        } else {
-            chosen = [option]
-        }
-        selections[group.id] = chosen
-        if picksAnswerDirectly { submit(buttonID: nil) }
-    }
+/// Pinned to the bottom of a card that scrolls: the details fade out above a note that more is
+/// below. The details leave room for it at their end, so their last row scrolls clear of it.
+private struct MoreBelow: View {
+    static let height: CGFloat = 30
 
-    private func submit(buttonID: String?) {
-        let answer = AttentionAnswer(
-            buttonID: buttonID,
-            choices: selections.filter { !$0.value.isEmpty },
-            text: request.textField == nil ? nil : text
-        )
-        respond(.answered(answer))
+    var body: some View {
+        Label("아래에 더 있어요", systemImage: "chevron.down")
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(.white.opacity(0.7))
+            .frame(maxWidth: .infinity, minHeight: Self.height, alignment: .bottom)
+            .background(LinearGradient(colors: [.black.opacity(0), .black], startPoint: .top, endPoint: .center))
+            .allowsHitTesting(false)
     }
 }
 
@@ -616,12 +641,25 @@ private struct AttentionButtonStyle: ButtonStyle {
     let fill: Color
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 12, weight: .semibold))
-            .padding(.vertical, 6)
-            .padding(.horizontal, 12)
-            .background(Capsule().fill(fill.opacity(configuration.isPressed ? 0.7 : 1)))
-            .foregroundStyle(.white)
+        StyledLabel(configuration: configuration, fill: fill)
+    }
+
+    /// Dimmed while the button is disabled (이전 on the first question, 다음 or a button before the
+    /// question is answered).
+    private struct StyledLabel: View {
+        let configuration: Configuration
+        let fill: Color
+        @Environment(\.isEnabled) private var isEnabled
+
+        var body: some View {
+            configuration.label
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.vertical, 6)
+                .padding(.horizontal, 12)
+                .background(Capsule().fill(fill.opacity(configuration.isPressed ? 0.7 : 1)))
+                .foregroundStyle(.white)
+                .opacity(isEnabled ? 1 : 0.4)
+        }
     }
 }
 

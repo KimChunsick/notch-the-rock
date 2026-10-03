@@ -64,17 +64,30 @@ public struct AttentionButton: Hashable, Sendable {
 }
 
 /// One question with options; the user picks one, or several when `allowsMultiple` is true.
+///
+/// A request with more than one group shows them one at a time, in order, and is sent from the
+/// last one.
 public struct AttentionChoices: Hashable, Sendable {
     public let id: String
     public let prompt: String
     public let options: [String]
     public let allowsMultiple: Bool
+    /// A field under the options where the user can type an answer of their own instead of, or
+    /// besides, picking one; it arrives in `AttentionAnswer.texts` under this group's `id`.
+    /// Added in SDK 1.5; nil for none.
+    public let textField: AttentionTextField?
 
     public init(id: String, prompt: String, options: [String], allowsMultiple: Bool = false) {
+        self.init(id: id, prompt: prompt, options: options, allowsMultiple: allowsMultiple, textField: nil)
+    }
+
+    /// Added in SDK 1.5.
+    public init(id: String, prompt: String, options: [String], allowsMultiple: Bool = false, textField: AttentionTextField?) {
         self.id = id
         self.prompt = prompt
         self.options = options
         self.allowsMultiple = allowsMultiple
+        self.textField = textField
     }
 }
 
@@ -97,11 +110,20 @@ public struct AttentionAnswer: Hashable, Sendable {
     public let choices: [String: [String]]
     /// Text field contents, or nil when the request had no text field.
     public let text: String?
+    /// Text typed into a choice group's own field (`AttentionChoices.textField`), keyed by
+    /// `AttentionChoices.id`; groups left blank are absent. Added in SDK 1.5.
+    public let texts: [String: String]
 
     public init(buttonID: String?, choices: [String: [String]] = [:], text: String? = nil) {
+        self.init(buttonID: buttonID, choices: choices, text: text, texts: [:])
+    }
+
+    /// Added in SDK 1.5.
+    public init(buttonID: String?, choices: [String: [String]] = [:], text: String? = nil, texts: [String: String]) {
         self.buttonID = buttonID
         self.choices = choices
         self.text = text
+        self.texts = texts
     }
 }
 
