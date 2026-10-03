@@ -22,13 +22,26 @@ public final class __NAME__Plugin: NotchPlugin {
     )
 
     private let context: NotchContext
+    /// Reads the text the status shows. Replace it with what your plugin reads (a clock, a system
+    /// API); tests pass their own.
+    private let readStatus: () -> String
+    private var isActive = false
     private var watching: Task<Void, Never>?
 
-    public init(context: NotchContext) {
+    /// The app creates the plugin with this init, which wires the live dependencies.
+    public convenience init(context: NotchContext) {
+        self.init(context: context, readStatus: { "__NAME__" })
+    }
+
+    /// Tests create the plugin with this init and pass fakes.
+    init(context: NotchContext, readStatus: @escaping () -> String) {
         self.context = context
+        self.readStatus = readStatus
     }
 
     public func activate() {
+        guard !isActive else { return }
+        isActive = true
         updateStatus()
         let changes = context.settings.changes()
         watching = Task { [weak self] in
@@ -37,10 +50,13 @@ public final class __NAME__Plugin: NotchPlugin {
         }
     }
 
+    /// Stops everything `activate()` started and clears what it showed.
     public func deactivate() {
+        guard isActive else { return }
         watching?.cancel()
         watching = nil
         context.clear(activityID: "status")
+        isActive = false
     }
 
     /// What the Settings page shows: a summary, the permissions the plugin uses (none) and its
@@ -64,10 +80,11 @@ public final class __NAME__Plugin: NotchPlugin {
             context.clear(activityID: "status")
             return
         }
+        let status = readStatus()
         context.post(LiveActivity(id: "status") {
             Image(systemName: "sparkles")
         } trailing: {
-            Text("__NAME__")
+            Text(status)
         })
     }
 
@@ -76,34 +93,6 @@ public final class __NAME__Plugin: NotchPlugin {
         PluginTile(supportedSizes: [.small]) { _ in
             __NAME__TileView()
         }
-    }
-}
-
-/// The expanded screen. The host sizes the notch to this view, so it keeps a size of its own: no
-/// `maxHeight: .infinity`. Under a band wider than the view the host offers more width; the
-/// `Spacer` takes it, so the symbol and the text reach the two edges and the margins stay equal.
-/// The host also adds the 18 pt edge margin, so the outermost view has no `.padding()` and no fixed
-/// outer frame.
-struct __NAME__View: View {
-    var body: some View {
-        HStack(spacing: 0) {
-            Image(systemName: "sparkles")
-            Spacer(minLength: 12)
-            Text("__NAME__ 플러그인이에요.")
-        }
-    }
-}
-
-/// The tile, sized by its content like the expanded screen.
-struct __NAME__TileView: View {
-    var body: some View {
-        VStack(spacing: 4) {
-            Image(systemName: "sparkles")
-                .font(.title2)
-            Text("__NAME__")
-                .font(.caption)
-        }
-        .padding(8)
     }
 }
 
