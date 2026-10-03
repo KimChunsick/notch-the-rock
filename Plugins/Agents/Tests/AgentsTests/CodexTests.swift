@@ -41,8 +41,8 @@ final class Outbox {
         bridge.open { [outbox] in outbox.messages.append($0) }
     }
 
-    static func answer(_ buttonID: String?, choices: [String: [String]] = [:], text: String? = nil) -> AttentionResponse {
-        .answered(AttentionAnswer(buttonID: buttonID, choices: choices, text: text))
+    static func answer(_ buttonID: String?, choices: [String: [String]] = [:], text: String? = nil, texts: [String: String] = [:]) -> AttentionResponse {
+        .answered(AttentionAnswer(buttonID: buttonID, choices: choices, text: text, texts: texts))
     }
 
     /// Plays the handshake and resumes the first thread, so its folder is known.

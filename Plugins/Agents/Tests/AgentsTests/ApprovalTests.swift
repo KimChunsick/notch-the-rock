@@ -100,8 +100,8 @@ func expectJSON(_ output: Data, _ expected: String, sourceLocation: SourceLocati
 
 @MainActor
 @Suite struct ApprovalTests {
-    static func answer(_ button: String?, choices: [String: [String]] = [:], text: String? = nil) -> AttentionResponse {
-        .answered(AttentionAnswer(buttonID: button, choices: choices, text: text))
+    static func answer(_ button: String?, choices: [String: [String]] = [:], text: String? = nil, texts: [String: String] = [:]) -> AttentionResponse {
+        .answered(AttentionAnswer(buttonID: button, choices: choices, text: text, texts: texts))
     }
 
     static let claudeSession = AgentSession.Key(agent: .claude, id: "s1")
@@ -197,9 +197,9 @@ func expectJSON(_ output: Data, _ expected: String, sourceLocation: SourceLocati
         let request = try #require(live.host.requests.first)
         #expect(request.choices.map(\.options) == [["Summary", "Detailed"], ["Introduction", "Conclusion", "Appendix"]])
         #expect(request.choices.map(\.allowsMultiple) == [false, true])
-        // One text field cannot answer several questions: each gets its own on the Agents screen.
+        // One text field cannot answer several questions: each gets its own on the card.
         #expect(request.textField == nil)
-        #expect(request.buttons.map(\.title) == ["직접 입력하기", "보내기"])
+        #expect(request.buttons.map(\.title) == ["보내기"])
         #expect(request.releaseTitle == "터미널에서 답하기")
         #expect(request.timeout == .seconds(120))
     }
@@ -219,7 +219,7 @@ func expectJSON(_ output: Data, _ expected: String, sourceLocation: SourceLocati
     @Test func R06__a_typed_answer_replaces_the_option_carried_over_from_the_notch() async throws {
         let live = try LivePlugin()
         defer { live.stop() }
-        live.host.responses = [Self.answer(ClaudeBridge.typeAnswersButtonID, choices: ["1": ["Appendix"]])]
+        live.host.responses = [Self.answer(ClaudeBridge.sendAnswersButtonID, choices: ["1": ["Appendix"]])]
 
         let output = Task { await live.hook(.preToolUse, questionInput) }
         let item = try await live.screenItem()
@@ -349,6 +349,61 @@ func expectJSON(_ output: Data, _ expected: String, sourceLocation: SourceLocati
         #expect(Self.state(live) == .working)
     }
 
+    @Test func R62__four_questions_step_on_one_card_and_a_typed_answer_reaches_claude() async throws {
+        let live = try LivePlugin()
+        defer { live.stop() }
+        var three = Self.fourPicks
+        three["3"] = nil
+        live.host.responses = [Self.answer(ClaudeBridge.sendAnswersButtonID, choices: three, texts: ["3": " 직접 배포할게요 "])]
+
+        let output = await live.hook(.preToolUse, fourQuestionInput)
+        // One card that steps through the four questions, each with its own field, sent from the last.
+        let request = try #require(live.host.requests.first)
+        #expect(live.host.requests.count == 1)
+        #expect(request.choices.map(\.id) == ["0", "1", "2", "3"])
+        #expect(request.choices.map(\.textField) == Array(repeating: AttentionTextField(placeholder: "직접 입력"), count: 4))
+        #expect(request.textField == nil)
+        #expect(request.buttons.map(\.id) == [ClaudeBridge.sendAnswersButtonID])
+        #expect(request.buttons.map(\.title) == ["보내기"])
+        #expect(request.releaseTitle == "터미널에서 답하기")
+        let answers = ((jsonObject(output)?["hookSpecificOutput"] as? NSDictionary)?["updatedInput"] as? NSDictionary)?["answers"] as? NSDictionary
+        #expect(answers == [
+            "Which framework should I use?": "SwiftUI",
+            "Which platforms should it run on?": ["macOS", "iOS"],
+            "Which test library should I use?": "swift-testing",
+            "How should I ship it?": "직접 배포할게요",
+        ] as NSDictionary, "printed \(String(decoding: output, as: UTF8.self))")
+        #expect(live.plugin.bridge.screen.items.isEmpty)
+        #expect(Self.state(live) == .working)
+    }
+
+    @Test func R62__a_question_with_both_a_pick_and_typed_text_sends_the_pick_as_the_screen_form_does() async throws {
+        let live = try LivePlugin()
+        defer { live.stop() }
+        live.host.responses = [Self.answer(ClaudeBridge.sendAnswersButtonID, choices: Self.fourPicks, texts: ["0": "UIKit도 같이요"])]
+
+        let output = await live.hook(.preToolUse, fourQuestionInput)
+        let answers = ((jsonObject(output)?["hookSpecificOutput"] as? NSDictionary)?["updatedInput"] as? NSDictionary)?["answers"] as? NSDictionary
+        #expect(answers == Self.fourAnswers, "printed \(String(decoding: output, as: UTF8.self))")
+        // The same pair on the Agents screen's form gives the same answer.
+        let questions = try #require(Question.parse(try jsonValue(fourQuestionInput)["tool_input"]))
+        #expect(Question.answers(questions, picked: [0: ["SwiftUI"], 1: ["macOS", "iOS"], 2: ["swift-testing"], 3: ["Notarized"]], typed: [0: "UIKit도 같이요"])?["Which framework should I use?"] == .string("SwiftUI"))
+    }
+
+    @Test func R62__a_single_question_keeps_its_one_field_and_a_pick_sends_at_once() async throws {
+        let live = try LivePlugin()
+        defer { live.stop() }
+        live.host.responses = [Self.answer(nil, choices: ["0": ["Detailed"]])]
+
+        let output = await live.hook(.preToolUse, singleQuestionInput)
+        let request = try #require(live.host.requests.first)
+        #expect(request.choices.map(\.textField) == [nil])
+        #expect(request.textField == AttentionTextField(placeholder: "직접 입력해서 답해요"))
+        #expect(request.buttons.isEmpty)
+        let answers = ((jsonObject(output)?["hookSpecificOutput"] as? NSDictionary)?["updatedInput"] as? NSDictionary)?["answers"] as? NSDictionary
+        #expect(answers == ["How should I format the output?": "Detailed"] as NSDictionary)
+    }
+
     @Test func R06__typed_answers_never_copy_one_value_into_every_question() {
         let questions = [
             Question(text: "A?", options: ["x"], multiple: false),
@@ -387,7 +442,7 @@ func expectJSON(_ output: Data, _ expected: String, sourceLocation: SourceLocati
         let content = (1...80).map { "line \($0): " + String(repeating: "내용", count: 20) }.joined(separator: "\n")
         live.host.responses = [
             Self.answer(ClaudeBridge.detailsButtonID),
-            Self.answer(ClaudeBridge.typeAnswersButtonID, choices: ["1": ["Appendix"]]),
+            Self.answer(ClaudeBridge.sendAnswersButtonID, choices: ["1": ["Appendix"]]),
         ]
         let screen = AgentsScreen(model: live.plugin.bridge.screen)
         let size = "\(Int(offer.width))x\(Int(offer.height))"

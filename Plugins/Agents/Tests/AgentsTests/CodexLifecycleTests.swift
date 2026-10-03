@@ -365,7 +365,7 @@ extension CodexBridgeTests {
 
     @Test func R07__the_screen_sends_only_answers_codex_accepts() async throws {
         try connect()
-        host.responses = [Self.answer(CodexBridge.typeAnswersButtonID)]
+        host.responses = [Self.answer(CodexBridge.sendAnswersButtonID)]
         let task = bridge.receive(try jsonValue(Self.mixedQuestions))
         let item = try await screenItem()
         guard case .questions(let questions, let picked) = item.content else {
@@ -381,6 +381,21 @@ extension CodexBridgeTests {
         #expect(draft.answers != nil)
         bridge.screen.respond(to: item.id, with: draft.response)
         await task?.value
+        #expect(outbox.messages == [try jsonValue(#"{"id":15,"result":{"answers":{"q_note":{"answers":["배포가 끝나면 알려 주세요"]},"q_env":{"answers":["production"]}}}}"#)])
+    }
+
+    @Test func R62__several_codex_questions_step_on_the_card_with_a_field_only_where_text_is_taken() async throws {
+        try connect()
+        host.responses = [Self.answer(CodexBridge.sendAnswersButtonID, choices: ["q_env": ["production"]], texts: ["q_note": " 배포가 끝나면 알려 주세요 "])]
+        await bridge.receive(try jsonValue(Self.mixedQuestions))?.value
+        let request = try #require(host.requests.first)
+        #expect(host.requests.count == 1)
+        #expect(request.choices.map(\.id) == ["q_note", "q_env"])
+        #expect(request.choices.map(\.textField) == [AttentionTextField(placeholder: "직접 입력"), nil])
+        #expect(request.textField == nil)
+        #expect(request.buttons.map(\.id) == [CodexBridge.sendAnswersButtonID])
+        #expect(request.buttons.map(\.title) == ["보내기"])
+        #expect(bridge.screen.items.isEmpty)
         #expect(outbox.messages == [try jsonValue(#"{"id":15,"result":{"answers":{"q_note":{"answers":["배포가 끝나면 알려 주세요"]},"q_env":{"answers":["production"]}}}}"#)])
     }
 }
@@ -494,7 +509,7 @@ extension CodexBridgeTests {
 
     @Test func R07__an_options_only_question_gets_no_text_field_on_the_screen() async throws {
         try connect()
-        host.responses = [Self.answer(CodexBridge.typeAnswersButtonID)]
+        host.responses = [Self.answer(CodexBridge.sendAnswersButtonID)]
         let task = bridge.receive(try jsonValue(Self.mixedQuestions))
         let item = try await screenItem()
         guard case .questions(let questions, _) = item.content else {

@@ -53,8 +53,6 @@ final class ClaudeBridge {
     static let sendDenialButtonID = "send-denial"
     /// Opens the Agents screen, where an operation too long for the notch is shown and allowed.
     static let detailsButtonID = "details"
-    /// Several questions: one answer field per question on the Agents screen.
-    static let typeAnswersButtonID = "type-answers"
     static let sendAnswersButtonID = "send-answers"
     static let releaseTitle = "터미널에서 답하기"
     /// Sent to Claude when the user denies without writing a reason.
@@ -281,10 +279,11 @@ final class ClaudeBridge {
         return .deny(message: Self.denial(written.text ?? ""))
     }
 
-    /// AskUserQuestion: each question's options (one or several). A single question also takes free
-    /// text in the notch; several questions each get their own answer field on the Agents screen, so
-    /// one typed value never answers them all. A question left without an answer goes to the terminal;
-    /// when the user had sent from the notch, or the wait ran out, a notice says so.
+    /// AskUserQuestion: each question's options (one or several) or typed text. A single question
+    /// takes the text in the request's own field; several questions come one at a time on the card,
+    /// each with its own field, so one typed value never answers them all. An answer that leaves a
+    /// question open goes to the Agents screen, and a question left without an answer goes to the
+    /// terminal; when the user had sent from the notch, or the wait ran out, a notice says so.
     private func answerQuestions(_ message: HookMessage, title: String) async -> HookDecision? {
         guard message.payload["tool_name"]?.string == "AskUserQuestion",
               let questions = Question.parse(message.payload["tool_input"]) else { return nil }
@@ -299,13 +298,17 @@ final class ClaudeBridge {
             message: "",
             accent: Self.accent,
             sourceIcon: terminalIcon(message),
-            // Any button replaces the notch's own 보내기, so several questions bring their own.
-            buttons: single ? [] : [
-                AttentionButton(id: Self.typeAnswersButtonID, title: "직접 입력하기"),
-                AttentionButton(id: Self.sendAnswersButtonID, title: "보내기", role: .primary),
-            ],
+            // Any button replaces the notch's own 보내기, so several questions bring their own, shown
+            // on the last of them.
+            buttons: single ? [] : [AttentionButton(id: Self.sendAnswersButtonID, title: "보내기", role: .primary)],
             choices: questions.enumerated().map { index, question in
-                AttentionChoices(id: String(index), prompt: question.text, options: question.options, allowsMultiple: question.multiple)
+                AttentionChoices(
+                    id: String(index),
+                    prompt: question.text,
+                    options: question.options,
+                    allowsMultiple: question.multiple,
+                    textField: single ? nil : AttentionTextField(placeholder: "직접 입력")
+                )
             },
             textField: single ? AttentionTextField(placeholder: "직접 입력해서 답해요") : nil,
             releaseTitle: Self.releaseTitle,
@@ -317,18 +320,17 @@ final class ClaudeBridge {
             return nil
         }
         Self.log.info("question card: answered with \(answer.buttonID ?? "the notch's 보내기", privacy: .public), call \(call, privacy: .public)")
-        // 직접 입력하기 asks for the screen; any other button sends what was picked.
-        let sent = answer.buttonID != Self.typeAnswersButtonID
         var picked: [Int: [String]] = [:]
+        var typed: [Int: String] = [:]
         for index in questions.indices {
             if let options = answer.choices[String(index)], !options.isEmpty { picked[index] = options }
+            typed[index] = single ? answer.text : answer.texts[String(index)]
         }
-        let typed = single ? [0: answer.text ?? ""] : [:]
-        var answers = sent ? Question.answers(questions, picked: picked, typed: typed) : nil
+        var answers = Question.answers(questions, picked: picked, typed: typed)
         if answers == nil, !single {
-            // Typed answers, or questions still open: one field per question on the Agents screen,
-            // which names the open ones beside its 보내기.
-            let open = Question.unanswered(questions, picked: picked, typed: [:])
+            // Questions still open: one field per question on the Agents screen, which names the open
+            // ones beside its 보내기.
+            let open = Question.unanswered(questions, picked: picked, typed: typed)
             Self.log.info("question to the screen: call \(call, privacy: .public), open questions \(open, privacy: .public)")
             let result = await showOnScreen("\(title) · Claude의 질문", .questions(questions, picked: picked), until: deadline)
             switch result {
@@ -339,9 +341,8 @@ final class ClaudeBridge {
             case .allow, .allowForSession, .deny:
                 break
             }
-            // Gone to the terminal after a send in the notch, or once the wait ran out; a hook that
-            // went away was answered there.
-            if answers == nil, !Task.isCancelled, result == .timedOut || (sent && result != .cancelled) {
+            // Gone to the terminal after a send in the notch; a hook that went away was answered there.
+            if answers == nil, !Task.isCancelled, result != .cancelled {
                 noticeUnanswered(sessionID, title: title, call: call)
             }
         } else if answers == nil, !Task.isCancelled {
