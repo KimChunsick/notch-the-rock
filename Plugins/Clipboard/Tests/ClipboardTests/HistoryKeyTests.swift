@@ -1068,3 +1068,47 @@ extension MainActorTimingTests {
         #expect(await !showsWithinASecond(.text("late"), in: history))
     }
 }
+
+/// Whether `history` lists `content` within ten seconds; not a timing check.
+@MainActor
+private func eventuallyShows(_ content: ClipItem.Content, in history: ClipboardHistory) async throws -> Bool {
+    for _ in 0..<500 where !history.items.contains(where: { $0.content == content }) {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    return history.items.contains { $0.content == content }
+}
+
+/// Activating twice starts one opening and one pasteboard monitor. Deactivating saves the history
+/// and stops watching, so a later copy is not recorded. Activating again records what the
+/// pasteboard holds, watches and saves as the first activation did.
+@MainActor
+@Test func R64__activating_twice_watches_once_and_activating_again_watches_again() async throws {
+    let directory = try makeDirectory()
+    let pasteboard = makePasteboard()
+    defer { pasteboard.releaseGlobally() }
+    put("copy A", on: pasteboard)
+    let plugin = try makePlugin(directory: directory, pasteboard: pasteboard)
+
+    plugin.activate()
+    let opening = try #require(plugin.opening)
+    plugin.activate()
+    #expect(plugin.opening == opening, "a second activation started another opening")
+    await opening.value
+    put("copy B", on: pasteboard)
+    #expect(try await eventuallyShows(.text("copy B"), in: plugin.history))
+    plugin.deactivate()
+    #expect(plugin.opening == nil)
+    #expect(try storedContents(in: directory) == [.text("copy B"), .text("copy A")])
+
+    put("copy C", on: pasteboard)
+    try await Task.sleep(for: PasteboardMonitor.interval * 4)
+    #expect(!plugin.history.items.contains { $0.content == .text("copy C") }, "a pasteboard monitor kept watching after deactivate")
+
+    plugin.activate()
+    #expect(plugin.history.items.first?.content == .text("copy C"))
+    await plugin.opening?.value
+    put("copy D", on: pasteboard)
+    #expect(try await eventuallyShows(.text("copy D"), in: plugin.history))
+    plugin.deactivate()
+    #expect(try storedContents(in: directory) == [.text("copy D"), .text("copy C"), .text("copy B"), .text("copy A")])
+}

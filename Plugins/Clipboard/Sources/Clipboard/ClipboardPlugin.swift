@@ -22,6 +22,7 @@ public final class ClipboardPlugin: NotchPlugin {
     /// Opens the history; set while the plugin is active.
     private(set) var opening: Task<Void, Never>?
     private var monitor: PasteboardMonitor?
+    private var isActive = false
 
     public convenience init(context: NotchContext) {
         self.init(context: context, pasteboard: .general)
@@ -45,7 +46,8 @@ public final class ClipboardPlugin: NotchPlugin {
     /// shows in the list at once. Loads the key in the background, then reopens the history from
     /// disk, keeping the copies made meanwhile and saving them there.
     public func activate() {
-        guard opening == nil else { return }
+        guard !isActive else { return }
+        isActive = true
         history.beginOpening()
         let monitor = PasteboardMonitor(pasteboard: pasteboard) { [history] pasteboard in
             history.record(from: pasteboard)
@@ -70,11 +72,13 @@ public final class ClipboardPlugin: NotchPlugin {
     /// be written. An opening still loading the key is dropped; the history keeps the copies made
     /// meanwhile, and the next opening that finishes saves them.
     public func deactivate() {
+        guard isActive else { return }
         opening?.cancel()
         opening = nil
         monitor?.stop()
         monitor = nil
         history.flush()
+        isActive = false
     }
 
     public var expandedTab: PluginTab? {

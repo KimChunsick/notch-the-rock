@@ -765,3 +765,52 @@ import Testing
     try write(recorded, at: "2026-10-01T13:00:00Z")
     #expect(r01("restored") == .met && digests.hashed == 5, "\(digests.hashed)")
 }
+
+/// Activating twice refreshes once. Deactivating stops the polling even while the screen is shown,
+/// and activating again refreshes at once and polls as the first activation did.
+@MainActor
+@Test func R64__activating_twice_refreshes_once_and_deactivating_stops_polling() async throws {
+    let temp = try TempDir()
+    let project = temp.url.appendingPathComponent("fs/sample-app")
+    try writeStore(at: project)
+    let clock = Clock(iso("2026-10-02T10:00:00Z"))
+    let (plugin, _) = try makePlugin(root: temp.url, now: clock.read(), interval: .milliseconds(50))
+    let model = plugin.model
+    await model.add(project)
+
+    // Not shown, so only the activation refreshes.
+    let beforeActivation = clock.reads
+    plugin.activate()
+    plugin.activate()
+    for _ in 0..<100 where clock.reads == beforeActivation {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    try await Task.sleep(for: .milliseconds(200))
+    #expect(clock.reads == beforeActivation + 1, "activating twice refreshed \(clock.reads - beforeActivation) times")
+
+    model.appeared()
+    let shown = clock.reads
+    for _ in 0..<100 where clock.reads < shown + 3 {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(clock.reads >= shown + 3, "no polling while shown")
+    plugin.deactivate()
+    let deactivated = clock.reads
+    try await Task.sleep(for: .milliseconds(300))
+    #expect(clock.reads == deactivated, "polled after deactivate")
+
+    // A store closed while the plugin is off leaves the screen once it is activated again.
+    try writeStore(at: project, status: "closed")
+    plugin.activate()
+    for _ in 0..<100 where !model.screenProjects.isEmpty {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(model.screenProjects.isEmpty)
+    let reactivated = clock.reads
+    for _ in 0..<100 where clock.reads < reactivated + 3 {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(clock.reads >= reactivated + 3, "no polling after activating again")
+    plugin.deactivate()
+    model.disappeared()
+}

@@ -30,10 +30,17 @@ func iso(_ text: String) -> Date {
     ISO8601DateFormatter().date(from: text)!
 }
 
-/// A clock a test moves by hand.
+/// A clock a test moves by hand. `read()` also counts the reads: the plugin reads its time once
+/// per refresh.
 final class Clock: @unchecked Sendable {
     var date: Date
+    private(set) var reads = 0
     init(_ date: Date) { self.date = date }
+
+    func read() -> Date {
+        reads += 1
+        return date
+    }
 }
 
 /// Replaces the file at `path` under `project/.dstack` with `text`, or removes it when `text` is nil.
