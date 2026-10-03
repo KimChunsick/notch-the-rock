@@ -51,6 +51,14 @@ func makeContext(host: RecordingHost, bundleURL: URL = URL(fileURLWithPath: "/no
     return NotchContext(pluginID: id, bundleURL: bundleURL, host: host, storage: storage)
 }
 
+@MainActor let activityID = NowPlayingPlugin.activityID
+
+/// A plugin on a test context whose helpers come from `launcher` and whose waits run on `clock`.
+@MainActor
+func makePlugin(launcher: FakeLauncher, clock: VirtualClock = VirtualClock(), host: RecordingHost) throws -> NowPlayingPlugin {
+    NowPlayingPlugin(context: try makeContext(host: host), launcher: launcher, clock: clock)
+}
+
 /// A stream helper the test drives: it prints the lines and exits when told.
 @MainActor
 final class FakeStream: StreamHandle {

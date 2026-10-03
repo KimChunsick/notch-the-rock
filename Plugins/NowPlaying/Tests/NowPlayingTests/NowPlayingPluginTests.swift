@@ -4,13 +4,6 @@ import NotchKit
 import Testing
 @testable import NowPlaying
 
-@MainActor private let activityID = NowPlayingPlugin.activityID
-
-@MainActor
-private func makePlugin(launcher: FakeLauncher, clock: VirtualClock = VirtualClock(), host: RecordingHost) throws -> NowPlayingPlugin {
-    NowPlayingPlugin(context: try makeContext(host: host), launcher: launcher, clock: clock)
-}
-
 /// The model takes each line: an item with its image, the image kept while lines leave it out,
 /// replaced or removed when they say so, and cleared with the item when nothing plays, when the
 /// helper cannot reach MediaRemote and on a reset.

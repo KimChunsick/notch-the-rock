@@ -8,8 +8,6 @@ import Testing
 // playing, with the browser's icon as the artwork, while the system had paused with the real cover.
 // The stream the launcher starts checks its long-lived helper against fresh ones.
 
-@MainActor private let activityID = NowPlayingPlugin.activityID
-
 /// A clock that moves only when told: a sleep ends once `advance(by:)` reaches its deadline, or
 /// throws when its task is cancelled.
 final class ManualClock: Clock {
@@ -287,7 +285,7 @@ private let cover = samplePNG(hue: 0.6)
     let host = RecordingHost()
     let launcher = FakeLauncher()
     let clock = VirtualClock()
-    let plugin = NowPlayingPlugin(context: try makeContext(host: host), launcher: launcher, clock: clock)
+    let plugin = try makePlugin(launcher: launcher, clock: clock, host: host)
     plugin.activate()
     let stream = try #require(launcher.streams.first)
     stream.emit(infoLine())
