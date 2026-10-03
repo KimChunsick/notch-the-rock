@@ -7,40 +7,6 @@ import SwiftUI
 import Testing
 @testable import Volume
 
-/// Records the notch calls the plugin makes and answers attention requests with `attentionResponse`.
-@MainActor
-private final class FakeHost: NotchHost {
-    var isAccessibilityTrusted = true
-    var attentionResponse: AttentionResponse = .dismissed
-    /// When true, an attention request stays in the notch until its task is cancelled; the host then
-    /// withdraws it and answers `.cancelled`.
-    var holdsAttention = false
-    var withdrawnAttentions = 0
-    var huds: [String] = []
-    var attentions: [String] = []
-    var accessibilityRequests = 0
-
-    func post(_ activity: LiveActivity, from pluginID: String) {}
-    func clearActivity(id: String, from pluginID: String) {}
-    func showHUD(_ hud: HUD, duration: Duration, from pluginID: String) {
-        huds.append("\(hud.symbol) \(hud.title) \(hud.value.map { "\($0)" } ?? "-") \(hud.detail ?? "-")")
-    }
-    func present(_ takeover: Takeover, from pluginID: String) {}
-    func requestAttention(_ request: AttentionRequest, from pluginID: String) async -> AttentionResponse {
-        attentions.append("\(request.title) [\(request.buttons.map(\.title).joined(separator: ", "))]")
-        guard holdsAttention else { return attentionResponse }
-        while !Task.isCancelled {
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-        withdrawnAttentions += 1
-        return .cancelled
-    }
-    func expand(toTabOf pluginID: String) {}
-    func collapse(from pluginID: String) {}
-    func requestAccessibility(from pluginID: String) { accessibilityRequests += 1 }
-    func log(_ level: LogLevel, _ message: String, from pluginID: String) {}
-}
-
 /// Output devices by id, the default output being `defaultDevice`. A device without a state is gone
 /// or has no volume the app can set.
 @MainActor
@@ -142,14 +108,8 @@ private final class Harness {
     ) throws {
         self.volume = FakeVolume(volume)
         host.isAccessibilityTrusted = trusted
-        let id = VolumePlugin.manifest.id
-        let storage = try PluginStorage(
-            directory: FileManager.default.temporaryDirectory.appendingPathComponent("volume-tests-\(UUID().uuidString)"),
-            defaultsSuiteName: "volume-tests.\(id)",
-            keychainService: "volume-tests.\(id)"
-        )
         plugin = VolumePlugin(
-            context: NotchContext(pluginID: id, bundleURL: URL(fileURLWithPath: "/nonexistent"), host: host, storage: storage),
+            context: try makeContext(host: host),
             volume: self.volume,
             tap: tap,
             permissionPollInterval: .milliseconds(20)
