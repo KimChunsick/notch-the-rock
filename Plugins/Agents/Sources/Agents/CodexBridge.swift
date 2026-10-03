@@ -18,7 +18,6 @@ final class CodexBridge {
     nonisolated static let allowForSessionButtonID = "allow-session"
     nonisolated static let denyButtonID = "deny"
     nonisolated static let detailsButtonID = "details"
-    nonisolated static let typeAnswersButtonID = "type-answers"
     nonisolated static let sendAnswersButtonID = "send-answers"
     nonisolated static let jumpButtonID = "jump"
     /// How many times a refused `thread/loaded/list` or `thread/resume` is sent before the bridge
@@ -538,11 +537,11 @@ final class CodexBridge {
         }
     }
 
-    /// Options are picked in the notch; a single question also takes typed text there. Several
-    /// questions typed out get one field each on the Agents screen. Answers go by question id.
+    /// Options are picked in the notch, and typed text where a question takes it: a single question in
+    /// the request's own field, several questions one at a time on the card, each in its own. An
+    /// answer that leaves a question open goes to the Agents screen. Answers go by question id.
     private func answer(_ questions: [CodexQuestion], _ params: JSONValue) async -> JSONValue? {
         let single = questions.count == 1
-        let typable = questions.contains(where: \.takesText)
         let title = "\(projectName(params)) · Codex의 질문"
         let wait = wait()
         let deadline = ContinuousClock.now + wait
@@ -551,19 +550,21 @@ final class CodexBridge {
             message: "",
             accent: Self.accent,
             sourceIcon: icon(params),
-            buttons: single ? [] : (typable ? [AttentionButton(id: Self.typeAnswersButtonID, title: "직접 입력하기")] : [])
-                + [AttentionButton(id: Self.sendAnswersButtonID, title: "보내기", role: .primary)],
-            choices: questions.map { AttentionChoices(id: $0.id, prompt: $0.prompt, options: $0.options) },
+            buttons: single ? [] : [AttentionButton(id: Self.sendAnswersButtonID, title: "보내기", role: .primary)],
+            choices: questions.map {
+                AttentionChoices(id: $0.id, prompt: $0.prompt, options: $0.options, textField: !single && $0.takesText ? AttentionTextField(placeholder: "직접 입력") : nil)
+            },
             textField: single && questions[0].takesText ? AttentionTextField(placeholder: "직접 입력해서 답해요") : nil,
             timeout: wait
         ), params)
         guard case .answered(let reply) = response else { return nil }
         var picked: [Int: [String]] = [:]
+        var typed: [Int: String] = [:]
         for (index, question) in questions.enumerated() {
             if let options = reply.choices[question.id], !options.isEmpty { picked[index] = options }
+            typed[index] = single ? reply.text : reply.texts[question.id]
         }
-        let typed = single ? [0: reply.text ?? ""] : [:]
-        if reply.buttonID != Self.typeAnswersButtonID, let answers = CodexQuestion.answers(questions, picked: picked, typed: typed) {
+        if let answers = CodexQuestion.answers(questions, picked: picked, typed: typed) {
             return answers
         }
         guard !single else { return nil }
