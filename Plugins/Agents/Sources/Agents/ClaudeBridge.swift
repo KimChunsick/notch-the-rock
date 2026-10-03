@@ -60,6 +60,13 @@ final class ClaudeBridge {
     /// Shown when a question goes back to the terminal unanswered after the user sent from the notch,
     /// or after its wait ran out.
     static let unansweredNotice = "답을 다 받지 못해서 터미널에서 이어서 답해 주세요."
+
+    /// The notice for a send from the notch that left the questions at `open` (indices) without an
+    /// answer: names them by number, or says it plainly when none is given.
+    static func unansweredNotice(_ open: [Int]) -> String {
+        guard let note = Question.unansweredNote(open) else { return unansweredNotice }
+        return note + ". 터미널에서 이어서 답해 주세요."
+    }
     /// What the bridge does with questions: counts, indices and ids, never question or answer text.
     private static let log = Logger(subsystem: "com.notchtherock.NotchTheRock", category: "agents")
     /// Claude's orange.
@@ -281,9 +288,9 @@ final class ClaudeBridge {
 
     /// AskUserQuestion: each question's options (one or several) or typed text. A single question
     /// takes the text in the request's own field; several questions come one at a time on the card,
-    /// each with its own field, so one typed value never answers them all. An answer that leaves a
-    /// question open goes to the Agents screen, and a question left without an answer goes to the
-    /// terminal; when the user had sent from the notch, or the wait ran out, a notice says so.
+    /// each with its own field, so one typed value never answers them all. A send that leaves a
+    /// question open, like a released card, goes to the terminal at once; when the user had sent from
+    /// the notch, or the wait ran out, a notice says so and names the questions left open.
     private func answerQuestions(_ message: HookMessage, title: String) async -> HookDecision? {
         guard message.payload["tool_name"]?.string == "AskUserQuestion",
               let questions = Question.parse(message.payload["tool_input"]) else { return nil }
@@ -292,7 +299,6 @@ final class ClaudeBridge {
         Self.log.info("question shown: session \(sessionID, privacy: .public), call \(call, privacy: .public), \(questions.count) questions")
         let single = questions.count == 1
         let wait = wait()
-        let deadline = ContinuousClock.now + wait
         let response = await context.requestAttention(AttentionRequest(
             title: "\(title) · Claude의 질문",
             message: "",
@@ -326,39 +332,26 @@ final class ClaudeBridge {
             if let options = answer.choices[String(index)], !options.isEmpty { picked[index] = options }
             typed[index] = single ? answer.text : answer.texts[String(index)]
         }
-        var answers = Question.answers(questions, picked: picked, typed: typed)
-        if answers == nil, !single {
-            // Questions still open: one field per question on the Agents screen, which names the open
-            // ones beside its 보내기.
-            let open = Question.unanswered(questions, picked: picked, typed: typed)
-            Self.log.info("question to the screen: call \(call, privacy: .public), open questions \(open, privacy: .public)")
-            let result = await showOnScreen("\(title) · Claude의 질문", .questions(questions, picked: picked), until: deadline)
-            switch result {
-            case .answers(let screenPicked, let screenTyped):
-                answers = Question.answers(questions, picked: screenPicked, typed: screenTyped)
-            case .released, .timedOut, .cancelled:
-                Self.log.info("question screen: \(String(describing: result), privacy: .public), call \(call, privacy: .public)")
-            case .allow, .allowForSession, .deny:
-                break
-            }
-            // Gone to the terminal after a send in the notch; a hook that went away was answered there.
-            if answers == nil, !Task.isCancelled, result != .cancelled {
-                noticeUnanswered(sessionID, title: title, call: call)
-            }
-        } else if answers == nil, !Task.isCancelled {
-            // A single question sent from the notch with nothing picked or typed.
-            noticeUnanswered(sessionID, title: title, call: call)
+        guard let answers = Question.answers(questions, picked: picked, typed: typed) else {
+            // Sent from the notch with a question still open: the hook prints nothing, so the terminal
+            // asks. A hook that went away was answered there already.
+            guard !Task.isCancelled else { return nil }
+            // A single question has no number to name.
+            let open = single ? [] : Question.unanswered(questions, picked: picked, typed: typed)
+            Self.log.info("question sent incomplete: call \(call, privacy: .public), open questions \(open, privacy: .public)")
+            noticeUnanswered(sessionID, title: title, call: call, open: open)
+            return nil
         }
-        guard let answers else { return nil }
         let keys = questions.indices.filter { answers[questions[$0].text] != nil }
         Self.log.info("question answered: call \(call, privacy: .public), answers for questions \(keys, privacy: .public) of \(questions.count)")
         return .answers(answers)
     }
 
-    /// The question goes back to the terminal without the user's answers: tells the user so.
-    private func noticeUnanswered(_ sessionID: String, title: String, call: String) {
+    /// The question goes back to the terminal without the user's answers: tells the user so, naming
+    /// the questions at `open` when a send from the notch left them open.
+    private func noticeUnanswered(_ sessionID: String, title: String, call: String, open: [Int] = []) {
         Self.log.notice("question released to the terminal unanswered: session \(sessionID, privacy: .public), call \(call, privacy: .public)")
-        _ = notify(sessionID, title: title, message: Self.unansweredNotice)
+        _ = notify(sessionID, title: title, message: Self.unansweredNotice(open))
     }
 
     /// Opens the Agents screen on the request and waits there until the user answers, hands it to the
