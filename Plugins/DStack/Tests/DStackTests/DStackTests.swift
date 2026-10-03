@@ -814,3 +814,36 @@ import Testing
     plugin.deactivate()
     model.disappeared()
 }
+
+/// Deactivating right after activating, before the activation's refresh and the screen's first
+/// refresh have run, drops both: no scan starts and nothing is published while the plugin is off.
+/// Activating again then refreshes as the first activation would have.
+@MainActor
+@Test func R64__deactivating_at_once_drops_the_activation_refresh() async throws {
+    let temp = try TempDir()
+    let project = try addClaudeProject("work/sample-app", root: temp.url)
+    try writeStore(at: project)
+    let clock = Clock(iso("2026-10-02T10:00:00Z"))
+    let (plugin, _) = try makePlugin(root: temp.url, now: clock.read(), interval: .milliseconds(50))
+    let model = plugin.model
+    let checkedAt = model.checkedAt
+    let reads = clock.reads
+    clock.date = iso("2026-10-02T10:05:00Z")
+
+    plugin.activate()
+    model.appeared()
+    plugin.deactivate()
+    try await Task.sleep(for: .milliseconds(300))
+    #expect(clock.reads == reads, "\(clock.reads - reads) refreshes started after deactivate")
+    #expect(model.projects.isEmpty, "a scan was published after deactivate: \(model.projects.map(\.name))")
+    #expect(model.checkedAt == checkedAt, "checkedAt moved after deactivate")
+
+    plugin.activate()
+    for _ in 0..<100 where model.projects.isEmpty {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(model.projects.map(\.name) == ["sample-app"])
+    #expect(model.checkedAt == clock.date)
+    plugin.deactivate()
+    model.disappeared()
+}
