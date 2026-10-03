@@ -18,6 +18,7 @@ public final class DStackPlugin: NotchPlugin {
     )
 
     let model: DStackModel
+    private var isActive = false
 
     public convenience init(context: NotchContext) {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -36,11 +37,15 @@ public final class DStackPlugin: NotchPlugin {
     }
 
     public func activate() {
+        guard !isActive else { return }
+        isActive = true
         model.activate()
     }
 
     public func deactivate() {
+        guard isActive else { return }
         model.deactivate()
+        isActive = false
     }
 
     public var expandedTab: PluginTab? {

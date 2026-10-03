@@ -33,12 +33,15 @@ final class DStackModel {
     @ObservationIgnored private let now: () -> Date
     @ObservationIgnored private let interval: Duration
     /// The latest refresh started and the latest one published, so a slower earlier scan never
-    /// overwrites a later one (a removed folder would come back).
+    /// overwrites a later one (a removed folder would come back). Deactivating marks every refresh
+    /// started so far as published, so none still scanning publishes while the plugin is off.
     @ObservationIgnored private var requested = 0
     @ObservationIgnored private var published = 0
     @ObservationIgnored private var isActive = false
     @ObservationIgnored private var shownCount = 0
     @ObservationIgnored private var polling: Task<Void, Never>?
+    /// The refresh the activation started, cancelled by deactivating before it scans.
+    @ObservationIgnored private var activation: Task<Void, Never>?
 
     init(discovery: ProjectDiscovery, folders: ProjectFolders, now: @escaping () -> Date, interval: Duration = .seconds(5)) {
         scanner = DStackScanner(discovery: discovery)
@@ -76,10 +79,12 @@ final class DStackModel {
         projects.contains { if case .open(let run) = $0.reading { run.isFinished } else { false } }
     }
 
-    /// Scans off the main actor and publishes the result, unless a later refresh already did.
+    /// Scans off the main actor and publishes the result, unless a later refresh already did or the
+    /// model was deactivated meanwhile. A refresh in a cancelled task does not scan at all.
     /// `retry` tries every Claude Code project that has not decoded to a store again and rereads
     /// every store that could not be read; otherwise that happens at most once a minute.
     func refresh(retry: Bool = false) async {
+        guard !Task.isCancelled else { return }
         requested += 1
         let generation = requested
         let date = now()
@@ -105,19 +110,27 @@ final class DStackModel {
 
     func activate() {
         isActive = true
-        Task { await refresh(retry: true) }
+        activation = Task { await refresh(retry: true) }
         updatePolling()
     }
 
     func deactivate() {
         isActive = false
+        activation?.cancel()
+        activation = nil
+        published = requested
         updatePolling()
     }
 
     /// The screen or a tile appeared.
     func appeared() {
         shownCount += 1
-        if shownCount == 1, isActive { Task { await refresh() } }
+        if shownCount == 1, isActive {
+            Task {
+                guard isActive else { return }
+                await refresh()
+            }
+        }
         updatePolling()
     }
 

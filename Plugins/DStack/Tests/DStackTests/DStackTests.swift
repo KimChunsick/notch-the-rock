@@ -765,3 +765,85 @@ import Testing
     try write(recorded, at: "2026-10-01T13:00:00Z")
     #expect(r01("restored") == .met && digests.hashed == 5, "\(digests.hashed)")
 }
+
+/// Activating twice refreshes once. Deactivating stops the polling even while the screen is shown,
+/// and activating again refreshes at once and polls as the first activation did.
+@MainActor
+@Test func R64__activating_twice_refreshes_once_and_deactivating_stops_polling() async throws {
+    let temp = try TempDir()
+    let project = temp.url.appendingPathComponent("fs/sample-app")
+    try writeStore(at: project)
+    let clock = Clock(iso("2026-10-02T10:00:00Z"))
+    let (plugin, _) = try makePlugin(root: temp.url, now: clock.read(), interval: .milliseconds(50))
+    let model = plugin.model
+    await model.add(project)
+
+    // Not shown, so only the activation refreshes.
+    let beforeActivation = clock.reads
+    plugin.activate()
+    plugin.activate()
+    for _ in 0..<100 where clock.reads == beforeActivation {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    try await Task.sleep(for: .milliseconds(200))
+    #expect(clock.reads == beforeActivation + 1, "activating twice refreshed \(clock.reads - beforeActivation) times")
+
+    model.appeared()
+    let shown = clock.reads
+    for _ in 0..<100 where clock.reads < shown + 3 {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(clock.reads >= shown + 3, "no polling while shown")
+    plugin.deactivate()
+    let deactivated = clock.reads
+    try await Task.sleep(for: .milliseconds(300))
+    #expect(clock.reads == deactivated, "polled after deactivate")
+
+    // A store closed while the plugin is off leaves the screen once it is activated again.
+    try writeStore(at: project, status: "closed")
+    plugin.activate()
+    for _ in 0..<100 where !model.screenProjects.isEmpty {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(model.screenProjects.isEmpty)
+    let reactivated = clock.reads
+    for _ in 0..<100 where clock.reads < reactivated + 3 {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(clock.reads >= reactivated + 3, "no polling after activating again")
+    plugin.deactivate()
+    model.disappeared()
+}
+
+/// Deactivating right after activating, before the activation's refresh and the screen's first
+/// refresh have run, drops both: no scan starts and nothing is published while the plugin is off.
+/// Activating again then refreshes as the first activation would have.
+@MainActor
+@Test func R64__deactivating_at_once_drops_the_activation_refresh() async throws {
+    let temp = try TempDir()
+    let project = try addClaudeProject("work/sample-app", root: temp.url)
+    try writeStore(at: project)
+    let clock = Clock(iso("2026-10-02T10:00:00Z"))
+    let (plugin, _) = try makePlugin(root: temp.url, now: clock.read(), interval: .milliseconds(50))
+    let model = plugin.model
+    let checkedAt = model.checkedAt
+    let reads = clock.reads
+    clock.date = iso("2026-10-02T10:05:00Z")
+
+    plugin.activate()
+    model.appeared()
+    plugin.deactivate()
+    try await Task.sleep(for: .milliseconds(300))
+    #expect(clock.reads == reads, "\(clock.reads - reads) refreshes started after deactivate")
+    #expect(model.projects.isEmpty, "a scan was published after deactivate: \(model.projects.map(\.name))")
+    #expect(model.checkedAt == checkedAt, "checkedAt moved after deactivate")
+
+    plugin.activate()
+    for _ in 0..<100 where model.projects.isEmpty {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(model.projects.map(\.name) == ["sample-app"])
+    #expect(model.checkedAt == clock.date)
+    plugin.deactivate()
+    model.disappeared()
+}

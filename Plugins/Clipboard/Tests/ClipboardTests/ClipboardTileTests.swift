@@ -4,30 +4,10 @@ import SwiftUI
 import Testing
 @testable import Clipboard
 
-@MainActor
-private final class SilentHost: NotchHost {
-    func post(_ activity: LiveActivity, from pluginID: String) {}
-    func clearActivity(id: String, from pluginID: String) {}
-    func showHUD(_ hud: HUD, duration: Duration, from pluginID: String) {}
-    func present(_ takeover: Takeover, from pluginID: String) {}
-    func requestAttention(_ request: AttentionRequest, from pluginID: String) async -> AttentionResponse { .dismissed }
-    func expand(toTabOf pluginID: String) {}
-    func collapse(from pluginID: String) {}
-    var isAccessibilityTrusted: Bool { false }
-    func requestAccessibility(from pluginID: String) {}
-    func log(_ level: LogLevel, _ message: String, from pluginID: String) {}
-}
-
 /// The plugin is never activated here, so it reads no pasteboard and no key file.
 @MainActor
 private func makePlugin() throws -> ClipboardPlugin {
-    let id = ClipboardPlugin.manifest.id
-    let storage = try PluginStorage(
-        directory: try makeDirectory(),
-        defaultsSuiteName: "clipboard-tile-tests.\(id)",
-        keychainService: "clipboard-tile-tests.\(id)"
-    )
-    return ClipboardPlugin(context: NotchContext(pluginID: id, bundleURL: URL(fileURLWithPath: "/nonexistent"), host: SilentHost(), storage: storage))
+    ClipboardPlugin(context: try makeContext(directory: try makeDirectory()))
 }
 
 /// The app's tile frames (`HomeGrid` in the app: 40 pt units 10 pt apart) and the largest content of
