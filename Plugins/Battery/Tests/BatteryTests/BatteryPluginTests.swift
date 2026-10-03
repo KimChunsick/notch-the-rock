@@ -5,29 +5,6 @@ import SwiftUI
 import Testing
 @testable import Battery
 
-/// Records the notch calls the plugin makes.
-@MainActor
-private final class RecordingHost: NotchHost {
-    var calls: [String] = []
-    var posted: [LiveActivity] = []
-
-    func post(_ activity: LiveActivity, from pluginID: String) {
-        calls.append("post \(activity.id) \(activity.priority) \(activity.expiresAfter.map { "\($0)" } ?? "-")")
-        posted.append(activity)
-    }
-    func clearActivity(id: String, from pluginID: String) { calls.append("clear \(id)") }
-    func showHUD(_ hud: HUD, duration: Duration, from pluginID: String) {
-        calls.append("hud \(hud.symbol) \(hud.title) \(hud.detail ?? "-") \(duration)")
-    }
-    func present(_ takeover: Takeover, from pluginID: String) {}
-    func requestAttention(_ request: AttentionRequest, from pluginID: String) async -> AttentionResponse { .dismissed }
-    func expand(toTabOf pluginID: String) {}
-    func collapse(from pluginID: String) {}
-    var isAccessibilityTrusted: Bool { false }
-    func requestAccessibility(from pluginID: String) {}
-    func log(_ level: LogLevel, _ message: String, from pluginID: String) {}
-}
-
 private func reading(_ percentage: Int, onPower: Bool, charging: Bool, minutes: Int = 100) -> PowerStatus {
     PowerStatus(
         percentage: percentage,
@@ -72,14 +49,7 @@ private final class FakePowerSource {
 
 @MainActor
 private func makePlugin(host: RecordingHost, clock: ManualClock, power: FakePowerSource = FakePowerSource()) throws -> BatteryPlugin {
-    let id = BatteryPlugin.manifest.id
-    let storage = try PluginStorage(
-        directory: FileManager.default.temporaryDirectory.appendingPathComponent("battery-tests-\(UUID().uuidString)"),
-        defaultsSuiteName: "battery-tests.\(id)",
-        keychainService: "battery-tests.\(id)"
-    )
-    let context = NotchContext(pluginID: id, bundleURL: URL(fileURLWithPath: "/nonexistent"), host: host, storage: storage)
-    return BatteryPlugin(context: context, sampler: nil, now: { clock.now }, read: { power.reading }, makeMonitor: { power.makeMonitor($0) })
+    BatteryPlugin(context: try makeContext(host: host), sampler: nil, now: { clock.now }, read: { power.reading }, makeMonitor: { power.makeMonitor($0) })
 }
 
 /// The view drawn as the host's collapsed wings draw it, as PNG bytes.

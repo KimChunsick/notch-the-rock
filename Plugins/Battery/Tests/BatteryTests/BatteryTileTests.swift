@@ -6,27 +6,7 @@ import Testing
 
 @MainActor
 private func plugin() throws -> BatteryPlugin {
-    let id = BatteryPlugin.manifest.id
-    let storage = try PluginStorage(
-        directory: FileManager.default.temporaryDirectory.appendingPathComponent("battery-tile-tests-\(UUID().uuidString)"),
-        defaultsSuiteName: "battery-tile-tests.\(id)",
-        keychainService: "battery-tile-tests.\(id)"
-    )
-    return BatteryPlugin(context: NotchContext(pluginID: id, bundleURL: URL(fileURLWithPath: "/nonexistent"), host: SilentHost(), storage: storage), sampler: nil)
-}
-
-@MainActor
-private final class SilentHost: NotchHost {
-    func post(_ activity: LiveActivity, from pluginID: String) {}
-    func clearActivity(id: String, from pluginID: String) {}
-    func showHUD(_ hud: HUD, duration: Duration, from pluginID: String) {}
-    func present(_ takeover: Takeover, from pluginID: String) {}
-    func requestAttention(_ request: AttentionRequest, from pluginID: String) async -> AttentionResponse { .dismissed }
-    func expand(toTabOf pluginID: String) {}
-    func collapse(from pluginID: String) {}
-    var isAccessibilityTrusted: Bool { false }
-    func requestAccessibility(from pluginID: String) {}
-    func log(_ level: LogLevel, _ message: String, from pluginID: String) {}
+    BatteryPlugin(context: try makeContext(), sampler: nil)
 }
 
 /// The tile comes small (percentage and charging glyph) or wide (percentage, state and time left)
