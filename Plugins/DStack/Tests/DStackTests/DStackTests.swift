@@ -29,7 +29,7 @@ import Testing
     #expect(run.inProgress == [PlanRef(id: "P3", slug: "widget"), PlanRef(id: "P4", slug: "sync")])
     #expect(run.tasksCommitted == 4 && run.tasksTotal == 7)
     // R03 is withdrawn: neither live nor met although it has a met case.
-    #expect(run.requirementsMet == 2 && run.requirementsLive == 3)
+    #expect(run.requirementsMet == 2 && run.requirementsCounted == 3)
     #expect(run.latest == Activity(date: iso("2026-10-02T09:50:00Z"), text: "P3 작업 T4 커밋"))
     #expect(DStackStore.relative(iso("2026-10-02T09:50:00Z"), now: iso("2026-10-02T09:53:20Z")) == "3분 전")
     #expect(DStackStore.relative(iso("2026-10-02T09:50:00Z"), now: iso("2026-10-02T09:50:30Z")) == "방금")
@@ -100,6 +100,7 @@ import Testing
         ("\(run)/review/index.tsv", "001\tplan\tP1\n", "review/index.tsv 줄 형식이 달라요"),
         ("\(run)/review/index.tsv", "round\tkind\ttarget\tfile\tsealed_at\n", "review/index.tsv 줄 형식이 달라요"),
         ("local/CURRENT", "../elsewhere\n", "CURRENT 값이 이상해요"),
+        ("\(run)/review/codex-review-002.md", nil, "리뷰 파일을 읽지 못했어요 (codex-review-002.md)"),
     ]
     for (index, item) in broken.enumerated() {
         let project = temp.url.appendingPathComponent("broken-\(index)")
@@ -459,7 +460,7 @@ import Testing
         return
     }
     #expect(progress.title == "샘플 목표")
-    #expect(progress.requirementsMet == 2 && progress.requirementsLive == 3)
+    #expect(progress.requirementsMet == 2 && progress.requirementsCounted == 3)
     plugin.deactivate()
 }
 
@@ -640,4 +641,76 @@ import Testing
     #expect(wide.text.contains("보여줄D-STACK실행이없어요") && wide.text.contains("계획을모두끝낸실행은빼요"), "\(wide.text)")
     #expect(!wide.text.contains("열린") && !wide.text.contains("폴더"), "\(wide.text)")
     #expect(wide.greenBands == 0 && wide.size.width <= 190 && wide.size.height <= 90, "\(wide)")
+}
+
+/// The requirement count follows `dstack report`: a row is met only when a task covers it, the
+/// ledger has evidence and no unreported case, met rows carry the kinds the request's `e2e` and
+/// `unit_tests` ask for, and the latest sealed round that judged it is not partial. Withdrawn and
+/// deferred rows leave the denominator; a superseded row stays in it as skipped.
+@Test func R60__requirements_count_like_dstack_report() throws {
+    let temp = try TempDir()
+    let run = "runs/20261001T090000Z_sample-app"
+    try writeStore(at: temp.url)
+    try replace("\(run)/request.md", in: temp.url, with: """
+    ---
+    work_type: cli
+    e2e: cli
+    unit_tests: on
+    ---
+    # 보고 기준 목표
+
+    - [ ] **R01** 충족했어요. — accept: 확인해요.
+    - [ ] **R02** 열린 항목만 있어요. — accept: 확인해요.
+    - [ ] **R03** 충족했고 열린 항목이 하나 더 있어요. — accept: 확인해요.
+    - [ ] **R04** 미보고 항목이 있어요. — accept: 확인해요.
+    - [ ] **R05** 실행 증거가 없어요. — accept: 확인해요.
+    - [ ] **R06** 테스트 증거가 없어요. — accept: 확인해요.
+    - [ ] **R07** 마지막 리뷰가 부분 판정이에요. — accept: 확인해요.
+    - [ ] **R08** 예전 부분 판정을 새 리뷰가 덮었어요. — accept: 확인해요.
+    - [ ] **R09** 덮는 작업이 없어요. — accept: 확인해요.
+    - [ ] **R10** 막힌 항목이 있어요. — accept: 확인해요.
+    - [ ] **R11** 철회했어요. — accept: 확인해요. — withdrawn: 사용자가 뺐어요.
+    - [ ] **R12** 보류했어요. — accept: 확인해요. — deferred: 다음 목표로 미뤘어요.
+    - [ ] **R13** 둘로 나눴어요. — accept: 확인해요. — superseded-by: R01, R03
+
+    """)
+    try replace("\(run)/plan.json", in: temp.url, with: """
+    {"v": 2, "milestones": [{"id": "M1", "slug": "base", "order": 1}],
+     "plans": [{"id": "P1", "milestone": "M1", "slug": "core", "status": "in-progress", "tasks": [
+       {"id": "T1", "slug": "a", "covers": ["R01", "R02", "R03", "R04", "R05"], "commit": "", "done_at": ""},
+       {"id": "T2", "slug": "b", "covers": ["R06", "R07", "R08", "R10", "R11", "R12", "R13"], "commit": "", "done_at": ""}]}]}
+    """)
+    let ledger = [
+        "R01 c1 cli met", "R01 c-test test met",
+        "R02 c1 cli open", "R02 c-test test open",
+        "R03 c1 cli met", "R03 c-test test met", "R03 c2 cli open",
+        "R04 c1 cli met", "R04 c-test test met", "R04 c-worker review unreported",
+        "R05 c1 cli open", "R05 c-test test met",
+        "R06 c1 cli met", "R06 c-test test open",
+        "R07 c1 cli met", "R07 c-test test met",
+        "R08 c1 capture met", "R08 c-test test met",
+        "R09 c1 cli met", "R09 c-test test met",
+        "R10 c1 cli met", "R10 c-test test met", "R10 c2 cli blocked",
+        "R11 c1 cli met", "R11 c-test test met",
+        "R12 c1 cli open",
+        "R13 c1 cli met", "R13 c-test test met",
+    ].map { $0.split(separator: " ").joined(separator: "\t") + "\tartifacts/a.txt\t-\t-\t2026-10-01T10:00:00Z\t-" }
+    try replace("\(run)/cases.tsv", in: temp.url, with: "R\tcase\tkind\tstatus\tartifact\tsha256\tproduced_by\trecorded_at\tnote\n" + ledger.joined(separator: "\n") + "\n")
+    try replace("\(run)/review/index.tsv", in: temp.url, with: """
+    001\tplan\tP1\tcodex-review-001.md\t2026-10-01T10:30:00Z\t0\t1\t0
+    002\tmilestone\tM1\tcodex-review-002.md\t2026-10-01T11:30:00Z\t0\t1\t0
+
+    """)
+    try replace("\(run)/review/codex-review-001.md", in: temp.url, with: "| R | verdict |\n|---|---|\n| R07 | covered | a |\n| R08 | partial | b |\n| R13 | partial | c |\n")
+    try replace("\(run)/review/codex-review-002.md", in: temp.url, with: "| R | verdict |\n|---|---|\n| R07 | partial | d |\n| R08 | covered | e |\n")
+    // Not in index.tsv: a round that was never sealed does not count.
+    try replace("\(run)/review/codex-review-003.md", in: temp.url, with: "| R | verdict |\n|---|---|\n| R08 | partial | f |\n")
+
+    guard case .open(let progress) = DStackStore(project: temp.url).read() else {
+        Issue.record("no open run in \(DStackStore(project: temp.url).read())")
+        return
+    }
+    let expected: [RequirementStatus] = [.met, .unmet, .met, .unmet, .unmet, .unmet, .unmet, .met, .unmet, .blocked, .withdrawn, .deferred, .skipped]
+    #expect(progress.requirements == expected.enumerated().map { Requirement(id: String(format: "R%02d", $0.offset + 1), status: $0.element) })
+    #expect(progress.requirementsMet == 3 && progress.requirementsCounted == 11)
 }

@@ -120,6 +120,8 @@ func writeStore(
     002\tplan\tP3\tcodex-review-002.md\t\(lastReviewAt)\t0\t2\t0
 
     """, "runs/\(id)/review/index.tsv")
+    try put("| R | verdict (covered\\|partial\\|absent) | evidence |\n|---|---|---|\n| R01 | covered | tests pass |\n", "runs/\(id)/review/codex-review-001.md")
+    try put("| R | verdict | evidence in the diff |\n|---|---|---|\n| R04 | covered | widget hunk |\n", "runs/\(id)/review/codex-review-002.md")
 }
 
 /// Makes the sample store's two milestones three, with 2/2, 1/3 and 0/1 plans done: P5 is done and

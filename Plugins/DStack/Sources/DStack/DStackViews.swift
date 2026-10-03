@@ -94,7 +94,7 @@ struct ProjectCard: View {
         }
         .font(.system(size: 11, weight: .medium))
         .monospacedDigit()
-        Text("작업 \(run.tasksCommitted)/\(run.tasksTotal) 커밋 · 요구사항 \(run.requirementsMet)/\(run.requirementsLive) 충족")
+        Text("작업 \(run.tasksCommitted)/\(run.tasksTotal) 커밋 · 요구사항 \(run.requirementsMet)/\(run.requirementsCounted) 충족")
             .font(.system(size: 11))
             .monospacedDigit()
             .foregroundStyle(.secondary)
@@ -180,7 +180,7 @@ struct DStackTile: View {
                         MilestoneStrip(milestones: run.remainingMilestones)
                     }
                     HStack(spacing: 6) {
-                        Text("작업 \(run.tasksCommitted)/\(run.tasksTotal) · 요구사항 \(run.requirementsMet)/\(run.requirementsLive)")
+                        Text("작업 \(run.tasksCommitted)/\(run.tasksTotal) · 요구사항 \(run.requirementsMet)/\(run.requirementsCounted)")
                             .foregroundStyle(.secondary)
                             .fixedSize()
                         Spacer(minLength: 0)
