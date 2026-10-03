@@ -60,12 +60,15 @@ esac
 
 cp -R "$TEMPLATE" "$dest"
 mv "$dest/Sources/__NAME__" "$dest/Sources/$name"
-mv "$dest/Sources/$name/__NAME__Plugin.swift" "$dest/Sources/$name/${name}Plugin.swift"
+# Every template source is named __NAME__<Part>.swift: __NAME__Plugin.swift becomes <Name>Plugin.swift.
+for file in "$dest/Sources/$name"/__NAME__*.swift; do
+    mv "$file" "$dest/Sources/$name/$name${file##*/__NAME__}"
+done
 PLUGIN_NAME=$name PLUGIN_ID=$id NOTCHKIT_PATH=$sdk_path perl -pi -e '
     s/__NAME__/$ENV{PLUGIN_NAME}/g;
     s/__ID__/$ENV{PLUGIN_ID}/g;
     s/__NOTCHKIT_PATH__/$ENV{NOTCHKIT_PATH}/g;
-' "$dest/Package.swift" "$dest/Sources/$name/${name}Plugin.swift"
+' "$dest/Package.swift" "$dest/Sources/$name"/*.swift
 
 printf 'new-plugin: 만들었어요. 다음 명령으로 빌드해요: %s/scripts/build-plugin.sh "%s"\n' "$ROOT" "$dest" >&2
 printf '%s\n' "$dest"

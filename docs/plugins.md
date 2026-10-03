@@ -27,7 +27,10 @@ scripts/new-plugin.sh Clock --id com.me.clock     # 식별자를 직접 정해�
 ```
 Clock/
 ├── Package.swift                  # 동적 라이브러리 Clock, NotchKit만 의존해요
-└── Sources/Clock/ClockPlugin.swift
+└── Sources/Clock/
+    ├── ClockPlugin.swift          # 플러그인 클래스와 진입점
+    ├── ClockView.swift            # 펼친 노치의 플러그인 화면
+    └── ClockTile.swift            # 홈 타일
 ```
 
 패키지 폴더 이름, 라이브러리 제품 이름, 번들 이름은 모두 같아야 해요. 저장소 안에 만들면 NotchKit 경로가
@@ -221,16 +224,33 @@ public final class ClockPlugin: NotchPlugin {
     )
 
     private let context: NotchContext
-    public init(context: NotchContext) { self.context = context }
+    private let readStatus: () -> String          // 바깥에서 읽는 값, 테스트는 가짜를 넘겨요
+    private var isActive = false
 
-    public func activate() { /* 표시를 올리고 작업을 시작해요 */ }
-    public func deactivate() { /* 올린 표시를 지우고 작업을 멈춰요 */ }
-
-    public var expandedTab: PluginTab? {           // 선택: 펼친 노치의 플러그인 화면
-        PluginTab(title: "Clock", symbol: "clock") { Text("12:00") }
+    public convenience init(context: NotchContext) {   // 앱이 부르는 init: 실제 의존성을 연결해요
+        self.init(context: context, readStatus: { Date.now.formatted(date: .omitted, time: .shortened) })
     }
-    public var tile: PluginTile? {                  // 선택: 홈의 타일 (SDK 1.1)
-        PluginTile(supportedSizes: [.small]) { _ in Text("12:00").padding(8) }
+    init(context: NotchContext, readStatus: @escaping () -> String) {   // 테스트가 부르는 init
+        self.context = context
+        self.readStatus = readStatus
+    }
+
+    public func activate() {
+        guard !isActive else { return }
+        isActive = true
+        /* 표시를 올리고 작업을 시작해요 */
+    }
+    public func deactivate() {
+        guard isActive else { return }
+        /* 올린 표시를 지우고 activate()가 시작한 작업을 모두 멈춰요 */
+        isActive = false
+    }
+
+    public var expandedTab: PluginTab? {           // 선택: 펼친 노치의 플러그인 화면 (ClockView.swift)
+        PluginTab(title: "Clock", symbol: "clock") { ClockView() }
+    }
+    public var tile: PluginTile? {                  // 선택: 홈의 타일 (ClockTile.swift, SDK 1.1)
+        PluginTile(supportedSizes: [.small]) { _ in ClockTileView() }
     }
     public var pluginDescription: PluginDescription? { nil }  // 선택: 설정 화면의 설명, 권한, 설정 항목 (SDK 1.4)
     public var settingsView: AnyView? { nil }       // 선택: 설정 화면에서 플러그인이 직접 그리는 칸
@@ -240,7 +260,12 @@ public final class ClockPlugin: NotchPlugin {
 
 앱은 플러그인을 켤 때 `activate()`, 끄거나 종료할 때 `deactivate()`를 불러요. 끈 플러그인을 다시 켜면
 `activate()`가 또 불려요. 한 번 불러온 코드는 메모리에서 내리지 않으니, 오래 걸리는 작업은 `activate()`에서
-시작하고 `deactivate()`에서 반드시 멈춰요.
+시작하고 `deactivate()`에서 반드시 멈춰요. 템플릿은 `isActive` 하나로 이미 켠 뒤의
+`activate()`와 켜지 않은 상태의 `deactivate()`를 건너뛰어요. `deactivate()`는 `activate()`가 시작한 일을
+모두 멈춘 다음 마지막에 `isActive`를 `false`로 돌려요.
+
+앱은 `public convenience init(context:)`로 플러그인을 만들어요. 이 init은 실제 의존성을 연결해서 내부
+init에 넘기고, 테스트는 내부 init에 가짜 값을 넘겨요. 템플릿에서는 상태 글자를 읽는 `readStatus`가 그 자리예요.
 
 ### NotchContext
 
