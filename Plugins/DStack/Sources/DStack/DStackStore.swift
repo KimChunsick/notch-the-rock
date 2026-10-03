@@ -364,7 +364,7 @@ struct DStackStore: Sendable {
     ///   and, with `unit_tests: on`, a met `test` row;
     /// - verify's sha256 recheck: a met case whose artifact is gone or no longer has the recorded
     ///   bytes (`isIntact` false) fails the row even when its other cases would pass it;
-    /// - the review: a `partial` verdict fails the row.
+    /// - the review: a `partial` or `absent` verdict fails the row.
     /// A row that passes but has a blocked or abstain case is blocked or abstain. The project policy
     /// ceiling, branch containment and `check decisions` are not reproduced: they need the CLI or
     /// files outside the run, so a row only they would fail reads as met here.
@@ -387,7 +387,7 @@ struct DStackStore: Sendable {
                 || e2eKinds.map { metKinds.isDisjoint(with: $0) } ?? false
                 || (front["unit_tests"] == "on" && !metKinds.contains("test"))
                 || own.contains { $0[3] == "met" && !isIntact($0) }
-                || verdicts[row.id] == "partial"
+                || ["partial", "absent"].contains(verdicts[row.id])
             let status: RequirementStatus = failed ? .unmet
                 : statuses.contains("blocked") ? .blocked
                 : statuses.contains("abstain") ? .abstain
