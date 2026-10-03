@@ -40,7 +40,7 @@ private func models() throws -> [(String, NowPlayingModel)] {
 /// the app's frame for it in every state.
 @MainActor
 @Test func R08__tile_is_wide_then_small_and_fits_the_home() throws {
-    let plugin = NowPlayingPlugin(context: try makeContext(host: RecordingHost()), launcher: FakeLauncher(), clock: VirtualClock())
+    let plugin = try makePlugin(launcher: FakeLauncher(), host: RecordingHost())
     let tile = try #require(plugin.tile)
     #expect(tile.supportedSizes == [.wide, .small])
     #expect(tile.defaultSize == .wide)
@@ -234,7 +234,7 @@ private func expectNoOuterSpace(_ insets: (left: CGFloat, right: CGFloat, bottom
 @MainActor
 @Test func R24__tile_buttons_send_previous_play_pause_and_next() throws {
     let launcher = FakeLauncher()
-    let plugin = NowPlayingPlugin(context: try makeContext(host: RecordingHost()), launcher: launcher, clock: VirtualClock())
+    let plugin = try makePlugin(launcher: launcher, host: RecordingHost())
     let playing = TrackInfo(title: "t", sampledAt: Date(timeIntervalSince1970: 0), isPlaying: true)
     let paused = TrackInfo(title: "t", sampledAt: Date(timeIntervalSince1970: 0), isPlaying: false)
 
