@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// One milestone's plans: how many are done out of all of them.
@@ -79,6 +80,43 @@ enum StoreReading: Equatable, Sendable {
     case unsupported(String)
 }
 
+/// The sha256 of evidence artifacts, kept by path, size and modification time so a reader that
+/// keeps it hashes a file again only after it changed.
+struct ArtifactDigests: Sendable {
+    private var entries: [String: (size: Int, date: Date, digest: String)] = [:]
+    /// How many files were hashed.
+    private(set) var hashed = 0
+
+    /// The file's sha256 in lowercase hex, nil when it is missing or unreadable.
+    mutating func digest(_ url: URL) -> String? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? Int,
+              let date = attributes[.modificationDate] as? Date else { return nil }
+        if let entry = entries[url.path], entry.size == size, entry.date == date { return entry.digest }
+        // Read, not mapped: a mapped file truncated while being hashed would crash the host.
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        hashed += 1
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        entries[url.path] = (size, date, digest)
+        return digest
+    }
+}
+
+/// What `read()` looks at, as modification times and sizes, so a caller rereads only after it
+/// changed.
+struct StoreSignature: Equatable, Sendable {
+    /// The store's own files.
+    let store: String
+    /// The artifacts of met cases: overwriting one changes no store file.
+    let artifacts: String
+
+    /// The part a reading depends on: only an open reading looked at the artifacts, so access to
+    /// cases.tsv coming back does not count as a change for a store that could not be read.
+    func of(_ reading: StoreReading) -> StoreSignature {
+        if case .open = reading { self } else { StoreSignature(store: store, artifacts: "") }
+    }
+}
+
 /// Reads one project's D-STACK store (`<project>/.dstack`). It only opens files for reading and
 /// never runs the `dstack` CLI, some of whose verbs write.
 struct DStackStore: Sendable {
@@ -107,19 +145,25 @@ struct DStackStore: Sendable {
         return id
     }
 
-    /// The modification times of the files `read()` looks at, so a caller rereads only after one
-    /// of them changed.
-    func signature() -> String {
+    /// The modification times and sizes of the files `read()` looks at, so a caller rereads only
+    /// after one of them changed.
+    func signature() -> StoreSignature {
         var files = [store.appendingPathComponent("version")]
         if let pointer { files.append(pointer) }
+        var artifacts: [URL] = []
         if let runID {
             let run = store.appendingPathComponent("runs").appendingPathComponent(runID)
             files += ["meta.tsv", "request.md", "plan.json", "cases.tsv", "review/index.tsv"].map { run.appendingPathComponent($0) }
+            artifacts = (Self.cases(run) ?? []).filter { $0[3] == "met" }.map { project.appendingPathComponent($0[4]) }
         }
-        return files.map { file in
-            let date = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date
-            return "\(file.path)=\(date?.timeIntervalSinceReferenceDate ?? -1)"
-        }.joined(separator: "\n")
+        func stats(_ files: [URL]) -> String {
+            files.map { file in
+                let attributes = try? FileManager.default.attributesOfItem(atPath: file.path)
+                let date = attributes?[.modificationDate] as? Date
+                return "\(file.path)=\(date?.timeIntervalSinceReferenceDate ?? -1),\(attributes?[.size] as? Int ?? -1)"
+            }.joined(separator: "\n")
+        }
+        return StoreSignature(store: stats(files), artifacts: stats(artifacts))
     }
 
     /// The open run's progress, `.noOpenRun` for a store without one (no or an empty pointer, a run
@@ -127,6 +171,12 @@ struct DStackStore: Sendable {
     /// writes. A file a run does not have yet (plan.json, cases.tsv, review/index.tsv) counts as
     /// empty.
     func read() -> StoreReading {
+        var digests = ArtifactDigests()
+        return read(digests: &digests)
+    }
+
+    /// `read()` with artifact digests kept from earlier reads.
+    func read(digests: inout ArtifactDigests) -> StoreReading {
         let version = Self.text(store.appendingPathComponent("version"))?.trimmingCharacters(in: .whitespacesAndNewlines)
         // A folder without a store has no open run; settings tell it apart.
         if version == nil, pointer == nil { return .noOpenRun }
@@ -154,10 +204,7 @@ struct DStackStore: Sendable {
         } else {
             plan = PlanFile(milestones: [], plans: [])
         }
-        // cases.tsv: R, case, kind, status, artifact, sha256, produced_by, recorded_at, note.
-        guard let cases = Self.rows(run.appendingPathComponent("cases.tsv"), header: ["R", "case"], columns: 8, key: /R\d+/) else {
-            return .unsupported("cases.tsv 줄 형식이 달라요")
-        }
+        guard let cases = Self.cases(run) else { return .unsupported("cases.tsv 줄 형식이 달라요") }
         // review/index.tsv: round, kind, target, file, sealed_at and counts, without a header.
         guard let rounds = Self.rows(run.appendingPathComponent("review/index.tsv"), header: nil, columns: 5, key: /\d+/) else {
             return .unsupported("review/index.tsv 줄 형식이 달라요")
@@ -180,7 +227,9 @@ struct DStackStore: Sendable {
             request: request,
             covered: Set(tasks.flatMap { $0.1.covers ?? [] }),
             cases: cases,
-            verdicts: verdicts
+            verdicts: verdicts,
+            // An artifact path is relative to the project root.
+            isIntact: { row in digests.digest(project.appendingPathComponent(row[4])) == row[5] }
         )
 
         // Ties keep the earlier source: a commit says more than the evidence recorded with it.
@@ -265,6 +314,11 @@ struct DStackStore: Sendable {
         (try? Data(contentsOf: url)).flatMap { String(data: $0, encoding: .utf8) }
     }
 
+    /// cases.tsv: R, case, kind, status, artifact, sha256, produced_by, recorded_at, note.
+    private static func cases(_ run: URL) -> [[String]]? {
+        rows(run.appendingPathComponent("cases.tsv"), header: ["R", "case"], columns: 8, key: /R\d+/)
+    }
+
     private static func table(_ text: String) -> [[String]] {
         text.split(separator: "\n").map { $0.split(separator: "\t", omittingEmptySubsequences: false).map(String.init) }
     }
@@ -308,12 +362,13 @@ struct DStackStore: Sendable {
     /// - verify's per-field evidence: a met row of a kind the request's `e2e` field asks for (`none`
     ///   asks for `review`, any other value for `cli`, `capture` or `transcript`, no field for none)
     ///   and, with `unit_tests: on`, a met `test` row;
+    /// - verify's sha256 recheck: a met case whose artifact is gone or no longer has the recorded
+    ///   bytes (`isIntact` false) fails the row even when its other cases would pass it;
     /// - the review: a `partial` verdict fails the row.
-    /// A row that passes but has a blocked or abstain case is blocked or abstain. Verify's sha256
-    /// recheck of the artifacts, the project policy ceiling, branch containment and `check
-    /// decisions` are not reproduced: they need the CLI or files outside the run, so a row only
-    /// they would fail reads as met here.
-    private static func requirements(request: String, covered: Set<String>, cases: [[String]], verdicts: [String: String]) -> [Requirement] {
+    /// A row that passes but has a blocked or abstain case is blocked or abstain. The project policy
+    /// ceiling, branch containment and `check decisions` are not reproduced: they need the CLI or
+    /// files outside the run, so a row only they would fail reads as met here.
+    private static func requirements(request: String, covered: Set<String>, cases: [[String]], verdicts: [String: String], isIntact: ([String]) -> Bool) -> [Requirement] {
         let front = fields(request)
         let e2eKinds: Set<String>? = switch front["e2e"] {
         case nil: nil
@@ -331,6 +386,7 @@ struct DStackStore: Sendable {
                 || statuses.contains("unreported")
                 || e2eKinds.map { metKinds.isDisjoint(with: $0) } ?? false
                 || (front["unit_tests"] == "on" && !metKinds.contains("test"))
+                || own.contains { $0[3] == "met" && !isIntact($0) }
                 || verdicts[row.id] == "partial"
             let status: RequirementStatus = failed ? .unmet
                 : statuses.contains("blocked") ? .blocked

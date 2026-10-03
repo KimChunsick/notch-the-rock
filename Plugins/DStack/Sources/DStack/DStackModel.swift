@@ -159,7 +159,9 @@ actor DStackScanner {
     /// The last reading of each folder and the signature of the files it came from. A reading is
     /// reused while the signature stays the same, except that a store that could not be read is
     /// read again on every retry: access can come back without a modification time changing.
-    private var readings: [String: (signature: String, reading: StoreReading)] = [:]
+    private var readings: [String: (signature: StoreSignature, reading: StoreReading)] = [:]
+    /// The evidence artifacts' digests, so a reread hashes only the artifacts that changed.
+    private var digests = ArtifactDigests()
 
     init(discovery: ProjectDiscovery) {
         self.discovery = discovery
@@ -184,14 +186,14 @@ actor DStackScanner {
         }
         let discovered = entries.compactMap { found[$0] }
         let discoveredKeys = Set(discovered.map(ProjectFolders.key))
-        var fresh: [String: (signature: String, reading: StoreReading)] = [:]
+        var fresh: [String: (signature: StoreSignature, reading: StoreReading)] = [:]
         let projects = ProjectFolders.resolve(discovered: discovered, added: added, removed: removed).map { url in
             let store = DStackStore(project: url)
             let signature = store.signature()
-            var cached = readings[url.path].flatMap { $0.signature == signature ? $0.reading : nil }
+            var cached = readings[url.path].flatMap { $0.signature == signature.of($0.reading) ? $0.reading : nil }
             if retry, case .unsupported = cached { cached = nil }
-            let reading = cached ?? store.read()
-            fresh[url.path] = (signature, reading)
+            let reading = cached ?? store.read(digests: &digests)
+            fresh[url.path] = (signature.of(reading), reading)
             return DStackModel.Project(url: url, reading: reading, isDiscovered: discoveredKeys.contains(url.path), hasStore: DStackStore.hasStore(url))
         }
         readings = fresh

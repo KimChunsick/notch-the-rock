@@ -680,6 +680,7 @@ import Testing
        {"id": "T1", "slug": "a", "covers": ["R01", "R02", "R03", "R04", "R05"], "commit": "", "done_at": ""},
        {"id": "T2", "slug": "b", "covers": ["R06", "R07", "R08", "R10", "R11", "R12", "R13"], "commit": "", "done_at": ""}]}]}
     """)
+    let evidence = try artifact("artifacts/a.txt", "a\n", in: temp.url)
     let ledger = [
         "R01 c1 cli met", "R01 c-test test met",
         "R02 c1 cli open", "R02 c-test test open",
@@ -694,7 +695,7 @@ import Testing
         "R11 c1 cli met", "R11 c-test test met",
         "R12 c1 cli open",
         "R13 c1 cli met", "R13 c-test test met",
-    ].map { $0.split(separator: " ").joined(separator: "\t") + "\tartifacts/a.txt\t-\t-\t2026-10-01T10:00:00Z\t-" }
+    ].map { $0.split(separator: " ").joined(separator: "\t") + "\tartifacts/a.txt\t\(evidence)\t-\t2026-10-01T10:00:00Z\t-" }
     try replace("\(run)/cases.tsv", in: temp.url, with: "R\tcase\tkind\tstatus\tartifact\tsha256\tproduced_by\trecorded_at\tnote\n" + ledger.joined(separator: "\n") + "\n")
     try replace("\(run)/review/index.tsv", in: temp.url, with: """
     001\tplan\tP1\tcodex-review-001.md\t2026-10-01T10:30:00Z\t0\t1\t0
@@ -713,4 +714,49 @@ import Testing
     let expected: [RequirementStatus] = [.met, .unmet, .met, .unmet, .unmet, .unmet, .unmet, .met, .unmet, .blocked, .withdrawn, .deferred, .skipped]
     #expect(progress.requirements == expected.enumerated().map { Requirement(id: String(format: "R%02d", $0.offset + 1), status: $0.element) })
     #expect(progress.requirementsMet == 3 && progress.requirementsCounted == 11)
+}
+
+/// verify's sha256 recheck: a met row counts only while its artifact, relative to the project root,
+/// still has the bytes the ledger recorded. Overwritten or deleted, it fails its requirement even
+/// beside another met row; restored, the requirement is met again. The store's signature changes so
+/// the scanner reads it again, and an unchanged artifact is not hashed again.
+@Test func R60__changed_evidence_artifacts_do_not_count() throws {
+    let temp = try TempDir()
+    let id = "20261001T090000Z_sample-app"
+    try writeStore(at: temp.url)
+    let path = ".dstack/runs/\(id)/artifacts/P1/R01-cli.txt"
+    let file = temp.url.appendingPathComponent(path)
+    let recorded = "cli passed\n"
+    let sha = try artifact(path, recorded, in: temp.url)
+    let ledger = temp.url.appendingPathComponent(".dstack/runs/\(id)/cases.tsv")
+    let text = try String(contentsOf: ledger, encoding: .utf8)
+        .replacingOccurrences(of: "R01\tc2\tcli\topen\t-\t-\t-\t-\t-", with: "R01\tc2\tcli\tmet\t\(path)\t\(sha)\te2e-runner\t2026-10-01T10:05:00Z\tran")
+    try replace("runs/\(id)/cases.tsv", in: temp.url, with: text)
+    let store = DStackStore(project: temp.url)
+    var digests = ArtifactDigests()
+    func r01(_ when: String) -> RequirementStatus? {
+        guard case .open(let run) = store.read(digests: &digests) else {
+            Issue.record("no open run \(when): \(store.read())")
+            return nil
+        }
+        return run.requirements.first { $0.id == "R01" }?.status
+    }
+    func write(_ text: String, at date: String) throws {
+        try text.write(to: file, atomically: false, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: iso(date)], ofItemAtPath: file.path)
+    }
+
+    #expect(r01("cold") == .met && digests.hashed == 3, "\(digests.hashed)")
+    #expect(r01("warm") == .met && digests.hashed == 3, "an unchanged artifact was hashed again: \(digests.hashed)")
+
+    let signature = store.signature()
+    try write("cli failed\n", at: "2026-10-01T12:00:00Z")
+    #expect(store.signature() != signature, "the scanner would keep the old reading")
+    #expect(r01("overwritten") == .unmet && digests.hashed == 4, "\(digests.hashed)")
+
+    try FileManager.default.removeItem(at: file)
+    #expect(r01("deleted") == .unmet)
+
+    try write(recorded, at: "2026-10-01T13:00:00Z")
+    #expect(r01("restored") == .met && digests.hashed == 5, "\(digests.hashed)")
 }
