@@ -107,29 +107,12 @@ private func writeHistoryFromBeforeTheKeyFile(in directory: URL, withMarker: Boo
     }
 }
 
-@MainActor
-private final class LogHost: NotchHost {
-    var logs: [(LogLevel, String)] = []
-    func post(_ activity: LiveActivity, from pluginID: String) {}
-    func clearActivity(id: String, from pluginID: String) {}
-    func showHUD(_ hud: HUD, duration: Duration, from pluginID: String) {}
-    func present(_ takeover: Takeover, from pluginID: String) {}
-    func requestAttention(_ request: AttentionRequest, from pluginID: String) async -> AttentionResponse { .dismissed }
-    func expand(toTabOf pluginID: String) {}
-    func collapse(from pluginID: String) {}
-    var isAccessibilityTrusted: Bool { false }
-    func requestAccessibility(from pluginID: String) {}
-    func log(_ level: LogLevel, _ message: String, from pluginID: String) { logs.append((level, message)) }
-}
-
 /// The plugin with its storage folder at `directory`, opening through `gate`, and a private
 /// pasteboard. Each call builds a new `PluginStorage`, as a new process would.
 @MainActor
-private func makePlugin(directory: URL, gate: OpeningGate = OpeningGate(), pasteboard: NSPasteboard, host: LogHost = LogHost()) throws -> ClipboardPlugin {
-    let id = ClipboardPlugin.manifest.id
-    let storage = try PluginStorage(directory: directory, defaultsSuiteName: "clipboard-tests.\(id)", keychainService: "clipboard-tests.\(id)")
-    return ClipboardPlugin(
-        context: NotchContext(pluginID: id, bundleURL: URL(fileURLWithPath: "/nonexistent"), host: host, storage: storage),
+private func makePlugin(directory: URL, gate: OpeningGate = OpeningGate(), pasteboard: NSPasteboard, host: FakeHost = FakeHost()) throws -> ClipboardPlugin {
+    ClipboardPlugin(
+        context: try makeContext(directory: directory, host: host),
         pasteboard: pasteboard,
         openStore: { try gate.open($0) }
     )
@@ -678,7 +661,7 @@ extension MainActorTimingTests {
     try writeHistoryFromBeforeTheKeyFile(in: directory)
     let gate = OpeningGate()
     gate.isHeld = true
-    let host = LogHost()
+    let host = FakeHost()
     let pasteboard = makePasteboard()
     defer { pasteboard.releaseGlobally() }
     let plugin = try makePlugin(directory: directory, gate: gate, pasteboard: pasteboard, host: host)
