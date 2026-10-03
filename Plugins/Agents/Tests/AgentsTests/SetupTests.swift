@@ -33,8 +33,7 @@ import Testing
         let settings = directory.appendingPathComponent("settings.json")
         try Data(#"{"theme":"dark"}"#.utf8).write(to: settings)
         let plugin = try plugin(in: directory, claude: directory.appendingPathComponent("claude"), codex: directory.appendingPathComponent("codex"))
-        // Not activated: 연결 below starts the Codex link, and 해제 stops it again.
-        defer { plugin.codex.disconnect() }
+        defer { plugin.deactivate() }
         let items = try #require(plugin.setup).items
         #expect(items.map(\.state) == [.notConnected, .notConnected])
 

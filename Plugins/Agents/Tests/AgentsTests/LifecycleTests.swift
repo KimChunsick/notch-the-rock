@@ -22,10 +22,11 @@ import Testing
         launcher = FakeLauncher(socketPath: CodexEndpoint(home: codexHome).socketPath)
     }
 
-    /// The plugin with Codex connected in an earlier launch, so `activate()` starts the link too.
-    private func plugin() throws -> AgentsPlugin {
+    /// The plugin with Codex connected in an earlier launch, so `activate()` starts the link too, or,
+    /// with `codexConnected` false, not connected yet.
+    private func plugin(codexConnected: Bool = true) throws -> AgentsPlugin {
         let context = try makeContext(host: host, directory: directory)
-        context.storage.defaults.set(true, forKey: CodexModel.enabledKey)
+        context.storage.defaults.set(codexConnected, forKey: CodexModel.enabledKey)
         return makePlugin(
             context: context,
             directory: directory,
@@ -96,6 +97,23 @@ import Testing
         await sendStop()
         try await Task.sleep(for: .milliseconds(100))
         #expect(host.requests.isEmpty)
+    }
+
+    /// 연결 on the onboarding card or the settings page starts Codex without `activate()`; turning the
+    /// plugin off stops it all the same.
+    @Test func R64__deactivate_stops_codex_connected_without_activate() async throws {
+        let plugin = try plugin(codexConnected: false)
+        defer { cleanUp(plugin) }
+        let card = try #require(plugin.setup).items[1]
+        #expect(card.state == .notConnected)
+        card.perform()
+        #expect(await eventually { launcher.processes.count == 1 })
+        #expect(plugin.rollouts.isWatching)
+
+        plugin.deactivate()
+        #expect(plugin.codex.state == .off)
+        #expect(launcher.processes.allSatisfy { $0.terminated }, "the codex app-server the plugin started still runs")
+        #expect(!plugin.rollouts.isWatching, "the rollout watcher still follows the files")
     }
 
     @Test func R64__activate_after_deactivate_serves_the_hook_socket_again() async throws {

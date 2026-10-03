@@ -143,12 +143,15 @@ public final class AgentsPlugin: NotchPlugin {
     }
 
     public func deactivate() {
-        guard isActive else { return }
-        server?.stop()
-        server = nil
-        pruning?.cancel()
-        pruning = nil
+        if isActive {
+            server?.stop()
+            server = nil
+            pruning?.cancel()
+            pruning = nil
+        }
         bridge.cancelAll()
+        // The settings page and the onboarding connect Codex without activate(), so its link and
+        // rollouts stop whether or not the plugin was activated.
         codexLink.stop()
         rollouts.stop()
         codexBridge.cancelAll()
