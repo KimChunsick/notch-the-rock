@@ -20,6 +20,7 @@ public final class SystemStatsPlugin: NotchPlugin {
     private let makeSamplers: @MainActor () -> Samplers
     /// Starts the refresh loop of one activation. It is made in `init`, which knows the clock's type.
     private let startRefreshing: @MainActor (SystemStatsModel, StatsCollector) -> Task<Void, Never>
+    private var isActive = false
     private var refreshTask: Task<Void, Never>?
 
     public convenience init(context: NotchContext) {
@@ -39,7 +40,8 @@ public final class SystemStatsPlugin: NotchPlugin {
     }
 
     public func activate() {
-        guard refreshTask == nil else { return }
+        guard !isActive else { return }
+        isActive = true
         refreshTask = startRefreshing(model, StatsCollector(samplers: makeSamplers()))
     }
 
@@ -70,10 +72,12 @@ public final class SystemStatsPlugin: NotchPlugin {
     }
 
     public func deactivate() {
+        guard isActive else { return }
         refreshTask?.cancel()
         refreshTask = nil
         // The next activation starts with fresh counters and an empty history.
         model.reset()
+        isActive = false
     }
 
     public var expandedTab: PluginTab? {

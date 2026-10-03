@@ -20,6 +20,7 @@ public final class HelloPlugin: NotchPlugin {
     /// time; tests force a phrase.
     private let pickGreeting: () -> HelloGreeting
     private let unlocks: any ScreenUnlockSource
+    private var isActive = false
     /// Numbers each greeting, so a greeting that replaces one still on screen starts writing anew.
     private var greetingCount = 0
 
@@ -44,12 +45,16 @@ public final class HelloPlugin: NotchPlugin {
     /// enabled again. It greets and then greets again at every unlock notification until
     /// `deactivate()`, however close together they arrive.
     public func activate() {
+        guard !isActive else { return }
+        isActive = true
         unlocks.start { [weak self] in self?.greet() }
         greet()
     }
 
     public func deactivate() {
+        guard isActive else { return }
         unlocks.stop()
+        isActive = false
     }
 
     /// Reads the toggle each time, so turning it back on applies from the next unlock. The host shows

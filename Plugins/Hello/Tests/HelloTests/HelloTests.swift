@@ -146,6 +146,7 @@ func withContext(_ body: (NotchContext, RecordingHost) throws -> Void) throws {
             #expect(host.takeovers.isEmpty)
 
             context.settings.set(true, for: toggle)
+            plugin.deactivate()
             plugin.activate()
             #expect(host.takeovers.count == 1)
         }

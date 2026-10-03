@@ -8,8 +8,12 @@ import Testing
 final class FakeUnlocks: ScreenUnlockSource {
     private var onUnlock: (@MainActor () -> Void)?
     var isObserving: Bool { onUnlock != nil }
+    private(set) var starts = 0
 
-    func start(_ onUnlock: @escaping @MainActor () -> Void) { self.onUnlock = onUnlock }
+    func start(_ onUnlock: @escaping @MainActor () -> Void) {
+        starts += 1
+        self.onUnlock = onUnlock
+    }
     func stop() { onUnlock = nil }
     func fire() { onUnlock?() }
 }
@@ -115,6 +119,27 @@ final class FakeUnlocks: ScreenUnlockSource {
             // Enabled again, the plugin greets and follows unlocks once more.
             plugin.activate()
             #expect(host.takeovers.count == 2)
+            unlocks.fire()
+            #expect(host.takeovers.count == 3)
+        }
+    }
+
+    /// Activating twice greets once and starts one observation; after `deactivate()`, activating
+    /// again greets and observes as the first activation did.
+    @Test func R64__hello_activates_once_and_starts_afresh_after_deactivate() throws {
+        try withContext { context, host in
+            let plugin = plugin(context)
+            plugin.activate()
+            plugin.activate()
+            #expect(host.takeovers.count == 1)
+            #expect(unlocks.starts == 1)
+
+            plugin.deactivate()
+            #expect(!unlocks.isObserving)
+
+            plugin.activate()
+            #expect(host.takeovers.count == 2)
+            #expect(unlocks.starts == 2)
             unlocks.fire()
             #expect(host.takeovers.count == 3)
         }

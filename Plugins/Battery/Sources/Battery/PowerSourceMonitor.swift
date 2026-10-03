@@ -1,10 +1,18 @@
 import CoreFoundation
 import IOKit.ps
 
+/// What the plugin starts on `activate()` and stops on `deactivate()`: the app's monitor listens to
+/// IOKit, tests report their own readings.
+@MainActor
+protocol PowerSourceObserver: AnyObject {
+    func start()
+    func stop()
+}
+
 /// Reads the internal battery from IOKit and reports every power source change on the main
 /// run loop until `stop()`.
 @MainActor
-final class PowerSourceMonitor {
+final class PowerSourceMonitor: PowerSourceObserver {
     private let onChange: @MainActor (PowerStatus?) -> Void
     private var source: CFRunLoopSource?
 

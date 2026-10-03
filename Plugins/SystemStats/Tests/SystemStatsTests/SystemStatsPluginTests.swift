@@ -208,6 +208,36 @@ private func makeContext() throws -> NotchContext {
     #expect(cpu.starts.count == 4)
 }
 
+/// Activating twice makes the samplers and takes the first reading once, so one refresh loop runs;
+/// deactivating ends it and empties the model; activating again starts as the first activation did.
+@MainActor
+@Test func R64__stats_activate_once_and_start_afresh_after_deactivate() async throws {
+    let system = FakeSystem()
+    var made = 0
+    let plugin = SystemStatsPlugin(context: try makeContext(), interval: .milliseconds(20)) {
+        made += 1
+        return system.samplers
+    }
+
+    plugin.activate()
+    plugin.activate()
+    #expect(made == 1)
+    #expect(system.cpuReads == 1)
+
+    plugin.deactivate()
+    #expect(plugin.snapshot == nil)
+    // No loop is left running: neither the first nor one a second activation could have started.
+    try await Task.sleep(for: .milliseconds(200))
+    #expect(system.cpuReads == 1)
+
+    plugin.activate()
+    #expect(made == 2)
+    #expect(system.cpuReads == 2)
+    #expect(plugin.snapshot?.gpu == 12)
+    plugin.deactivate()
+    #expect(plugin.snapshot == nil)
+}
+
 /// The app's tile frames (`HomeGrid` in the app: 40 pt units 10 pt apart) and the largest content of
 /// the expanded notch (`NotchSizing.maxContentSize`, the home grid's width).
 private let tileFrames: [TileSize: CGSize] = [

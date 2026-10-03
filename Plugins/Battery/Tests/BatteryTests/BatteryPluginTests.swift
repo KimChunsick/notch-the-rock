@@ -45,8 +45,33 @@ private final class ManualClock {
     var now = ContinuousClock.now
 }
 
+/// A monitor the test drives by hand; it counts its starts and stops.
 @MainActor
-private func makePlugin(host: RecordingHost, clock: ManualClock) throws -> BatteryPlugin {
+private final class FakeMonitor: PowerSourceObserver {
+    let report: @MainActor (PowerStatus?) -> Void
+    var starts = 0
+    var stops = 0
+
+    init(report: @escaping @MainActor (PowerStatus?) -> Void) { self.report = report }
+    func start() { starts += 1 }
+    func stop() { stops += 1 }
+}
+
+/// The battery the plugin reads on `activate()`, and every monitor it makes.
+@MainActor
+private final class FakePowerSource {
+    var reading: PowerStatus?
+    private(set) var monitors: [FakeMonitor] = []
+
+    func makeMonitor(_ report: @escaping @MainActor (PowerStatus?) -> Void) -> any PowerSourceObserver {
+        let monitor = FakeMonitor(report: report)
+        monitors.append(monitor)
+        return monitor
+    }
+}
+
+@MainActor
+private func makePlugin(host: RecordingHost, clock: ManualClock, power: FakePowerSource = FakePowerSource()) throws -> BatteryPlugin {
     let id = BatteryPlugin.manifest.id
     let storage = try PluginStorage(
         directory: FileManager.default.temporaryDirectory.appendingPathComponent("battery-tests-\(UUID().uuidString)"),
@@ -54,7 +79,7 @@ private func makePlugin(host: RecordingHost, clock: ManualClock) throws -> Batte
         keychainService: "battery-tests.\(id)"
     )
     let context = NotchContext(pluginID: id, bundleURL: URL(fileURLWithPath: "/nonexistent"), host: host, storage: storage)
-    return BatteryPlugin(context: context, sampler: nil, now: { clock.now })
+    return BatteryPlugin(context: context, sampler: nil, now: { clock.now }, read: { power.reading }, makeMonitor: { power.makeMonitor($0) })
 }
 
 /// The view drawn as the host's collapsed wings draw it, as PNG bytes.
@@ -134,4 +159,40 @@ private func drawing(_ view: some View) throws -> Data {
     #expect(try drawing(changes[0].leading) == drawing(Image(systemName: "battery.75percent").symbolRenderingMode(.hierarchical)))
     #expect(try drawing(changes[1].leading) == drawing(Image(systemName: "battery.100percent.bolt").symbolRenderingMode(.hierarchical).foregroundStyle(.green)))
     #expect(try drawing(changes[1].trailing) == drawing(Text("80%").monospacedDigit()))
+}
+
+/// Activating twice makes, seeds and starts one monitor; deactivating stops it and clears what the
+/// plugin posted, and a second deactivate does nothing more; activating again makes a fresh monitor
+/// whose first reading seeds the state as the first activation's did.
+@MainActor
+@Test func R64__battery_activates_once_and_starts_afresh_after_deactivate() throws {
+    let host = RecordingHost()
+    let power = FakePowerSource()
+    power.reading = reading(46, onPower: true, charging: true)
+    let plugin = try makePlugin(host: host, clock: ManualClock(), power: power)
+
+    plugin.activate()
+    plugin.activate()
+    #expect(power.monitors.count == 1)
+    #expect(power.monitors.map(\.starts) == [1])
+    #expect(host.calls == ["post charging 0 -"])
+
+    plugin.deactivate()
+    #expect(power.monitors.map(\.stops) == [1])
+    #expect(host.calls == ["post charging 0 -", "clear charging", "clear power-change"])
+    plugin.deactivate()
+    #expect(power.monitors.map(\.stops) == [1])
+    #expect(host.calls == ["post charging 0 -", "clear charging", "clear power-change"])
+
+    plugin.activate()
+    #expect(power.monitors.count == 2)
+    #expect(power.monitors.map(\.starts) == [1, 1])
+    #expect(power.monitors.map(\.stops) == [1, 0])
+    #expect(host.calls == ["post charging 0 -", "clear charging", "clear power-change", "post charging 0 -"])
+
+    // The new monitor's readings reach the plugin: unplugging slides the change out.
+    power.monitors[1].report(reading(46, onPower: false, charging: false))
+    #expect(host.calls.suffix(2) == ["post power-change 100 2.5 seconds", "clear charging"])
+    plugin.deactivate()
+    #expect(power.monitors.map(\.stops) == [1, 1])
 }
