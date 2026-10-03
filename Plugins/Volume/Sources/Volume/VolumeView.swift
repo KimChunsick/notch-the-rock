@@ -51,50 +51,11 @@ struct VolumeView: View {
     }
 }
 
-/// The home tile: the mute toggle and the volume when small, with a slider beside them when wide.
-struct VolumeTile: View {
-    let model: VolumeModel
-    let size: TileSize
-
-    var body: some View {
-        HStack(spacing: 12) {
-            VStack(spacing: 4) {
-                if let volume = model.volume {
-                    MuteToggle(model: model, volume: volume)
-                    TileValue(text: percentText(volume.level))
-                } else {
-                    Image(systemName: "speaker.slash.fill")
-                    TileValue(text: "—")
-                }
-                Text("볼륨")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if size != .small, let volume = model.volume {
-                VolumeSlider(model: model, volume: volume)
-                    .frame(width: 90)
-            }
-        }
-        .padding(8)
-        .task { await model.keepRefreshed() }
-    }
-
-    private struct TileValue: View {
-        let text: String
-
-        var body: some View {
-            Text(text)
-                .font(.system(size: 20, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-        }
-    }
-}
-
 /// The volume as a thin capsule track filled from the left with the notch's volume bar gradient,
 /// and a round knob. A click or a drag sets the volume where the pointer is, live while dragging; a
 /// value the device refuses snaps it back. Focused from the keyboard, the arrow keys step it as the
 /// volume keys do, and so does VoiceOver's adjust.
-private struct VolumeSlider: View {
+struct VolumeSlider: View {
     /// Pale ice blue to a calm blue, as the notch's volume bar fills: keep it equal to
     /// `HUDBar.volume` in the app's Sources/NotchTheRock/Window/NotchRootView.swift.
     static let colors = [Color(red: 0.74, green: 0.87, blue: 1), Color(red: 0.36, green: 0.64, blue: 1)]
@@ -159,7 +120,7 @@ private struct VolumeSlider: View {
 }
 
 /// The speaker icon as a toggle button: on while muted.
-private struct MuteToggle: View {
+struct MuteToggle: View {
     let model: VolumeModel
     let volume: VolumeState
 
@@ -171,22 +132,5 @@ private struct MuteToggle: View {
         .disabled(!volume.canMute)
         .help("음소거")
         .accessibilityLabel("음소거")
-    }
-}
-
-/// The plugin's page in Settings: what it does with the keys and whether it may.
-struct VolumeSettingsView: View {
-    let isTrusted: Bool
-    let requestAccessibility: () -> Void
-
-    var body: some View {
-        LabeledContent {
-            if !isTrusted {
-                Button("권한 열기", action: requestAccessibility)
-            }
-        } label: {
-            Text("볼륨·음소거 키")
-            Text(isTrusted ? "노치에서 처리해요." : "손쉬운 사용 권한을 켜기 전까지 키가 원래대로 동작해요.")
-        }
     }
 }

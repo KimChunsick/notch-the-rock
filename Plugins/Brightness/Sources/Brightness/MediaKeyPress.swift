@@ -17,8 +17,8 @@ struct SystemDefinedEvent: Sendable {
 
 /// A press or release of one of the keys in `MediaKey`, decoded from an `NX_SYSDEFINED` event of
 /// subtype 8 (`NX_SUBTYPE_AUX_CONTROL_BUTTONS`). Every other event decodes to nil, so the plugin
-/// passes it on: the volume and mute keys (0, 1 and 7) and play/pause, next and previous (key codes
-/// 16–20), which belong to other plugins.
+/// passes it on: the media keys `MediaKey` leaves out, such as play/pause, next and previous (key
+/// codes 16–20), which belong to other plugins.
 struct MediaKeyPress: Equatable, Sendable {
     enum State: Equatable, Sendable {
         case down

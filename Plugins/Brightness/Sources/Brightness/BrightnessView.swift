@@ -37,37 +37,11 @@ struct BrightnessView: View {
     }
 }
 
-/// The home tile: the brightness when small, with a slider beside it when wide.
-struct BrightnessTile: View {
-    let model: BrightnessModel
-    let size: TileSize
-
-    var body: some View {
-        HStack(spacing: 12) {
-            VStack(spacing: 4) {
-                Image(systemName: "sun.max.fill")
-                Text(model.brightness.map(percentText) ?? "—")
-                    .font(.system(size: 20, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                Text("밝기")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if size != .small, let brightness = model.brightness {
-                BrightnessSlider(model: model, brightness: brightness)
-                    .frame(width: 90)
-            }
-        }
-        .padding(8)
-        .task { await model.keepRefreshed() }
-    }
-}
-
 /// The brightness as a thin capsule track filled from the left with the notch's brightness bar gradient,
 /// and a round knob. A click or a drag sets the brightness where the pointer is, live while dragging; a
 /// value the display refuses snaps it back. Focused from the keyboard, the arrow keys step it as the
 /// brightness keys do, and so does VoiceOver's adjust.
-private struct BrightnessSlider: View {
+struct BrightnessSlider: View {
     /// Warm beige to gold, as the notch's brightness bar fills: keep it equal to
     /// `HUDBar.warm` in the app's Sources/NotchTheRock/Window/NotchRootView.swift.
     static let colors = [Color(red: 0.95, green: 0.87, blue: 0.72), Color(red: 0.97, green: 0.73, blue: 0.28)]
@@ -128,22 +102,5 @@ private struct BrightnessSlider: View {
 
     private func step(_ delta: Int) {
         _ = model.stepBrightness(by: delta, steps: BrightnessPlugin.steps)
-    }
-}
-
-/// The plugin's page in Settings: what it does with the keys and whether it may.
-struct BrightnessSettingsView: View {
-    let isTrusted: Bool
-    let requestAccessibility: () -> Void
-
-    var body: some View {
-        LabeledContent {
-            if !isTrusted {
-                Button("권한 열기", action: requestAccessibility)
-            }
-        } label: {
-            Text("밝기 키")
-            Text(isTrusted ? "노치에서 처리해요." : "손쉬운 사용 권한을 켜기 전까지 키가 원래대로 동작해요.")
-        }
     }
 }
