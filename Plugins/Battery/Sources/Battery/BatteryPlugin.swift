@@ -24,7 +24,8 @@ public final class BatteryPlugin: NotchPlugin {
 
     private let context: NotchContext
     private let model: BatteryModel
-    private var monitor: PowerSourceMonitor?
+    private var isActive = false
+    private var monitor: (any PowerSourceObserver)?
     /// Percentage shown by the posted charging activity, nil while none is posted.
     private var postedChargingPercentage: Int?
     /// The reading the posted power-change activity shows and when the host removes it, nil once
@@ -32,29 +33,44 @@ public final class BatteryPlugin: NotchPlugin {
     private var powerChange: (status: PowerStatus, expiry: ContinuousClock.Instant)?
     /// The plugin's clock, on which the power-change activity's expiry is timed.
     private let now: @MainActor () -> ContinuousClock.Instant
+    /// Reads the internal battery when `activate()` starts.
+    private let read: @MainActor () -> PowerStatus?
+    /// Makes the monitor of one activation, which reports every change to the callback it is given.
+    private let makeMonitor: @MainActor (@escaping @MainActor (PowerStatus?) -> Void) -> any PowerSourceObserver
 
     public convenience init(context: NotchContext) {
         self.init(context: context, sampler: BatteryDetail.sample)
     }
 
     /// `sampler` reads the screen's app and peripheral lists while it is shown; nil reads none.
-    init(context: NotchContext, sampler: BatteryModel.Sampler?, now: @escaping @MainActor () -> ContinuousClock.Instant = { .now }) {
+    /// `read` and `makeMonitor` stand for IOKit's battery reading and its change notifications.
+    init(
+        context: NotchContext,
+        sampler: BatteryModel.Sampler?,
+        now: @escaping @MainActor () -> ContinuousClock.Instant = { .now },
+        read: @escaping @MainActor () -> PowerStatus? = { PowerSourceMonitor.read() },
+        makeMonitor: @escaping @MainActor (@escaping @MainActor (PowerStatus?) -> Void) -> any PowerSourceObserver = { PowerSourceMonitor(onChange: $0) }
+    ) {
         self.context = context
         self.model = BatteryModel(sampler: sampler)
         self.now = now
+        self.read = read
+        self.makeMonitor = makeMonitor
     }
 
     public func activate() {
-        guard monitor == nil else { return }
-        let monitor = PowerSourceMonitor { [weak self] status in
+        guard !isActive else { return }
+        isActive = true
+        let monitor = makeMonitor { [weak self] status in
             self?.update(status)
         }
         self.monitor = monitor
-        update(PowerSourceMonitor.read())
+        update(read())
         monitor.start()
     }
 
     public func deactivate() {
+        guard isActive else { return }
         monitor?.stop()
         monitor = nil
         // The first reading after the next activate() seeds the state again instead of sliding out.
@@ -62,6 +78,7 @@ public final class BatteryPlugin: NotchPlugin {
         clearChargingActivity()
         context.clear(activityID: Self.powerChangeActivityID)
         powerChange = nil
+        isActive = false
     }
 
     public var expandedTab: PluginTab? {
